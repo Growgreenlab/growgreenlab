@@ -24,6 +24,9 @@ interface Props {
   onQtyChange: (qty: string) => void;
   plannedSL: number | null;
   plannedTP: number | null;
+  activeSL: number | null;
+  activeTP: number | null;
+  hasPosition: boolean;
   onBuy: (qty: number) => string | null;
   onSell: (qty: number) => string | null;
   onPlaceLimit: (side: "buy" | "sell", qty: number, price: number) => string | null;
@@ -37,12 +40,23 @@ interface Props {
  * buy/sell, stop-loss / take-profit brackets, working limit orders, and
  * the fill ledger. Built for a narrow right-hand column.
  */
-export default function TradingPanel({ snap, qty, onQtyChange, plannedSL, plannedTP, onBuy, onSell, onPlaceLimit, onCancelOrder, onSetBrackets, disabled }: Props) {
+export default function TradingPanel({ snap, qty, onQtyChange, plannedSL, plannedTP, activeSL, activeTP, hasPosition, onBuy, onSell, onPlaceLimit, onCancelOrder, onSetBrackets, disabled }: Props) {
   const [orderType, setOrderType] = useState<"market" | "limit">("market");
   const [limitPx, setLimitPx] = useState("");
   const [sl, setSl] = useState("");
   const [tp, setTp] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
+
+  // Two-way sync: inputs follow dragged lines (planned when flat, active when positioned).
+  const sourceSL = hasPosition ? activeSL : plannedSL;
+  const sourceTP = hasPosition ? activeTP : plannedTP;
+  useEffect(() => {
+    const wantSL = sourceSL != null ? sourceSL.toFixed(2) : "";
+    const wantTP = sourceTP != null ? sourceTP.toFixed(2) : "";
+    if (sl !== wantSL) setSl(wantSL);
+    if (tp !== wantTP) setTp(wantTP);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceSL, sourceTP, hasPosition]);
 
   // clear the "working" notice once the order fills or is cancelled
   useEffect(() => {

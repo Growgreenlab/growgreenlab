@@ -14,6 +14,7 @@ import type { Candle, SessionMeta } from "../../lib/types";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
 import { diag } from "../../lib/diag";
 import { DEFAULT_HOTKEYS, isTypingTarget } from "../../lib/hotkeys";
+import { normalizePrice } from "../../lib/price";
 
 const START_CASH = 100_000;
 
@@ -183,6 +184,22 @@ function ReplayPageInner() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [version, candles]);
+
+  // Memoized brackets: stable reference unless values actually change.
+  // The key captures current values; useMemo returns the cached object
+  // when the key is identical, preventing re-renders from creating
+  // a new object every 50ms tick.
+  const bracketKey = `${plannedSL}|${plannedTP}|${engineRef.current?.stopLoss}|${engineRef.current?.takeProfit}`;
+  const brackets = useMemo(() => {
+    const eng = engineRef.current;
+    return {
+      plannedSL,
+      plannedTP,
+      activeSL: eng?.stopLoss ?? null,
+      activeTP: eng?.takeProfit ?? null,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bracketKey]);
 
   const buyErr = (qty: number): string | null => {
     const eng = engineRef.current;
@@ -385,12 +402,7 @@ function ReplayPageInner() {
                     sessionKey={`${meta.ticker}|${meta.tradeDate}|${meta.source}|${candles.length}`}
                     countdown={playing ? countdownText(eng.formationProgress, speed) : null}
                     lastPrice={snap.price}
-                    brackets={{
-                      plannedSL,
-                      plannedTP,
-                      activeSL: eng.stopLoss,
-                      activeTP: eng.takeProfit,
-                    }}
+                    brackets={brackets}
                     onPlannedDrag={(sl, tp) => { setPlannedSL(sl); setPlannedTP(tp); }}
                     onActiveDrag={(sl, tp) => {
                       const e = engineRef.current;
@@ -436,6 +448,9 @@ function ReplayPageInner() {
                 onQtyChange={setOrderQty}
                 plannedSL={plannedSL}
                 plannedTP={plannedTP}
+                activeSL={brackets.activeSL}
+                activeTP={brackets.activeTP}
+                hasPosition={eng.positionQty > 0}
                 onBuy={buyErr}
                 onSell={sellErr}
                 onPlaceLimit={placeLimitErr}
@@ -443,13 +458,16 @@ function ReplayPageInner() {
                 onSetBrackets={(sl, tp) => {
                   const eng = engineRef.current;
                   if (!eng) return;
+                  // Normalize to valid tick increments for consistency.
+                  const nSL = sl != null ? normalizePrice(sl) : null;
+                  const nTP = tp != null ? normalizePrice(tp) : null;
                   if (eng.positionQty > 0) {
                     // Position open: active brackets on the engine.
-                    eng.setBrackets(sl, tp);
+                    eng.setBrackets(nSL, nTP);
                   } else {
                     // Flat: planned levels only (dashed, no engine effect).
-                    setPlannedSL(sl);
-                    setPlannedTP(tp);
+                    setPlannedSL(nSL);
+                    setPlannedTP(nTP);
                   }
                   bump();
                 }}
@@ -463,10 +481,10 @@ function ReplayPageInner() {
                 activeSL={eng.stopLoss}
                 activeTP={eng.takeProfit}
                 hasPosition={eng.positionQty > 0}
-                onPlannedChange={(sl, tp) => { setPlannedSL(sl); setPlannedTP(tp); }}
+                onPlannedChange={(sl, tp) => { setPlannedSL(sl != null ? normalizePrice(sl) : null); setPlannedTP(tp != null ? normalizePrice(tp) : null); }}
                 onActiveChange={(sl, tp) => {
                   const e = engineRef.current;
-                  if (e) { e.setBrackets(sl, tp); bump(); }
+                  if (e) { e.setBrackets(sl != null ? normalizePrice(sl) : null, tp != null ? normalizePrice(tp) : null); bump(); }
                 }}
                 onApplyBrackets={(sl, tp) => {
                   setPlannedSL(sl);

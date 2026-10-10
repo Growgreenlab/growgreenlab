@@ -20,6 +20,7 @@ import {
 } from "lightweight-charts";
 import type { Candle } from "../lib/types";
 import { diag } from "../lib/diag";
+import { normalizePrice, formatPrice } from "../lib/price";
 
 const UP = "#2ebd85";
 const DOWN = "#f6465d";
@@ -141,6 +142,8 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
   }, []);
 
   // Sync bracket price lines (planned = dashed gray, active = solid red/green).
+  // Depends on individual values, not the brackets object identity, so the
+  // 50ms re-render cycle doesn't re-apply unchanged lines.
   useEffect(() => {
     const cs = candleSeriesRef.current;
     if (!cs) return;
@@ -159,27 +162,27 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
         }
         return;
       }
+      const label = `${title} ${formatPrice(price)}`;
       if (ref.current) {
-        ref.current.applyOptions({ price, title: `${title} ${price.toFixed(2)}` });
+        ref.current.applyOptions({ price, title: label });
       } else {
         ref.current = cs.createPriceLine({
           price,
           color,
           lineWidth: 2,
-          lineStyle: dashed ? 2 : 0, // 2 = dashed, 0 = solid
+          lineStyle: dashed ? 2 : 0,
           axisLabelVisible: true,
-          title: `${title} ${price.toFixed(2)}`,
+          title: label,
         });
       }
     };
 
-    // Don't fight an in-progress drag: skip the line being dragged.
     const dragging = dragRef.current?.kind;
     if (dragging !== "plannedSL") syncLine(plannedSLRef, brackets.plannedSL, "#9ca3af", "SL (planned)", true);
     if (dragging !== "plannedTP") syncLine(plannedTPRef, brackets.plannedTP, "#9ca3af", "TP (planned)", true);
     if (dragging !== "activeSL") syncLine(activeSLRef, brackets.activeSL, "#f6465d", "SL", false);
     if (dragging !== "activeTP") syncLine(activeTPRef, brackets.activeTP, "#2ebd85", "TP", false);
-  }, [brackets]);
+  }, [brackets.plannedSL, brackets.plannedTP, brackets.activeSL, brackets.activeTP]);
 
   // Push data: setData() only on dataset changes; update() per tick.
   useEffect(() => {
@@ -360,11 +363,13 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     }
     if (wrapRef.current) wrapRef.current.style.touchAction = "";
     if (pendingPrice != null && isFinite(pendingPrice) && pendingPrice > 0) {
+      // Normalize to valid tick increment to avoid float artifacts.
+      const clean = normalizePrice(pendingPrice);
       const b = bracketsRef.current;
-      if (drag.kind === "plannedSL") onPlannedDrag(pendingPrice, b.plannedTP);
-      else if (drag.kind === "plannedTP") onPlannedDrag(b.plannedSL, pendingPrice);
-      else if (drag.kind === "activeSL") onActiveDrag(pendingPrice, b.activeTP);
-      else if (drag.kind === "activeTP") onActiveDrag(b.activeSL, pendingPrice);
+      if (drag.kind === "plannedSL") onPlannedDrag(clean, b.plannedTP);
+      else if (drag.kind === "plannedTP") onPlannedDrag(b.plannedSL, clean);
+      else if (drag.kind === "activeSL") onActiveDrag(clean, b.activeTP);
+      else if (drag.kind === "activeTP") onActiveDrag(b.activeSL, clean);
     }
   };
 
