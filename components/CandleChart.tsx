@@ -82,7 +82,10 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
     const clampScroll = (sx: number, slot: number, n: number) => {
       const w = plotW();
       if (n * slot <= w) return (w - n * slot) / 2; // center narrow content
-      return Math.min(0, Math.max(w - n * slot, sx));
+      // Allow up to ~60% of a screen of empty space past either data edge,
+      // so the live edge can be dragged to the center/left like Webull.
+      const m = w * 0.6;
+      return Math.min(m, Math.max(w - n * slot - m, sx));
     };
     // (vertical pan uses priceShift; see the drag handler)
 
@@ -405,10 +408,10 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
         }
       } else if (pointers.size === 1 && drag) {
         const v = viewRef.current;
-        // Horizontal: timeline-style — drag LEFT to go back in time (older
-        // candles), drag RIGHT to go forward. Hard clamp: the chart stays
-        // exactly where the user leaves it.
-        v.scrollX = clampScroll(drag.scrollX - (e.clientX - drag.x), v.slot, n);
+        // Grab-style (Webull/TradingView): the candles follow your cursor.
+        // Drag left to pull the live edge toward the center/left of the
+        // screen. Hard clamp: the chart stays exactly where you leave it.
+        v.scrollX = clampScroll(drag.scrollX + (e.clientX - drag.x), v.slot, n);
         // Vertical drag pans the price scale (grab-style: content follows
         // the cursor). Convert pixels to price using the last drawn range.
         const dy = e.clientY - drag.y;
@@ -472,12 +475,19 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
     } else if (prevNRef.current === 0 || n < prevN - 5) {
       fitViewRef.current();
     } else if (n > prevN && userZoomedRef.current) {
+      // New candles arrived while panned: keep the live edge's screen
+      // position (Webull-style follow). If the user dragged the forming
+      // candles to the center, they stay centered as new ones form.
       const w = (wrapRef.current?.clientWidth ?? 800) - 68;
       const v = viewRef.current;
-      const wasPinned = Math.abs(v.scrollX - (w - prevN * v.slot)) < 2;
-      if (wasPinned) {
-        v.scrollX = v.slot * n <= w ? (w - n * v.slot) / 2 : w - n * v.slot;
+      const prevLiveX = (prevN - 1) * v.slot + v.scrollX;
+      const gap = w - prevLiveX; // empty space that was right of the live edge
+      if (gap >= -v.slot * 1.5 && gap <= w * 0.65) {
+        const m = w * 0.6;
+        const target = w - gap - (n - 1) * v.slot;
+        v.scrollX = Math.min(m, Math.max(w - n * v.slot - m, target));
       }
+      // else: user panned far from the live edge — leave the view alone.
     } else if (n > prevN && !userZoomedRef.current) {
       fitViewRef.current();
     }
