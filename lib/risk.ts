@@ -12,6 +12,8 @@ export interface RiskInputs {
   fees: number; // total estimated fees per round trip
   slippagePct: number; // e.g. 0.1 = 0.1% adverse slippage on entry+exit
   direction: "long" | "short";
+  /** If set, uses this qty instead of calculating from risk budget (for open positions). */
+  fixedQty?: number;
 }
 
 export interface RiskResult {
@@ -65,9 +67,14 @@ export function calculateRisk(inp: RiskInputs): RiskResult {
   }
 
   // Suggested qty: risk budget / per-share risk, rounded down.
-  const suggestedQty = Math.floor(riskBudget / stopDistance);
+  // If fixedQty is set (open position), use actual qty instead.
+  const suggestedQty = inp.fixedQty != null && inp.fixedQty > 0
+    ? Math.floor(inp.fixedQty)
+    : Math.floor(riskBudget / stopDistance);
   if (suggestedQty < 1) {
-    errors.push("Risk budget too small for 1 share at this stop distance.");
+    errors.push(inp.fixedQty != null
+      ? "Position quantity is zero."
+      : "Risk budget too small for 1 share at this stop distance.");
     return { ...empty, errors, riskBudget, stopDistance };
   }
 

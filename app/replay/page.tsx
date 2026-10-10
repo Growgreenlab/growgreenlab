@@ -498,6 +498,8 @@ function ReplayPageInner() {
                 activeSL={brackets.activeSL}
                 activeTP={brackets.activeTP}
                 hasPosition={eng.positionQty > 0}
+                positionAvg={eng.positionAvg}
+                positionQty={eng.positionQty}
                 onPlannedChange={(sl, tp) => { setPlannedLevels(sl != null ? normalizePrice(sl) : null, tp != null ? normalizePrice(tp) : null); }}
                 onActiveChange={(sl, tp) => {
                   const e = engineRef.current;

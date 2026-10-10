@@ -16,6 +16,8 @@ interface Props {
   activeSL: number | null;
   activeTP: number | null;
   hasPosition: boolean;
+  positionAvg: number;
+  positionQty: number;
   onPlannedChange: (sl: number | null, tp: number | null) => void;
   onActiveChange: (sl: number | null, tp: number | null) => void;
   onApplyBrackets: (sl: number | null, tp: number | null) => void;
@@ -36,6 +38,8 @@ export default function RiskCalculator({
   activeSL,
   activeTP,
   hasPosition,
+  positionAvg,
+  positionQty,
   onPlannedChange,
   onActiveChange,
   onApplyBrackets,
@@ -46,6 +50,7 @@ export default function RiskCalculator({
   const [balance, setBalance] = useState("100000");
   const [riskPct, setRiskPct] = useState("1");
   const [entry, setEntry] = useState("");
+  const [entryEdited, setEntryEdited] = useState(false);
   const [sl, setSl] = useState("");
   const [tp, setTp] = useState("");
   const [fees, setFees] = useState("0");
@@ -91,11 +96,26 @@ export default function RiskCalculator({
     else onPlannedChange(plannedSL, n);
   };
 
-  // Effective values for calculation (inputs are now the source).
-  // Effective values: typed input wins, else planned entry (fixed), else live price.
-  const effEntry = entry !== "" ? Number(entry) : (plannedEntry ?? currentPrice);
+  // Entry price source:
+  // - Active position: actual average fill from engine (locked, matches ledger).
+  // - Planning: user-typed value, else planned entry (captured), else live price.
+  //   The field is pre-filled so the source is always visible, never hidden.
+  const activeEntry = hasPosition && positionAvg > 0 ? positionAvg : null;
+
+  useEffect(() => {
+    if (!hasPosition && !entryEdited) {
+      const def = plannedEntry ?? (currentPrice > 0 ? currentPrice : null);
+      if (def != null) setEntry(def.toFixed(2));
+    }
+    if (hasPosition) setEntryEdited(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plannedEntry, currentPrice, hasPosition]);
+
+  const effEntry = activeEntry ?? (entry !== "" ? Number(entry) : 0);
   const effSL = sl !== "" ? Number(sl) : null;
   const effTP = tp !== "" ? Number(tp) : null;
+  // In active mode, use actual position qty (not suggested size).
+  const effQty = hasPosition ? positionQty : undefined;
 
   const result = useMemo(
     () =>
@@ -108,6 +128,7 @@ export default function RiskCalculator({
         fees: Number(fees) || 0,
         slippagePct: Number(slippage) || 0,
         direction,
+        fixedQty: effQty,
       }),
     [balance, riskPct, effEntry, effSL, effTP, fees, slippage, direction]
   );
@@ -175,7 +196,21 @@ export default function RiskCalculator({
             {field("Risk %", riskPct, setRiskPct)}
           </div>
           <div className="field-row" style={{ marginTop: 6 }}>
-            {field("Entry $", entry, setEntry, currentPrice ? currentPrice.toFixed(2) : "—")}
+            {hasPosition ? (
+              <div className="field">
+                <label>Entry $ (avg fill)</label>
+                <input
+                  className="input num"
+                  type="text"
+                  value={activeEntry != null ? activeEntry.toFixed(2) : "—"}
+                  disabled
+                  readOnly
+                  style={{ opacity: 0.8 }}
+                />
+              </div>
+            ) : (
+              field("Entry $ (planned)", entry, (v) => { setEntry(v); setEntryEdited(true); }, currentPrice ? currentPrice.toFixed(2) : "—", () => {})
+            )}
             <div className="field">
               <label>Direction</label>
               <div style={{ display: "flex", gap: 4 }}>
@@ -212,13 +247,27 @@ export default function RiskCalculator({
             result.valid && (
               <div style={{ marginTop: 8, fontSize: 13, lineHeight: 1.7 }}>
                 <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span className="dim">Suggested size</span>
+                  <span className="dim">Entry {hasPosition ? "(avg fill)" : "(planned)"}</span>
+                  <b>{money(effEntry)}</b>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span className="dim">{hasPosition ? "Position size" : "Suggested size"}</span>
                   <b>{result.suggestedQty.toLocaleString()} sh</b>
                 </div>
                 <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span className="dim">Risk budget</span>
-                  <span>{money(result.riskBudget)}</span>
+                  <span className="dim">Risk / share</span>
+                  <span>{money(result.stopDistance)}</span>
                 </div>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span className="dim">Reward / share</span>
+                  <span>{money(Math.abs((effTP ?? 0) - effEntry))}</span>
+                </div>
+                {!hasPosition && (
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span className="dim">Risk budget</span>
+                    <span>{money(result.riskBudget)}</span>
+                  </div>
+                )}
                 <div style={{ display: "flex", justifyContent: "space-between" }}>
                   <span className="dim">Max planned loss*</span>
                   <span style={{ color: "#f6465d" }}>{money(result.maxLoss)}</span>
@@ -241,6 +290,11 @@ export default function RiskCalculator({
                     {money(result.remainingBuyingPower)}
                   </span>
                 </div>
+                {hasPosition && (
+                  <div className="hint" style={{ marginTop: 6, fontSize: 11 }}>
+                    Position open — entry and size locked to actual fills. Dragging SL/TP recalculates risk/reward only.
+                  </div>
+                )}
                 <div className="hint" style={{ marginTop: 6, fontSize: 11, opacity: 0.7 }}>
                   *Estimates only. Real fills may differ — gaps and slippage can exceed planned risk.
                 </div>
