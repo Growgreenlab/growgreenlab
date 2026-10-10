@@ -446,14 +446,12 @@ function ReplayPageInner() {
     if (!eng) return "Load a session first.";
     const isNewPosition = eng.positionQty === 0;
     const isGuest = !guardUserId; // works with or without Supabase (localStorage fallback)
-    console.log("[gateBuy] isNewPosition:", isNewPosition, "isGuest:", isGuest, "guardUserId:", guardUserId);
     // Pre-check: block before consuming if already at limit.
     if (isNewPosition && isGuest) {
       const remaining = await getGuestTradesRemaining(
         isSupabaseConfigured() ? createClient() : null,
         getGuestFingerprint()
       );
-      console.log("[gateBuy] pre-check remaining:", remaining);
       setGuestRemaining(remaining);
       if (remaining <= 0) {
         setShowGuestModal(true);
@@ -461,19 +459,16 @@ function ReplayPageInner() {
       }
     }
     const result = buyErr(qty);
-    console.log("[gateBuy] buyErr result:", result);
     // Consume only on successful NEW position open.
     if (result === null && isNewPosition && isGuest) {
       const consumed = await consumeGuestTrade(
         isSupabaseConfigured() ? createClient() : null,
         getGuestFingerprint()
       );
-      console.log("[gateBuy] consumed:", consumed);
       const remaining = await getGuestTradesRemaining(
         isSupabaseConfigured() ? createClient() : null,
         getGuestFingerprint()
       );
-      console.log("[gateBuy] post-buy remaining:", remaining);
       setGuestRemaining(remaining);
     }
     return result;
