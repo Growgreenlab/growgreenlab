@@ -290,7 +290,7 @@ function ReplayPageInner() {
                 onPlay={() => { setEnded(false); setPlayNonce((n) => n + 1); setPlaying(true); }}
                 onPause={stopTimer}
                 onNext={() => { eng.step(); setEnded(eng.atEnd); bump(); }}
-                onReset={() => { stopTimer(); setEnded(false); eng.reset(); bump(); }}
+                onReset={() => { const wasPlaying = playing; stopTimer(); setEnded(false); eng.reset(); bump(); if (wasPlaying) { setPlayNonce((n) => n + 1); setPlaying(true); } }}
                 onRestart={() => { stopTimer(); setEnded(false); eng.reset(); bump(); setPlayNonce((n) => n + 1); setPlaying(true); }}
                 speed={speed}
                 onSpeed={setSpeed}
