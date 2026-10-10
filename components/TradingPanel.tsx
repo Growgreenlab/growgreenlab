@@ -137,6 +137,9 @@ export default function TradingPanel({ snap, qty, onQtyChange, plannedSL, planne
       <button className="btn ghost" style={{ width: "100%", marginTop: 6 }} onClick={applyBrackets} disabled={disabled}>
         Set brackets
       </button>
+      <div className="hint" style={{ marginTop: 4, opacity: 0.7 }}>
+        Tip: drag the SL/TP lines directly on the chart.
+      </div>
       {(snap.stopLoss != null || snap.takeProfit != null) && (
         <div className="hint" style={{ marginTop: 6 }}>
           Active: {snap.stopLoss != null ? `SL ${formatMoney(snap.stopLoss)}` : ""}

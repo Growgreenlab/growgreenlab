@@ -165,7 +165,7 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
         ref.current = cs.createPriceLine({
           price,
           color,
-          lineWidth: 1,
+          lineWidth: 2,
           lineStyle: dashed ? 2 : 0, // 2 = dashed, 0 = solid
           axisLabelVisible: true,
           title: `${title} ${price.toFixed(2)}`,
@@ -273,7 +273,7 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
 
   const hitTestBracket = (y: number): "plannedSL" | "plannedTP" | "activeSL" | "activeTP" | null => {
     const b = bracketsRef.current;
-    const TOL = 12; // px
+    const TOL = 16; // px — generous for high-DPI screens
     const candidates: Array<[string, number | null]> = [
       ["activeSL", b.activeSL],
       ["activeTP", b.activeTP],
@@ -287,6 +287,19 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       }
     }
     return null;
+  };
+
+  // Hover feedback: show ns-resize cursor when over a draggable line.
+  const onPointerMoveHover = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (dragRef.current) return; // already handled by drag move
+    const el = elRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const y = e.clientY - rect.top;
+    const hit = hitTestBracket(y);
+    if (wrapRef.current) {
+      wrapRef.current.style.cursor = hit ? "ns-resize" : "";
+    }
   };
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -312,7 +325,11 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     const drag = dragRef.current;
     const cs = candleSeriesRef.current;
     const el = elRef.current;
-    if (!drag || !cs || !el) return;
+    if (!drag || !cs || !el) {
+      // Not dragging: just update hover cursor.
+      onPointerMoveHover(e);
+      return;
+    }
     const rect = el.getBoundingClientRect();
     const y = e.clientY - rect.top;
     const price = cs.coordinateToPrice(y);
