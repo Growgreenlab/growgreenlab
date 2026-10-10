@@ -304,6 +304,9 @@ function ReplayPageInner() {
                   <LwcChart
                     candles={eng.displayCandles}
                     revealedCount={eng.displayCandles.length}
+                    sessionKey={`${meta.ticker}|${meta.tradeDate}|${meta.source}|${candles.length}`}
+                    countdown={playing ? countdownText(eng.formationProgress, speed) : null}
+                    lastPrice={snap.price}
                   />
                 ) : (
                 <CandleChart
