@@ -3,6 +3,7 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import CandleChart from "../../components/CandleChart";
+import LwcChart from "../../components/LwcChart";
 import DataSourcePanel from "../../components/DataSourcePanel";
 import ReplayControls from "../../components/ReplayControls";
 import TradingPanel from "../../components/TradingPanel";
@@ -299,6 +300,12 @@ function ReplayPageInner() {
                 progress={(eng.index + eng.formationProgress + 1) / Math.max(1, candles.length)}
               />
               <div className="ws-chart">
+                {searchParams.get("chart") === "lwc" ? (
+                  <LwcChart
+                    candles={eng.displayCandles}
+                    revealedCount={eng.displayCandles.length}
+                  />
+                ) : (
                 <CandleChart
                   candles={eng.displayCandles}
                   revealedCount={eng.displayCandles.length}
@@ -314,6 +321,7 @@ function ReplayPageInner() {
                     countdown: playing ? countdownText(eng.formationProgress, speed) : null,
                   }}
                 />
+                )}
               </div>
               {/* persistent P&L strip */}
               <div className="ws-pnl">
