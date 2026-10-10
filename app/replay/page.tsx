@@ -576,24 +576,39 @@ function ReplayPageInner() {
 
             {/* right: order entry + ledger */}
             <aside className="ws-right">
-              <div style={{ display: "flex", gap: 4, marginBottom: 8 }}>
+              {/* Guard alert banner — visible on all tabs when warning/lockout active */}
+              {(lockoutActive || guardWarned) && (
+                <div
+                  className={`guard-banner ${lockoutActive ? "lock" : "warn"}`}
+                  onClick={() => setRightTab("guard")}
+                  title="View Psychology Guard"
+                >
+                  <span>{lockoutActive ? "🔒" : "⚠️"}</span>
+                  <span>
+                    {lockoutActive
+                      ? `Entries locked (${guardLockout!.threshold}% loss)`
+                      : `Loss ${(guardLossPct ?? 0).toFixed(1)}% — approaching lockout`}
+                  </span>
+                  {lockoutActive && (
+                    <span className="guard-time">
+                      {formatCountdown(guardLockout!.expiry - Date.now())}
+                    </span>
+                  )}
+                </div>
+              )}
+              <div className="ws-tabs" role="tablist">
                 {(["order", "risk", "guard"] as const).map((t) => (
                   <button
                     key={t}
+                    role="tab"
+                    aria-selected={rightTab === t}
                     onClick={() => setRightTab(t)}
-                    style={{
-                      flex: 1,
-                      padding: "8px 4px",
-                      fontSize: 13,
-                      fontWeight: 600,
-                      background: rightTab === t ? "#1e40af" : "rgba(255,255,255,0.06)",
-                      color: rightTab === t ? "#fff" : "#94a3b8",
-                      border: "1px solid rgba(255,255,255,0.1)",
-                      borderRadius: 8,
-                      cursor: "pointer",
-                    }}
+                    className={`ws-tab ${rightTab === t ? "active" : ""}`}
                   >
                     {t === "order" ? "Order" : t === "risk" ? "Risk" : "Guard"}
+                    {t === "guard" && (lockoutActive || guardWarned) && (
+                      <span className="tab-dot" />
+                    )}
                   </button>
                 ))}
               </div>
