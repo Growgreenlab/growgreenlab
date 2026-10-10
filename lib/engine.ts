@@ -538,3 +538,16 @@ export function formatMoney(n: number): string {
 export function formatSigned(n: number): string {
   return `${n >= 0 ? "+" : ""}${formatMoney(n)}`;
 }
+
+/**
+ * Countdown (MM:SS) until the forming candle closes, honoring replay speed.
+ * progress is 0..1 of the current candle.
+ */
+export function countdownText(progress: number, speed: number): string {
+  const ticksPerSec = (TICKS_PER_CANDLE / SECONDS_PER_CANDLE) * speed;
+  const ticksLeft = Math.max(0, TICKS_PER_CANDLE - Math.round(progress * TICKS_PER_CANDLE));
+  const secs = Math.max(0, Math.ceil(ticksLeft / ticksPerSec));
+  const mm = String(Math.floor(secs / 60)).padStart(2, "0");
+  const ss = String(secs % 60).padStart(2, "0");
+  return `${mm}:${ss}`;
+}

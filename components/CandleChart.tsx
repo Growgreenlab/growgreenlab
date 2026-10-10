@@ -23,6 +23,8 @@ export interface ChartOverlays {
   fills: Fill[];
   lastPrice: number | null;
   pendingOrders: Array<{ side: "buy" | "sell"; price: number }>;
+  /** MM:SS countdown to the forming candle's close (null when not playing). */
+  countdown?: string | null;
 }
 
 interface Props {
@@ -47,12 +49,13 @@ interface Props {
 export default function CandleChart({ candles, revealedCount, overlays, height, historyCount = 0, sessionKey = "" }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
-  const viewRef = useRef({ slot: DEFAULT_SLOT, scrollX: 0 });
+  const viewRef = useRef({ slot: DEFAULT_SLOT, scrollX: 0, priceShift: 0 });
   const userZoomedRef = useRef(false);
   const prevNRef = useRef(0);
   const prevKeyRef = useRef("");
   const drawRef = useRef<() => void>(() => {});
   const fitViewRef = useRef<() => void>(() => {});
+  const priceHRef = useRef(0);
   const propsRef = useRef({ candles, revealedCount, overlays, height, historyCount });
   propsRef.current = { candles, revealedCount, overlays, height, historyCount };
   const [canReset, setCanReset] = useState(false);
@@ -81,14 +84,7 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
       if (n * slot <= w) return (w - n * slot) / 2; // center narrow content
       return Math.min(0, Math.max(w - n * slot, sx));
     };
-    // Looser clamp used while dragging: lets the chart stretch up to 80px
-    // past the data edge so the drag feels alive even at the boundary,
-    // then snaps back on release.
-    const clampScrollLoose = (sx: number, slot: number, n: number) => {
-      const w = plotW();
-      if (n * slot <= w) return (w - n * slot) / 2;
-      return Math.min(80, Math.max(w - n * slot - 80, sx));
-    };
+    // (vertical pan uses priceShift; see the drag handler)
 
     const fitView = () => {
       const w = plotW();
@@ -96,7 +92,7 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
       const slot = n * DEFAULT_SLOT <= w
         ? Math.min(MAX_SLOT, Math.max(MIN_SLOT, w / n))
         : DEFAULT_SLOT;
-      viewRef.current = { slot, scrollX: clampScroll(w - n * slot, slot, n) };
+      viewRef.current = { slot, scrollX: clampScroll(w - n * slot, slot, n), priceShift: 0 };
       userZoomedRef.current = false;
       setCanReset(false);
     };
@@ -131,6 +127,7 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
       const pw = plotW();
       const volH = Math.floor(h * 0.24);
       const priceH = h - PAD_B - PAD_T - volH - PANE_GAP;
+      priceHRef.current = priceH;
       const volTop = PAD_T + priceH + PANE_GAP;
       const v = viewRef.current;
       const slot = v.slot;
@@ -166,6 +163,11 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
       if (!isFinite(lo)) { lo = 0; hi = 1; }
       const pad = (hi - lo) * 0.08 || 1;
       hi += pad; lo -= pad;
+      // Manual vertical pan (drag up/down): shifts the price window. Reset
+      // by double-click / Reset zoom / new session.
+      const range = hi - lo;
+      const shift = Math.max(-range * 2, Math.min(range * 2, viewRef.current.priceShift));
+      lo += shift; hi += shift;
       const y = (pr: number) => PAD_T + (1 - (pr - lo) / (hi - lo)) * priceH;
       const histN = Math.min(p.historyCount, n);
 
@@ -321,6 +323,22 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
         ctx.shadowBlur = 0;
         ctx.fillStyle = "#ffffff";
         ctx.fillText(label, pw + 9, py + 15);
+        // Webull-style countdown: time left in the forming candle, pinned
+        // just under the last-price tag in the axis.
+        if (ov.countdown) {
+          ctx.font = "700 11px ui-monospace, monospace";
+          const ctw = ctx.measureText(ov.countdown).width;
+          const cph = 20, cpw = ctw + 14;
+          const cpy = Math.max(2, Math.min(h - cph - 2, py + ph + 4));
+          ctx.fillStyle = "rgba(10, 14, 20, 0.92)";
+          ctx.strokeStyle = "rgba(148, 163, 184, 0.35)";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.roundRect(pw + 2, cpy, PAD_R - 5, cph, 5);
+          ctx.fill(); ctx.stroke();
+          ctx.fillStyle = "#e2e8f0";
+          ctx.fillText(ov.countdown, pw + 2 + (PAD_R - 5 - ctw) / 2, cpy + 14);
+        }
       }
 
       for (const f of ov.fills) {
@@ -350,7 +368,7 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
 
     const pointers = new Map<number, { x: number; y: number }>();
     let pinch: { dist: number; midX: number } | null = null;
-    let drag: { x: number; scrollX: number } | null = null;
+    let drag: { x: number; y: number; scrollX: number; priceShift: number } | null = null;
 
     const onPointerDown = (e: PointerEvent) => {
       pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -364,7 +382,7 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
         };
         drag = null;
       } else if (pointers.size === 1) {
-        drag = { x: e.clientX, scrollX: viewRef.current.scrollX };
+        drag = { x: e.clientX, y: e.clientY, scrollX: viewRef.current.scrollX, priceShift: viewRef.current.priceShift };
         canvas.style.cursor = "grabbing";
       }
     };
@@ -383,7 +401,20 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
         }
       } else if (pointers.size === 1 && drag) {
         const v = viewRef.current;
-        v.scrollX = clampScrollLoose(drag.scrollX + (e.clientX - drag.x), v.slot, n);
+        // Hard clamp: the chart stays exactly where the user leaves it.
+        v.scrollX = clampScroll(drag.scrollX + (e.clientX - drag.x), v.slot, n);
+        // Vertical drag pans the price scale (grab-style: content follows
+        // the cursor). Convert pixels to price using the last drawn range.
+        const dy = e.clientY - drag.y;
+        if (dy !== 0 && priceHRef.current > 0) {
+          const p = propsRef.current;
+          const data = p.candles.slice(0, Math.max(0, Math.min(p.revealedCount, p.candles.length)));
+          let vlo = Infinity, vhi = -Infinity;
+          for (const c of data) { if (c.l < vlo) vlo = c.l; if (c.h > vhi) vhi = c.h; }
+          if (isFinite(vlo) && vhi > vlo) {
+            v.priceShift = drag.priceShift + (dy / priceHRef.current) * (vhi - vlo);
+          }
+        }
         markZoomed();
         drawRef.current();
       }
@@ -394,14 +425,7 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
       if (pointers.size === 0) {
         drag = null;
         canvas.style.cursor = "grab";
-        // snap back any elastic overscroll at the data edges
-        const v = viewRef.current;
-        const n = dataOf().length;
-        const snapped = clampScroll(v.scrollX, v.slot, n);
-        if (snapped !== v.scrollX) {
-          v.scrollX = snapped;
-          drawRef.current();
-        }
+        // No snap-back: the chart stays exactly where the user left it.
       }
     };
     const onDblClick = () => { fitViewRef.current(); drawRef.current(); };

@@ -3,10 +3,13 @@
 interface Props {
   playing: boolean;
   canPlay: boolean;
+  /** True when the replay reached the final candle. Play becomes restart. */
+  ended?: boolean;
   onPlay: () => void;
   onPause: () => void;
   onNext: () => void;
   onReset: () => void;
+  onRestart?: () => void;
   speed: number;
   onSpeed: (s: number) => void;
   index: number;
@@ -27,9 +30,15 @@ export default function ReplayControls(p: Props) {
     <>
       <div className="controlsbar">
         {!p.playing ? (
-          <button className="btn primary ctl-btn ctl-play" disabled={!p.canPlay} onClick={p.onPlay} title="Play">
-            ▶
-          </button>
+          p.ended ? (
+            <button className="btn primary ctl-btn ctl-play" onClick={p.onRestart ?? p.onReset} title="Replay from the start">
+              ↺
+            </button>
+          ) : (
+            <button className="btn primary ctl-btn ctl-play" disabled={!p.canPlay} onClick={p.onPlay} title="Play">
+              ▶
+            </button>
+          )
         ) : (
           <button className="btn ctl-btn ctl-play" onClick={p.onPause} title="Pause">
             ⏸
@@ -54,7 +63,9 @@ export default function ReplayControls(p: Props) {
             </button>
           ))}
         </div>
-        <div className="ctl-count num">Candle {Math.min(p.index + 2, p.total)} / {p.total}</div>
+        <div className="ctl-count num">
+          {p.ended ? "Replay complete" : <>Candle {Math.min(p.index + 2, p.total)} / {p.total}</>}
+        </div>
       </div>
       <div className="progress" aria-hidden>
         <i style={{ width: `${pct}%` }} />

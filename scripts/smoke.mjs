@@ -387,6 +387,18 @@ const tape = [
   ok(e.displayCandles[e.displayCandles.length - 1].t === cs[535].t, "reset re-arms 12:55");
 }
 
+// 21. countdown honors replay speed
+{
+  const { countdownText } = require(join(OUT, "engine.js"));
+  const seq = (a, b, name) => ok(a === b, `${name} (got ${a}, want ${b})`);
+  seq(countdownText(0, 1), "01:00", "full candle at 1x");
+  seq(countdownText(0.5, 1), "00:30", "half candle at 1x");
+  seq(countdownText(0, 2), "00:30", "full candle at 2x");
+  seq(countdownText(0, 8), "00:08", "full candle at 8x (rounded up)");
+  seq(countdownText(1, 1), "00:00", "closed candle");
+  seq(countdownText(0.99, 8), "00:01", "last ticks at 8x");
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 rmSync(OUT, { recursive: true, force: true });
 process.exit(failed ? 1 : 0);

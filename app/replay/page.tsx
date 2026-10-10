@@ -6,7 +6,7 @@ import CandleChart from "../../components/CandleChart";
 import DataSourcePanel from "../../components/DataSourcePanel";
 import ReplayControls from "../../components/ReplayControls";
 import TradingPanel from "../../components/TradingPanel";
-import { ReplayEngine, formatMoney, formatSigned, TICKS_PER_CANDLE, SECONDS_PER_CANDLE } from "../../lib/engine";
+import { ReplayEngine, formatMoney, formatSigned, countdownText, TICKS_PER_CANDLE, SECONDS_PER_CANDLE } from "../../lib/engine";
 import type { Candle, SessionMeta } from "../../lib/types";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
 
@@ -21,6 +21,7 @@ function ReplayPageInner() {
   const [meta, setMeta] = useState<SessionMeta | null>(null);
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(1);
+  const [ended, setEnded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
   const [loadingSession, setLoadingSession] = useState(false);
@@ -41,43 +42,55 @@ function ReplayPageInner() {
     return () => document.body.classList.remove("ws-active");
   }, []);
 
-  // Play loop: wall-clock paced ticks. 1x = live market speed: each
-  // 1-minute candle forms gradually over 60 real seconds, the price
-  // ticking continuously as the candle builds, then finalizing.
+  // Play loop: deadline-based tick clock. 1x = live market speed — each
+  // 1-minute candle forms over 60 real seconds, ticking continuously, then
+  // finalizes exactly when its countdown reaches zero. Deadlines (not an
+  // accumulator) keep long-term timing exact; if the tab was backgrounded
+  // or the laptop slept, the clock re-anchors instead of firing a burst of
+  // catch-up ticks that would saturate the main thread and look frozen.
   useEffect(() => {
     if (!playing) return;
     const eng = engineRef.current;
     if (!eng) return;
-    let last = performance.now();
-    let acc = 0;
+    // Guard against duplicate timers: only one interval may exist.
+    if (timerRef.current) clearInterval(timerRef.current);
+    const tickMs = 1000 / ((TICKS_PER_CANDLE / SECONDS_PER_CANDLE) * speed);
+    let nextTick = performance.now();
+    let done = false;
     const id = setInterval(() => {
+      if (done) return;
       const now = performance.now();
-      // Cap the delta: a hidden tab, laptop sleep, or devtools pause can
-      // leave a gap of minutes/hours. Accumulating all of it would fire
-      // thousands of catch-up ticks back-to-back, saturating the main
-      // thread so the chart appears frozen. The replay simply resumes
-      // from the live edge instead, like a real terminal.
-      const dt = Math.min((now - last) / 1000, 0.25);
-      last = now;
-      acc += dt * speed * (TICKS_PER_CANDLE / SECONDS_PER_CANDLE);
-      let finished = false;
-      let guard = 0;
+      // Fell behind by more than a second (hidden tab / sleep / pause in
+      // devtools): resume from the live edge instead of bursting.
+      if (now - nextTick > 1000) nextTick = now;
       let ran = 0;
-      while (acc >= 1 && guard++ < 2000) {
-        acc -= 1;
-        ran++;
+      let finished = false;
+      while (nextTick <= now && ran < 60) {
         const r = eng.tick();
-        if (r.atEnd) { finished = true; acc = 0; break; }
+        ran++;
+        nextTick += tickMs;
+        if (r.atEnd) { finished = true; break; }
       }
       if (ran > 0) bump();
-      if (finished) stopTimer();
+      if (finished) {
+        done = true;
+        if (timerRef.current) clearInterval(timerRef.current);
+        timerRef.current = null;
+        setPlaying(false);
+        setEnded(true);
+      }
     }, 50);
-    return () => clearInterval(id);
+    timerRef.current = id;
+    return () => {
+      clearInterval(id);
+      if (timerRef.current === id) timerRef.current = null;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playing, speed]);
 
   const handleLoad = useCallback((cs: Candle[], m: SessionMeta) => {
     stopTimer();
+    setEnded(false);
     engineRef.current = new ReplayEngine(cs, START_CASH, m.startIndex);
     setCandles(cs);
     setMeta(m);
@@ -107,6 +120,7 @@ function ReplayPageInner() {
           .eq("session_id", id)
           .order("created_at", { ascending: true });
         stopTimer();
+        setEnded(false);
         const eng = new ReplayEngine(cs, START_CASH, s.start_index ?? 0);
         // fast-forward through the recorded fills to rebuild state,
         // replaying each at its exact recorded price for P/L fidelity
@@ -267,10 +281,12 @@ function ReplayPageInner() {
                 compact
                 playing={playing}
                 canPlay={!eng.atEnd}
-                onPlay={() => setPlaying(true)}
+                ended={ended}
+                onPlay={() => { setEnded(false); setPlaying(true); }}
                 onPause={stopTimer}
-                onNext={() => { eng.step(); bump(); }}
-                onReset={() => { stopTimer(); eng.reset(); bump(); }}
+                onNext={() => { eng.step(); setEnded(eng.atEnd); bump(); }}
+                onReset={() => { stopTimer(); setEnded(false); eng.reset(); bump(); }}
+                onRestart={() => { stopTimer(); setEnded(false); eng.reset(); bump(); setPlaying(true); }}
                 speed={speed}
                 onSpeed={setSpeed}
                 index={eng.index}
@@ -290,6 +306,7 @@ function ReplayPageInner() {
                     fills: eng.fills,
                     lastPrice: snap.price,
                     pendingOrders: eng.pendingOrders.map((o) => ({ side: o.side, price: o.limitPrice })),
+                    countdown: playing ? countdownText(eng.formationProgress, speed) : null,
                   }}
                 />
               </div>
