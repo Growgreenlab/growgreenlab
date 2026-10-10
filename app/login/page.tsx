@@ -66,6 +66,28 @@ function LoginInner() {
     }
   };
 
+  const handleResendConfirmation = async () => {
+    if (!configured || !email) return;
+    setError(null);
+    setBusy(true);
+    try {
+      const supabase = createClient();
+      const { error } = await supabase.auth.resend({
+        type: "signup",
+        email: email.trim(),
+        options: {
+          emailRedirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent(next)}`,
+        },
+      });
+      if (error) throw new Error(error.message);
+      setSent(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not resend email.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleMagicLink = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!configured) return;
@@ -173,6 +195,16 @@ function LoginInner() {
             )}
 
             {error && <div className="err" style={{ marginTop: 12 }}>{error}</div>}
+            {error === "Email not confirmed" && (
+              <button
+                onClick={handleResendConfirmation}
+                disabled={busy}
+                className="btn"
+                style={{ marginTop: 10, width: "100%" }}
+              >
+                {busy ? "Sending…" : "Resend confirmation email"}
+              </button>
+            )}
 
             <p className="hint" style={{ marginTop: 16, textAlign: "center" }}>
               {mode === "magic" ? (
