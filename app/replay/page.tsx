@@ -4,12 +4,14 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { useSearchParams } from "next/navigation";
 import CandleChart from "../../components/CandleChart";
 import LwcChart from "../../components/LwcChart";
+import DiagPanel from "../../components/DiagPanel";
 import DataSourcePanel from "../../components/DataSourcePanel";
 import ReplayControls from "../../components/ReplayControls";
 import TradingPanel from "../../components/TradingPanel";
 import { ReplayEngine, formatMoney, formatSigned, countdownText, TICKS_PER_CANDLE, SECONDS_PER_CANDLE } from "../../lib/engine";
 import type { Candle, SessionMeta } from "../../lib/types";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
+import { diag } from "../../lib/diag";
 
 const START_CASH = 100_000;
 
@@ -66,12 +68,20 @@ function ReplayPageInner() {
     const id = setInterval(() => {
       if (done) return;
       const now = performance.now();
+      // Diagnostics: track timer health.
+      diag.timerFires++;
+      if (diag.lastTimerFire !== null) {
+        diag.maxFireGapMs = Math.max(diag.maxFireGapMs, now - diag.lastTimerFire);
+      }
+      diag.lastTimerFire = now;
       // Fell behind by more than a second (hidden tab / sleep / pause in
       // devtools): resume from the live edge instead of bursting.
       if (now - nextTick > 1000) nextTick = now;
       let ran = 0;
       let finished = false;
       while (nextTick <= now && ran < 60) {
+        diag.tickCalls++;
+        diag.lastTick = performance.now();
         const r = eng.tick();
         ran++;
         nextTick += tickMs;
@@ -375,6 +385,14 @@ function ReplayPageInner() {
               <button className="mini-x ws-data-x" onClick={() => setDataOpen(false)} title="Close">✕</button>
               <DataSourcePanel candles={candles} meta={meta} onLoad={handleLoad} />
             </div>
+          )}
+          {searchParams.get("diag") === "1" && eng && (
+            <DiagPanel
+              playing={playing}
+              candleIndex={eng.index}
+              formationProgress={eng.formationProgress}
+              speed={speed}
+            />
           )}
         </>
       )}

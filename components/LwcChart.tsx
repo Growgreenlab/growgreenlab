@@ -18,6 +18,7 @@ import {
   type UTCTimestamp,
 } from "lightweight-charts";
 import type { Candle } from "../lib/types";
+import { diag } from "../lib/diag";
 
 const UP = "#2ebd85";
 const DOWN = "#f6465d";
@@ -140,29 +141,47 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     });
 
     const prev = pushedRef.current;
-    if (!prev || prev.key !== sessionKey || n < prev.n) {
-      // New session, reset, or dataset shrank: full replace.
-      const bars = [];
-      const vols = [];
-      for (let i = 0; i < n; i++) {
-        bars.push(toBar(candles[i]));
-        vols.push(toVol(candles[i]));
+    try {
+      if (!prev || prev.key !== sessionKey || n < prev.n) {
+        // New session, reset, or dataset shrank: full replace.
+        const bars = [];
+        const vols = [];
+        for (let i = 0; i < n; i++) {
+          bars.push(toBar(candles[i]));
+          vols.push(toVol(candles[i]));
+        }
+        cs.setData(bars);
+        vs.setData(vols);
+        pushedRef.current = { key: sessionKey, n };
+      } else if (n === prev.n) {
+        // Same bars; only the forming (last) candle changed: efficient update.
+        const c = candles[n - 1];
+        cs.update(toBar(c));
+        vs.update(toVol(c));
+      } else {
+        // New candle(s) appended: update() appends when the time is newer.
+        for (let i = prev.n; i < n; i++) {
+          cs.update(toBar(candles[i]));
+          vs.update(toVol(candles[i]));
+        }
+        pushedRef.current = { key: sessionKey, n };
       }
-      cs.setData(bars);
-      vs.setData(vols);
-      pushedRef.current = { key: sessionKey, n };
-    } else if (n === prev.n) {
-      // Same bars; only the forming (last) candle changed: efficient update.
-      const c = candles[n - 1];
-      cs.update(toBar(c));
-      vs.update(toVol(c));
-    } else {
-      // New candle(s) appended: update() appends when the time is newer.
-      for (let i = prev.n; i < n; i++) {
-        cs.update(toBar(candles[i]));
-        vs.update(toVol(candles[i]));
+      // Diagnostics: track chart update health.
+      diag.chartUpdates++;
+      diag.lastChartUpdate = performance.now();
+      const lastC = candles[n - 1];
+      const tSec = Math.floor(lastC.t / 1000);
+      if (diag.lastUpdateTimeSec !== null && tSec < diag.lastUpdateTimeSec) {
+        diag.timestampViolations++;
       }
-      pushedRef.current = { key: sessionKey, n };
+      diag.lastUpdateTimeSec = tSec;
+      const ohlc = `${lastC.o}|${lastC.h}|${lastC.l}|${lastC.c}`;
+      if (diag.lastOhlc !== ohlc) {
+        diag.ohlcChanges++;
+        diag.lastOhlc = ohlc;
+      }
+    } catch (e) {
+      diag.errors.push(e instanceof Error ? e.message : String(e));
     }
 
     // Position the countdown pill under the last-price tag.
