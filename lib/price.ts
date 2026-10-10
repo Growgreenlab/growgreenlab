@@ -8,11 +8,13 @@ export const EQUITY_TICK_SIZE = 0.01;
 
 /**
  * Normalize a price to the instrument's valid tick increment.
- * Eliminates floating-point artifacts like 3.200000047683716.
+ * Uses toFixed to eliminate floating-point artifacts like 3.200000047683716.
+ * Math.round(price / tickSize) * tickSize does NOT work because tickSize
+ * (0.01) cannot be represented exactly in binary.
  */
-export function normalizePrice(price: number, tickSize: number = EQUITY_TICK_SIZE): number {
+export function normalizePrice(price: number, decimals: number = 2): number {
   if (!isFinite(price) || price <= 0) return price;
-  return Math.round(price / tickSize) * tickSize;
+  return Number(price.toFixed(decimals));
 }
 
 /** Format a price for display (2 decimals for equities). */
