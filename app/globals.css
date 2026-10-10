@@ -90,6 +90,9 @@ button { font-family: inherit; }
   box-shadow: 0 4px 16px var(--emerald-glow);
   transition: transform .25s ease;
 }
+.brand-logo-wide {
+  height: 38px; width: auto; display: block; border-radius: 8px;
+}
 .brand:hover .brand-logo { transform: scale(1.06) rotate(-2deg); }
 .brand-text { display: flex; flex-direction: column; line-height: 1.15; }
 .brand-name { font-weight: 800; font-size: 16.5px; letter-spacing: 0.2px; }
