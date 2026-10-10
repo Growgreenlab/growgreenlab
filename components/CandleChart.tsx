@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Candle, Fill } from "../lib/types";
 import { formatEtTime } from "../lib/marketData";
 
@@ -10,6 +10,11 @@ const DOWN = "#f6465d";
 const GRID = "rgba(148, 163, 184, 0.09)";
 const AXIS = "#8b9bab";
 const HOD_COLOR = "#fbbf24";
+
+// Viewport limits: px per candle slot
+const MIN_SLOT = 1.5;
+const MAX_SLOT = 48;
+const DEFAULT_SLOT = 6; // ~150 candles visible at rest, like a pro terminal
 
 export interface ChartOverlays {
   hod: number | null;
@@ -29,250 +34,414 @@ interface Props {
 }
 
 /**
- * Hand-rolled canvas candlestick chart in a professional dark style:
- * dense thin candles, full grid, dedicated volume pane below the price
- * pane, crisp time/price axes. Only the revealed prefix of the candle
- * array is ever drawn, so future candles stay hidden.
+ * Hand-rolled canvas candlestick chart in a professional dark style with a
+ * real viewport model: mouse-wheel / pinch zoom (anchored at the cursor),
+ * drag to pan through history, double-click to reset. Candle width and
+ * spacing scale together with zoom; volume bars share the same x-mapping
+ * so everything stays aligned. Only the revealed prefix is ever drawn.
  */
 export default function CandleChart({ candles, revealedCount, overlays, height = 460, historyCount = 0 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
+  const viewRef = useRef({ slot: DEFAULT_SLOT, scrollX: 0 });
+  const userZoomedRef = useRef(false);
+  const prevNRef = useRef(0);
+  const drawRef = useRef<() => void>(() => {});
+  const fitViewRef = useRef<() => void>(() => {});
+  const propsRef = useRef({ candles, revealedCount, overlays, height, historyCount });
+  propsRef.current = { candles, revealedCount, overlays, height, historyCount };
+  const [canReset, setCanReset] = useState(false);
 
+  const markZoomed = () => {
+    if (!userZoomedRef.current) {
+      userZoomedRef.current = true;
+      setCanReset(true);
+    }
+  };
+
+  // Mount-once: define draw/fit, attach listeners.
   useEffect(() => {
     const canvas = canvasRef.current;
     const wrap = wrapRef.current;
     if (!canvas || !wrap) return;
-    const ro = new ResizeObserver(() => draw());
+
+    const PAD_R = 68, PAD_B = 24, PAD_T = 14, PANE_GAP = 10;
+    const plotW = () => wrap.clientWidth - PAD_R;
+    const dataOf = () => {
+      const p = propsRef.current;
+      return p.candles.slice(0, Math.max(0, Math.min(p.revealedCount, p.candles.length)));
+    };
+    const clampScroll = (sx: number, slot: number, n: number) => {
+      const w = plotW();
+      if (n * slot <= w) return (w - n * slot) / 2; // center narrow content
+      return Math.min(0, Math.max(w - n * slot, sx));
+    };
+
+    const fitView = () => {
+      const w = plotW();
+      const n = Math.max(1, dataOf().length);
+      const slot = n * DEFAULT_SLOT <= w
+        ? Math.min(MAX_SLOT, Math.max(MIN_SLOT, w / n))
+        : DEFAULT_SLOT;
+      viewRef.current = { slot, scrollX: clampScroll(w - n * slot, slot, n) };
+      userZoomedRef.current = false;
+      setCanReset(false);
+    };
+    fitViewRef.current = fitView;
+
+    const zoomAt = (cx: number, factor: number) => {
+      const n = dataOf().length;
+      if (n === 0) return;
+      const v = viewRef.current;
+      const idx = (cx - v.scrollX) / v.slot; // candle position under cursor
+      const slot = Math.min(MAX_SLOT, Math.max(MIN_SLOT, v.slot * factor));
+      if (slot === v.slot) return;
+      v.slot = slot;
+      v.scrollX = clampScroll(cx - idx * slot, slot, n); // keep cursor anchored
+      markZoomed();
+      drawRef.current();
+    };
+
+    const draw = () => {
+      const p = propsRef.current;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const w = wrap.clientWidth;
+      const h = p.height;
+      canvas.width = w * dpr;
+      canvas.height = h * dpr;
+      canvas.style.width = `${w}px`;
+      canvas.style.height = `${h}px`;
+      const ctx = canvas.getContext("2d")!;
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, w, h);
+
+      const pw = plotW();
+      const volH = Math.floor(h * 0.24);
+      const priceH = h - PAD_B - PAD_T - volH - PANE_GAP;
+      const volTop = PAD_T + priceH + PANE_GAP;
+      const v = viewRef.current;
+      const slot = v.slot;
+      const x = (i: number) => v.scrollX + i * slot + slot / 2;
+      const bodyW = Math.max(1, Math.min(slot * 0.7, 22));
+
+      const bgGrad = ctx.createLinearGradient(0, 0, 0, h);
+      bgGrad.addColorStop(0, "#0c1014");
+      bgGrad.addColorStop(1, "#090c0f");
+      ctx.fillStyle = bgGrad;
+      ctx.fillRect(0, 0, w, h);
+
+      const data = dataOf();
+      const n = data.length;
+      if (n === 0) {
+        ctx.fillStyle = AXIS;
+        ctx.font = "13px system-ui";
+        ctx.fillText("Load a session to begin the replay.", 16, 40);
+        return;
+      }
+
+      // visible window
+      const i0 = Math.max(0, Math.floor((0 - v.scrollX) / slot));
+      const i1 = Math.min(n - 1, Math.ceil((pw - v.scrollX) / slot));
+      const d0 = Math.max(0, i0 - 1), d1 = Math.min(n - 1, i1 + 1);
+
+      let lo = Infinity, hi = -Infinity, vMax = 0;
+      for (let i = i0; i <= i1; i++) {
+        const c = data[i];
+        lo = Math.min(lo, c.l); hi = Math.max(hi, c.h);
+        vMax = Math.max(vMax, c.v);
+      }
+      if (!isFinite(lo)) { lo = 0; hi = 1; }
+      const pad = (hi - lo) * 0.08 || 1;
+      hi += pad; lo -= pad;
+      const y = (pr: number) => PAD_T + (1 - (pr - lo) / (hi - lo)) * priceH;
+      const histN = Math.min(p.historyCount, n);
+
+      // volume pane backdrop + separator
+      ctx.fillStyle = "rgba(148, 163, 184, 0.03)";
+      ctx.fillRect(0, volTop, pw, volH + PAD_B);
+      ctx.strokeStyle = "rgba(148, 163, 184, 0.14)";
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(0, volTop + 0.5); ctx.lineTo(pw, volTop + 0.5); ctx.stroke();
+
+      // horizontal grid + price axis
+      ctx.strokeStyle = GRID; ctx.fillStyle = AXIS;
+      ctx.font = "11px ui-monospace, SFMono-Regular, monospace";
+      ctx.lineWidth = 1;
+      const ticks = 6;
+      for (let i = 0; i <= ticks; i++) {
+        const pr = lo + ((hi - lo) * i) / ticks;
+        const yy = Math.round(y(pr)) + 0.5;
+        ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(pw, yy); ctx.stroke();
+        ctx.fillText(pr.toFixed(2), pw + 8, yy + 4);
+      }
+
+      // vertical gridlines (~90px rhythm)
+      ctx.strokeStyle = "rgba(148, 163, 184, 0.05)";
+      const firstGrid = Math.ceil((0 - v.scrollX) / 90);
+      for (let gx = firstGrid * 90; gx < pw; gx += 90) {
+        const xx = Math.round(gx) + 0.5;
+        ctx.beginPath(); ctx.moveTo(xx, PAD_T); ctx.lineTo(xx, volTop + volH); ctx.stroke();
+      }
+
+      // time axis: adaptive minute steps, aligned to marks, de-collided
+      const stepMin = slot >= 28 ? 1 : slot >= 10 ? 5 : slot >= 3.5 ? 15 : 30;
+      ctx.fillStyle = AXIS;
+      ctx.textAlign = "center";
+      let lastLabelX = -Infinity;
+      for (let i = d0; i <= d1; i++) {
+        const d = new Date(data[i].t);
+        const xx = x(i);
+        if (d.getMinutes() % stepMin === 0 && xx - lastLabelX > 56 && xx > -20 && xx < pw + 20) {
+          ctx.fillText(formatEtTime(data[i].t), xx, h - 8);
+          lastLabelX = xx;
+        }
+      }
+      const lastX = x(i1);
+      if (lastX - lastLabelX > 40 && lastX < pw - 20) {
+        ctx.fillStyle = "#a9bcc9";
+        ctx.fillText(formatEtTime(data[i1].t), lastX, h - 8);
+      }
+      ctx.textAlign = "left";
+
+      // watermark when leading candles are simulated premarket context
+      if (data.some((c) => c.syn)) {
+        ctx.font = "600 10px ui-monospace, monospace";
+        const label = "SIMULATED PREMARKET CONTEXT";
+        const tw = ctx.measureText(label).width;
+        ctx.fillStyle = "rgba(251, 191, 36, 0.10)";
+        ctx.strokeStyle = "rgba(251, 191, 36, 0.45)";
+        ctx.lineWidth = 1;
+        const bx = 8, by = PAD_T + 4, bw = tw + 16, bh = 20;
+        ctx.beginPath();
+        ctx.roundRect(bx, by, bw, bh, 6);
+        ctx.fill(); ctx.stroke();
+        ctx.fillStyle = "rgba(251, 191, 36, 0.9)";
+        ctx.fillText(label, bx + 8, by + 13.5);
+      }
+
+      // volume bars — same x-mapping as candles, always aligned
+      for (let i = d0; i <= d1; i++) {
+        const c = data[i];
+        const vh = vMax > 0 ? Math.max(1, (c.v / vMax) * (volH - 4)) : 0;
+        ctx.globalAlpha = i < histN ? 0.28 : 1;
+        ctx.fillStyle = c.c >= c.o ? "rgba(46,189,133,0.55)" : "rgba(246,70,93,0.55)";
+        ctx.fillRect(x(i) - bodyW / 2, volTop + volH - vh, bodyW, vh);
+      }
+      ctx.globalAlpha = 1;
+
+      // candles
+      for (let i = d0; i <= d1; i++) {
+        const c = data[i];
+        const isUp = c.c >= c.o;
+        const col = isUp ? UP : DOWN;
+        const cx = x(i);
+        const dimmed = i < histN;
+        ctx.globalAlpha = dimmed ? 0.42 : 1;
+        ctx.strokeStyle = col;
+        ctx.lineWidth = Math.max(1, bodyW * 0.16);
+        ctx.beginPath(); ctx.moveTo(cx, y(c.h)); ctx.lineTo(cx, y(c.l)); ctx.stroke();
+        const yo = y(c.o), yc = y(c.c);
+        const top = Math.min(yo, yc);
+        const bh = Math.max(1.5, Math.abs(yc - yo));
+        ctx.fillStyle = col;
+        if (i === n - 1 && !dimmed) { ctx.shadowColor = col; ctx.shadowBlur = 10; }
+        ctx.fillRect(cx - bodyW / 2, top, bodyW, bh);
+        ctx.shadowBlur = 0;
+      }
+      ctx.globalAlpha = 1;
+
+      const pill = (text: string, color: string, yy: number) => {
+        ctx.font = "600 10.5px ui-monospace, monospace";
+        const tw = ctx.measureText(text).width;
+        const pw2 = tw + 14, ph = 18;
+        const px = 6, py = Math.max(PAD_T + 2, Math.min(PAD_T + priceH - ph - 2, yy - ph - 4));
+        ctx.fillStyle = "rgba(6,10,12,0.9)";
+        ctx.strokeStyle = color; ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.roundRect(px, py, pw2, ph, 9);
+        ctx.fill(); ctx.stroke();
+        ctx.fillStyle = color;
+        ctx.fillText(text, px + 7, py + 12.5);
+      };
+
+      const hline = (price: number, color: string, label: string, dashed = true) => {
+        const yy = y(price);
+        if (yy < PAD_T || yy > PAD_T + priceH) return;
+        ctx.strokeStyle = color; ctx.lineWidth = 1.2;
+        ctx.setLineDash(dashed ? [6, 4] : []);
+        ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(pw, yy); ctx.stroke();
+        ctx.setLineDash([]);
+        pill(label, color, yy);
+      };
+
+      const ov = p.overlays;
+      if (ov.hod != null) hline(ov.hod, HOD_COLOR, `HOD ${ov.hod.toFixed(2)}`);
+      if (ov.stopLoss != null) hline(ov.stopLoss, DOWN, `SL ${ov.stopLoss.toFixed(2)}`);
+      if (ov.takeProfit != null) hline(ov.takeProfit, UP, `TP ${ov.takeProfit.toFixed(2)}`);
+
+      if (ov.lastPrice != null) {
+        const pr = ov.lastPrice;
+        const yy = Math.max(PAD_T, Math.min(PAD_T + priceH, y(pr)));
+        const lastC = data[n - 1];
+        const tagCol = pr >= lastC.o ? UP : DOWN;
+        ctx.strokeStyle = tagCol; ctx.globalAlpha = 0.45; ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath(); ctx.moveTo(0, Math.round(yy) + 0.5); ctx.lineTo(pw, Math.round(yy) + 0.5); ctx.stroke();
+        ctx.setLineDash([]); ctx.globalAlpha = 1;
+        const label = pr.toFixed(2);
+        ctx.font = "700 11.5px ui-monospace, monospace";
+        const tw = ctx.measureText(label).width;
+        const pw2 = tw + 14, ph = 22;
+        const py = Math.max(2, Math.min(h - ph - 2, yy - ph / 2));
+        ctx.fillStyle = tagCol;
+        ctx.shadowColor = tagCol; ctx.shadowBlur = 12;
+        ctx.beginPath();
+        ctx.roundRect(pw + 2, py, PAD_R - 5, ph, 5);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = "#ffffff";
+        ctx.fillText(label, pw + 9, py + 15);
+      }
+
+      for (const f of ov.fills) {
+        if (f.candleIndex < d0 - 2 || f.candleIndex > d1 + 2 || f.candleIndex >= n) continue;
+        const cx = x(f.candleIndex);
+        const c = data[f.candleIndex];
+        if (f.side === "buy") {
+          const yy = y(c.l) + 12;
+          ctx.fillStyle = UP;
+          ctx.beginPath(); ctx.moveTo(cx, yy); ctx.lineTo(cx - 5, yy + 8); ctx.lineTo(cx + 5, yy + 8); ctx.closePath(); ctx.fill();
+        } else {
+          const yy = y(c.h) - 12;
+          ctx.fillStyle = DOWN;
+          ctx.beginPath(); ctx.moveTo(cx, yy); ctx.lineTo(cx - 5, yy - 8); ctx.lineTo(cx + 5, yy - 8); ctx.closePath(); ctx.fill();
+        }
+      }
+    };
+    drawRef.current = draw;
+
+    // ---- interactions ----
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      zoomAt(e.clientX - rect.left, Math.pow(1.0015, -e.deltaY));
+    };
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+
+    const pointers = new Map<number, { x: number; y: number }>();
+    let pinch: { dist: number; midX: number } | null = null;
+    let drag: { x: number; scrollX: number } | null = null;
+
+    const onPointerDown = (e: PointerEvent) => {
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      try { canvas.setPointerCapture(e.pointerId); } catch { /* noop */ }
+      const rect = canvas.getBoundingClientRect();
+      if (pointers.size === 2) {
+        const [a, b] = [...pointers.values()];
+        pinch = {
+          dist: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)),
+          midX: (a.x + b.x) / 2 - rect.left,
+        };
+        drag = null;
+      } else if (pointers.size === 1) {
+        drag = { x: e.clientX, scrollX: viewRef.current.scrollX };
+        canvas.style.cursor = "grabbing";
+      }
+    };
+    const onPointerMove = (e: PointerEvent) => {
+      if (!pointers.has(e.pointerId)) return;
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      const rect = canvas.getBoundingClientRect();
+      const n = dataOf().length;
+      if (pointers.size === 2 && pinch) {
+        const [a, b] = [...pointers.values()];
+        const dist = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
+        const midX = (a.x + b.x) / 2 - rect.left;
+        if (dist !== pinch.dist) {
+          zoomAt(midX, dist / pinch.dist);
+          pinch = { dist, midX };
+        }
+      } else if (pointers.size === 1 && drag) {
+        const v = viewRef.current;
+        v.scrollX = clampScroll(drag.scrollX + (e.clientX - drag.x), v.slot, n);
+        markZoomed();
+        drawRef.current();
+      }
+    };
+    const endPointer = (e: PointerEvent) => {
+      pointers.delete(e.pointerId);
+      if (pointers.size < 2) pinch = null;
+      if (pointers.size === 0) {
+        drag = null;
+        canvas.style.cursor = "grab";
+      }
+    };
+    const onDblClick = () => { fitViewRef.current(); drawRef.current(); };
+
+    canvas.addEventListener("pointerdown", onPointerDown);
+    canvas.addEventListener("pointermove", onPointerMove);
+    canvas.addEventListener("pointerup", endPointer);
+    canvas.addEventListener("pointercancel", endPointer);
+    canvas.addEventListener("dblclick", onDblClick);
+
+    const ro = new ResizeObserver(() => {
+      if (!userZoomedRef.current) fitViewRef.current();
+      drawRef.current();
+    });
     ro.observe(wrap);
+
     draw();
-    return () => ro.disconnect();
+    return () => {
+      ro.disconnect();
+      canvas.removeEventListener("wheel", onWheel);
+      canvas.removeEventListener("pointerdown", onPointerDown);
+      canvas.removeEventListener("pointermove", onPointerMove);
+      canvas.removeEventListener("pointerup", endPointer);
+      canvas.removeEventListener("pointercancel", endPointer);
+      canvas.removeEventListener("dblclick", onDblClick);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // React to data/prop changes: keep the live edge pinned while playing
+  // (unless the user zoomed/panned away), then redraw.
+  useEffect(() => {
+    const n = Math.max(0, Math.min(revealedCount, candles.length));
+    const prevN = prevNRef.current;
+    if (prevNRef.current === 0 || n < prevN - 5) {
+      fitViewRef.current(); // fresh session
+    } else if (n > prevN && userZoomedRef.current) {
+      const w = (wrapRef.current?.clientWidth ?? 800) - 68;
+      const v = viewRef.current;
+      const wasPinned = Math.abs(v.scrollX - (w - prevN * v.slot)) < 2;
+      if (wasPinned) {
+        v.scrollX = v.slot * n <= w ? (w - n * v.slot) / 2 : w - n * v.slot;
+      }
+    } else if (n > prevN && !userZoomedRef.current) {
+      fitViewRef.current();
+    }
+    prevNRef.current = n;
+    drawRef.current();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [candles, revealedCount, overlays, height]);
 
-  function draw() {
-    const canvas = canvasRef.current!;
-    const wrap = wrapRef.current!;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const w = wrap.clientWidth;
-    const h = height;
-    canvas.width = w * dpr;
-    canvas.height = h * dpr;
-    canvas.style.width = `${w}px`;
-    canvas.style.height = `${h}px`;
-    const ctx = canvas.getContext("2d")!;
-    ctx.scale(dpr, dpr);
-    ctx.clearRect(0, 0, w, h);
-
-    const padR = 68; // price axis
-    const padB = 24; // time axis
-    const padT = 14;
-    const plotW = w - padR;
-    const volH = Math.floor(h * 0.24);
-    const paneGap = 10;
-    const priceH = h - padB - padT - volH - paneGap;
-    const volTop = padT + priceH + paneGap;
-
-    // backdrop: deep dark, barely-there vertical falloff
-    const bgGrad = ctx.createLinearGradient(0, 0, 0, h);
-    bgGrad.addColorStop(0, "#0c1014");
-    bgGrad.addColorStop(1, "#090c0f");
-    ctx.fillStyle = bgGrad;
-    ctx.fillRect(0, 0, w, h);
-
-    const data = candles.slice(0, Math.max(0, Math.min(revealedCount, candles.length)));
-    if (data.length === 0) {
-      ctx.fillStyle = AXIS;
-      ctx.font = "13px system-ui";
-      ctx.fillText("Load a session to begin the replay.", 16, 40);
-      return;
-    }
-
-    let lo = Infinity, hi = -Infinity, vMax = 0;
-    for (const c of data) {
-      lo = Math.min(lo, c.l);
-      hi = Math.max(hi, c.h);
-      vMax = Math.max(vMax, c.v);
-    }
-    const pad = (hi - lo) * 0.08 || 1;
-    hi += pad; lo -= pad;
-    const y = (p: number) => padT + (1 - (p - lo) / (hi - lo)) * priceH;
-    const n = data.length;
-    const slot = plotW / n;
-    // dense, Webull-like: thin bodies, consistent rhythm, never chunky
-    const bodyW = Math.max(1, Math.min(9, slot * 0.65));
-    const x = (i: number) => i * slot + slot / 2;
-
-    // volume pane backdrop + separator
-    ctx.fillStyle = "rgba(148, 163, 184, 0.03)";
-    ctx.fillRect(0, volTop, plotW, volH + padB);
-    ctx.strokeStyle = "rgba(148, 163, 184, 0.14)";
-    ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(0, volTop + 0.5); ctx.lineTo(plotW, volTop + 0.5); ctx.stroke();
-
-    // horizontal grid + price axis
-    ctx.strokeStyle = GRID; ctx.fillStyle = AXIS;
-    ctx.font = "11px ui-monospace, SFMono-Regular, monospace";
-    ctx.lineWidth = 1;
-    const ticks = 6;
-    for (let i = 0; i <= ticks; i++) {
-      const p = lo + ((hi - lo) * i) / ticks;
-      const yy = Math.round(y(p)) + 0.5;
-      ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(plotW, yy); ctx.stroke();
-      ctx.fillText(p.toFixed(2), plotW + 8, yy + 4);
-    }
-
-    // vertical gridlines (subtle, ~90px rhythm)
-    const vStep = Math.max(1, Math.round(90 / slot));
-    ctx.strokeStyle = "rgba(148, 163, 184, 0.05)";
-    for (let i = 0; i < n; i += vStep) {
-      const xx = Math.round(x(i)) + 0.5;
-      ctx.beginPath(); ctx.moveTo(xx, padT); ctx.lineTo(xx, volTop + volH); ctx.stroke();
-    }
-
-    // time axis: label on 15-minute marks, de-collided
-    ctx.fillStyle = AXIS;
-    ctx.textAlign = "center";
-    let lastLabelX = -Infinity;
-    for (let i = 0; i < n; i++) {
-      const d = new Date(data[i].t);
-      const xx = x(i);
-      if (d.getMinutes() % 15 === 0 && xx - lastLabelX > 64) {
-        ctx.fillText(formatEtTime(data[i].t), xx, h - 8);
-        lastLabelX = xx;
-      }
-    }
-    // always label the last visible candle's time
-    const lastX = x(n - 1);
-    if (lastX - lastLabelX > 40) {
-      ctx.fillStyle = "#a9bcc9";
-      ctx.fillText(formatEtTime(data[n - 1].t), Math.min(lastX, plotW - 30), h - 8);
-    }
-    ctx.textAlign = "left";
-
-    // watermark when leading candles are simulated premarket context
-    if (candles.some((c) => c.syn)) {
-      ctx.font = "600 10px ui-monospace, monospace";
-      const label = "SIMULATED PREMARKET CONTEXT";
-      const tw = ctx.measureText(label).width;
-      ctx.fillStyle = "rgba(251, 191, 36, 0.10)";
-      ctx.strokeStyle = "rgba(251, 191, 36, 0.45)";
-      ctx.lineWidth = 1;
-      const bx = 8, by = padT + 4, bw = tw + 16, bh = 20;
-      ctx.beginPath();
-      ctx.roundRect(bx, by, bw, bh, 6);
-      ctx.fill(); ctx.stroke();
-      ctx.fillStyle = "rgba(251, 191, 36, 0.9)";
-      ctx.fillText(label, bx + 8, by + 13.5);
-    }
-
-    // volume bars — full-height pane, direction-colored (history dimmed)
-    for (let i = 0; i < n; i++) {
-      const c = data[i];
-      const vh = vMax > 0 ? Math.max(1, (c.v / vMax) * (volH - 4)) : 0;
-      ctx.globalAlpha = i < historyCount ? 0.28 : 1;
-      ctx.fillStyle = c.c >= c.o ? "rgba(46,189,133,0.55)" : "rgba(246,70,93,0.55)";
-      ctx.fillRect(x(i) - bodyW / 2, volTop + volH - vh, bodyW, vh);
-    }
-    ctx.globalAlpha = 1;
-
-    // candles (pre-replay history rendered dimmed for context)
-    for (let i = 0; i < n; i++) {
-      const c = data[i];
-      const isUp = c.c >= c.o;
-      const col = isUp ? UP : DOWN;
-      const cx = x(i);
-      const dimmed = i < historyCount;
-      ctx.globalAlpha = dimmed ? 0.42 : 1;
-      ctx.strokeStyle = col; ctx.lineWidth = Math.max(1, bodyW * 0.18);
-      ctx.beginPath(); ctx.moveTo(cx, y(c.h)); ctx.lineTo(cx, y(c.l)); ctx.stroke();
-      const yo = y(c.o), yc = y(c.c);
-      const top = Math.min(yo, yc);
-      const bh = Math.max(1.5, Math.abs(yc - yo));
-      ctx.fillStyle = col;
-      if (i === n - 1 && !dimmed) {
-        ctx.shadowColor = col; ctx.shadowBlur = 10;
-      }
-      ctx.fillRect(cx - bodyW / 2, top, bodyW, bh);
-      ctx.shadowBlur = 0;
-    }
-    ctx.globalAlpha = 1;
-
-    // pill label helper for overlay lines
-    const pill = (text: string, color: string, yy: number) => {
-      ctx.font = "600 10.5px ui-monospace, monospace";
-      const tw = ctx.measureText(text).width;
-      const pw = tw + 14, ph = 18;
-      const px = 6, py = Math.max(padT + 2, Math.min(padT + priceH - ph - 2, yy - ph - 4));
-      ctx.fillStyle = "rgba(6,10,12,0.9)";
-      ctx.strokeStyle = color; ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.roundRect(px, py, pw, ph, 9);
-      ctx.fill(); ctx.stroke();
-      ctx.fillStyle = color;
-      ctx.fillText(text, px + 7, py + 12.5);
-    };
-
-    const hline = (price: number, color: string, label: string, dashed = true) => {
-      const yy = y(price);
-      if (yy < padT || yy > padT + priceH) return;
-      ctx.strokeStyle = color; ctx.lineWidth = 1.2;
-      ctx.setLineDash(dashed ? [6, 4] : []);
-      ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(plotW, yy); ctx.stroke();
-      ctx.setLineDash([]);
-      pill(label, color, yy);
-    };
-
-    if (overlays.hod != null) hline(overlays.hod, HOD_COLOR, `HOD ${overlays.hod.toFixed(2)}`);
-    if (overlays.stopLoss != null) hline(overlays.stopLoss, DOWN, `SL ${overlays.stopLoss.toFixed(2)}`);
-    if (overlays.takeProfit != null) hline(overlays.takeProfit, UP, `TP ${overlays.takeProfit.toFixed(2)}`);
-
-    // last price: dashed cross-line + Webull-style tag on the axis
-    if (overlays.lastPrice != null) {
-      const p = overlays.lastPrice;
-      const yy = Math.max(padT, Math.min(padT + priceH, y(p)));
-      const lastC = data[n - 1];
-      const up = p >= lastC.o;
-      const tagCol = up ? UP : DOWN;
-      ctx.strokeStyle = tagCol; ctx.globalAlpha = 0.45; ctx.lineWidth = 1;
-      ctx.setLineDash([4, 4]);
-      ctx.beginPath(); ctx.moveTo(0, Math.round(yy) + 0.5); ctx.lineTo(plotW, Math.round(yy) + 0.5); ctx.stroke();
-      ctx.setLineDash([]); ctx.globalAlpha = 1;
-      const label = p.toFixed(2);
-      ctx.font = "700 11.5px ui-monospace, monospace";
-      const tw = ctx.measureText(label).width;
-      const pw = tw + 14, ph = 22;
-      const py = Math.max(2, Math.min(h - ph - 2, yy - ph / 2));
-      ctx.fillStyle = tagCol;
-      ctx.shadowColor = tagCol; ctx.shadowBlur = 12;
-      ctx.beginPath();
-      ctx.roundRect(plotW + 2, py, padR - 5, ph, 5);
-      ctx.fill();
-      ctx.shadowBlur = 0;
-      ctx.fillStyle = "#ffffff";
-      ctx.fillText(label, plotW + 9, py + 15);
-    }
-
-    // trade markers
-    for (const f of overlays.fills) {
-      if (f.candleIndex >= n) continue;
-      const cx = x(f.candleIndex);
-      if (f.side === "buy") {
-        const c = data[f.candleIndex];
-        const yy = y(c.l) + 12;
-        ctx.fillStyle = UP;
-        ctx.beginPath(); ctx.moveTo(cx, yy); ctx.lineTo(cx - 5, yy + 8); ctx.lineTo(cx + 5, yy + 8); ctx.closePath(); ctx.fill();
-      } else {
-        const c = data[f.candleIndex];
-        const yy = y(c.h) - 12;
-        ctx.fillStyle = DOWN;
-        ctx.beginPath(); ctx.moveTo(cx, yy); ctx.lineTo(cx - 5, yy - 8); ctx.lineTo(cx + 5, yy - 8); ctx.closePath(); ctx.fill();
-      }
-    }
-  }
-
   return (
-    <div ref={wrapRef} style={{ width: "100%" }}>
-      <canvas ref={canvasRef} />
+    <div ref={wrapRef} style={{ width: "100%", position: "relative" }}>
+      <canvas ref={canvasRef} style={{ touchAction: "none", cursor: "grab", display: "block" }} />
+      {canReset && (
+        <button
+          onClick={() => { fitViewRef.current(); drawRef.current(); }}
+          title="Reset zoom (or double-click the chart)"
+          style={{
+            position: "absolute", top: 8, right: 76,
+            background: "rgba(10, 15, 18, 0.85)", color: "#a9bcc9",
+            border: "1px solid rgba(148, 163, 184, 0.25)", borderRadius: 8,
+            fontSize: 11, padding: "5px 10px", cursor: "pointer",
+          }}
+        >
+          Reset zoom
+        </button>
+      )}
     </div>
   );
 }
