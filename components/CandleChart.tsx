@@ -165,16 +165,18 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
       ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(0, volTop + 0.5); ctx.lineTo(pw, volTop + 0.5); ctx.stroke();
 
-      // horizontal grid + price axis
+      // horizontal grid + price axis (decimals adapt to tight ranges)
       ctx.strokeStyle = GRID; ctx.fillStyle = AXIS;
       ctx.font = "11px ui-monospace, SFMono-Regular, monospace";
       ctx.lineWidth = 1;
       const ticks = 6;
+      const tickStep = (hi - lo) / ticks;
+      const dec = tickStep >= 0.05 ? 2 : tickStep >= 0.005 ? 3 : 4;
       for (let i = 0; i <= ticks; i++) {
         const pr = lo + ((hi - lo) * i) / ticks;
         const yy = Math.round(y(pr)) + 0.5;
         ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(pw, yy); ctx.stroke();
-        ctx.fillText(pr.toFixed(2), pw + 8, yy + 4);
+        ctx.fillText(pr.toFixed(dec), pw + 8, yy + 4);
       }
 
       // vertical gridlines (~90px rhythm)
@@ -193,7 +195,7 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
       for (let i = d0; i <= d1; i++) {
         const d = new Date(data[i].t);
         const xx = x(i);
-        if (d.getMinutes() % stepMin === 0 && xx - lastLabelX > 56 && xx > -20 && xx < pw + 20) {
+        if (d.getMinutes() % stepMin === 0 && xx - lastLabelX > 56 && xx > 34 && xx < pw - 10) {
           ctx.fillText(formatEtTime(data[i].t), xx, h - 8);
           lastLabelX = xx;
         }

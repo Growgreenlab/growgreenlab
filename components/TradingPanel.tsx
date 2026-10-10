@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Fill, PendingOrder } from "../lib/types";
 import { formatMoney, formatSigned } from "../lib/engine";
 
@@ -40,6 +40,13 @@ export default function TradingPanel({ snap, onBuy, onSell, onPlaceLimit, onCanc
   const [sl, setSl] = useState("");
   const [tp, setTp] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
+
+  // clear the "working" notice once the order fills or is cancelled
+  useEffect(() => {
+    if (snap.pendingOrders.length === 0) {
+      setMsg((m) => (m && m.includes("working") ? null : m));
+    }
+  }, [snap.pendingOrders.length]);
 
   const effLimit = limitPx ? Number(limitPx) : snap.price;
 
