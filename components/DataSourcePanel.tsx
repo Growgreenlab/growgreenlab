@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 import type { Candle, DataSource, SessionMeta } from "../lib/types";
-import { generateSampleSession, startTimeOptions } from "../lib/marketData";
+import { generateSampleSession, startTimeOptions, generatePremarketBridge, stripSynthetic } from "../lib/marketData";
 import { fetchTwelveData } from "../lib/marketData.twelve";
 import { parseCsv, candlesToCsv } from "../lib/marketData.csv";
 
@@ -55,7 +55,15 @@ export default function DataSourcePanel({ candles, meta, defaultTicker, defaultD
   const loadTwelve = async () => {
     setError(null); setLoading(true);
     try {
-      const cs = await fetchTwelveData(ticker, date, apiKey);
+      const real = await fetchTwelveData(ticker, date, apiKey);
+      // Twelve Data's free tier serves regular-session candles only — prepend a
+      // clearly-marked simulated premarket bridge so the chart has context.
+      let cs = real;
+      const firstEt = new Date(real[0].t).toLocaleString("en-US", { timeZone: "America/New_York" });
+      const firstMins = (() => { const d = new Date(firstEt); return d.getHours() * 60 + d.getMinutes(); })();
+      if (firstMins >= 9 * 60 + 29) {
+        cs = [...generatePremarketBridge(ticker, date, real[0].o, real[0].t), ...real];
+      }
       onLoad(cs, { ticker: ticker.toUpperCase().trim(), tradeDate: date, source: "twelvedata", startIndex: timeToIndex(cs, startTime) });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Twelve Data request failed.");
@@ -78,7 +86,7 @@ export default function DataSourcePanel({ candles, meta, defaultTicker, defaultD
 
   const downloadCsv = () => {
     if (!candles || !meta) return;
-    const blob = new Blob([candlesToCsv(candles)], { type: "text/csv" });
+    const blob = new Blob([candlesToCsv(stripSynthetic(candles))], { type: "text/csv" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = `${meta.ticker}-${meta.tradeDate}.csv`;

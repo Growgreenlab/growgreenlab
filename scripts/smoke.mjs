@@ -158,7 +158,38 @@ const tape = [
   ok(a.every((x, i) => i === 0 || x.t - a[i - 1].t === 60000), "1-minute spacing");
 }
 
-// 11. ET time math (Oct = EDT = UTC-4)
+// 10b. premarket bridge: deterministic simulated context ending at the real open
+{
+  const openT = Date.UTC(2026, 9, 8, 13, 30); // 09:30 ET
+  const a = MD.generatePremarketBridge("AAPL", "2026-10-08", 337.07, openT);
+  const b = MD.generatePremarketBridge("AAPL", "2026-10-08", 337.07, openT);
+  ok(a.length === 120, "120 bridge candles by default");
+  ok(JSON.stringify(a) === JSON.stringify(b), "deterministic per ticker+date");
+  ok(a.every((x) => x.syn === true), "all flagged synthetic");
+  ok(a.every((x, i) => i === 0 || x.t - a[i - 1].t === 60000), "1-minute spacing");
+  ok(a[a.length - 1].t === openT - 60000, "bridge ends one minute before the open");
+  ok(Math.abs(a[a.length - 1].c - 337.07) < 1e-9, "bridge connects at the open price");
+  ok(a.every((x) => x.h >= x.l && x.h >= x.o && x.h >= x.c && x.l <= x.o && x.l <= x.c),
+    "OHLC invariants");
+  ok(MD.stripSynthetic([...a, { t: openT, o: 337.07, h: 337.1, l: 337.0, c: 337.05, v: 100 }]).length === 1,
+    "stripSynthetic keeps real candles only");
+}
+
+// 10c. engine HOD ignores simulated premarket context
+{
+  const openT = Date.UTC(2026, 9, 8, 13, 30);
+  const bridge = MD.generatePremarketBridge("AAPL", "2026-10-08", 100, openT, 60);
+  bridge.forEach((c) => { c.h = 150; }); // fake spike in synthetic premarket
+  const real = [
+    { t: openT, o: 100, h: 101, l: 99, c: 100.5, v: 1000 },
+    { t: openT + 60000, o: 100.5, h: 102, l: 100, c: 101.5, v: 1000 },
+  ];
+  const e = new ReplayEngine([...bridge, ...real], 100000, 60);
+  eq(e.sessionStart, 60, "sessionStart skips synthetic context");
+  // finalize both real candles instantly
+  e.step(); e.step();
+  ok(Math.abs(e.hod - 102) < 1e-9, "HOD uses real candles only, got " + e.hod);
+}
 {
   eq(MD.etToUtcMs("2026-10-09", "09:30"), Date.UTC(2026, 9, 9, 13, 30), "09:30 ET -> 13:30Z");
   eq(MD.easternOffsetMinutes("2026-01-09"), 300, "EST offset in January");

@@ -149,6 +149,22 @@ export default function CandleChart({ candles, revealedCount, overlays, height =
     }
     ctx.textAlign = "left";
 
+    // watermark when leading candles are simulated premarket context
+    if (candles.some((c) => c.syn)) {
+      ctx.font = "600 10px ui-monospace, monospace";
+      const label = "SIMULATED PREMARKET CONTEXT";
+      const tw = ctx.measureText(label).width;
+      ctx.fillStyle = "rgba(251, 191, 36, 0.10)";
+      ctx.strokeStyle = "rgba(251, 191, 36, 0.45)";
+      ctx.lineWidth = 1;
+      const bx = 8, by = padT + 4, bw = tw + 16, bh = 20;
+      ctx.beginPath();
+      ctx.roundRect(bx, by, bw, bh, 6);
+      ctx.fill(); ctx.stroke();
+      ctx.fillStyle = "rgba(251, 191, 36, 0.9)";
+      ctx.fillText(label, bx + 8, by + 13.5);
+    }
+
     // volume bars — full-height pane, direction-colored (history dimmed)
     for (let i = 0; i < n; i++) {
       const c = data[i];

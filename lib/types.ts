@@ -6,6 +6,8 @@ export interface Candle {
   l: number;
   c: number;
   v: number;
+  /** True for simulated premarket context candles: visual only, excluded from HOD/trading math. */
+  syn?: boolean;
 }
 
 export type Side = "buy" | "sell";

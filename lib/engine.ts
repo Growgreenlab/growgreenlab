@@ -75,6 +75,8 @@ export class ReplayEngine {
   readonly candles: Candle[];
   readonly startCash: number;
   readonly startIndex: number;
+  /** Index of the first real candle; leading `syn` premarket context is visual only. */
+  readonly sessionStart: number;
 
   index: number;
   cash: number;
@@ -93,6 +95,8 @@ export class ReplayEngine {
     this.candles = candles;
     this.startCash = startCash;
     this.startIndex = Math.max(0, Math.min(startIndex, candles.length - 1));
+    const firstReal = candles.findIndex((c) => !c.syn);
+    this.sessionStart = firstReal === -1 ? 0 : Math.min(firstReal, this.startIndex);
     this.index = this.startIndex;
     this.cash = startCash;
     this.positionQty = 0;
@@ -149,7 +153,7 @@ export class ReplayEngine {
   /** High of day across revealed candles, including the live-forming high. */
   get hod(): number {
     let m = -Infinity;
-    for (let i = 0; i <= this.index; i++) m = Math.max(m, this.candles[i].h);
+    for (let i = this.sessionStart; i <= this.index; i++) m = Math.max(m, this.candles[i].h);
     if (this.forming) m = Math.max(m, this.forming.h);
     return m;
   }
