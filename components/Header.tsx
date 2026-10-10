@@ -28,7 +28,7 @@ export default function Header() {
     <header className="topbar">
       <div className="wrap" style={{ display: "flex", width: "100%", alignItems: "center", justifyContent: "space-between" }}>
         <Link href="/" className="brand">
-          <img src="/growgreenlab-logo.jpg" alt="Grow Green Lab" className="brand-logo-wide" />
+          <img src="/growgreenlab-logo.png" alt="Grow Green Lab" className="brand-logo-wide" />
           <span className="brand-text">
             <span className="brand-product">Trade Replay Lab</span>
           </span>
