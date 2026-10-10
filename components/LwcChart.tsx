@@ -53,6 +53,26 @@ export default function LwcChart({ candles, revealedCount }: Props) {
         borderColor: "rgba(255,255,255,0.08)",
         timeVisible: true,
         secondsVisible: false,
+        // US equities trade in US Eastern; force the axis into ET so
+        // premarket labels read correctly regardless of browser timezone.
+        tickMarkFormatter: (time: number) =>
+          new Date(time * 1000).toLocaleTimeString("en-US", {
+            timeZone: "America/New_York",
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: false,
+          }),
+      },
+      localization: {
+        timeFormatter: (time: number) =>
+          new Date(time * 1000).toLocaleString("en-US", {
+            timeZone: "America/New_York",
+            month: "short",
+            day: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: false,
+          }),
       },
       crosshair: {
         vertLine: { color: "rgba(255,255,255,0.25)", labelBackgroundColor: "#334155" },
