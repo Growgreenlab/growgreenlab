@@ -29,6 +29,9 @@ import {
   loadLockoutRemote,
   clearLockoutRemote,
   mergeLockouts,
+  deviceFingerprint,
+  saveGuestLockoutRemote,
+  loadGuestLockoutRemote,
 } from "../../lib/psychGuard";
 import type { GuardThreshold, PositionBaseline, LockoutState } from "../../lib/psychGuard";
 import PsychologyGuardPanel from "../../components/PsychologyGuardPanel";
@@ -258,21 +261,34 @@ function ReplayPageInner() {
   const [guardLockout, setGuardLockout] = useState<LockoutState | null>(() => loadLockout());
   const [guardUserId, setGuardUserId] = useState<string | null>(null);
 
-  // On mount: if signed in, merge remote lockout (cross-browser) with local.
+  // On mount: sync lockout across browsers.
+  // Signed-in: via profiles table. Guest: via device fingerprint.
   useEffect(() => {
     if (!isSupabaseConfigured()) return;
     (async () => {
       try {
         const supabase = createClient();
         const { data: { user } } = await supabase.auth.getUser();
-        if (!user) return;
-        setGuardUserId(user.id);
-        const remote = await loadLockoutRemote(supabase, user.id);
-        if (remote) {
-          const merged = mergeLockouts(loadLockout(), remote);
-          if (merged) {
-            saveLockout(merged); // sync local cache
-            setGuardLockout(merged);
+        if (user) {
+          setGuardUserId(user.id);
+          const remote = await loadLockoutRemote(supabase, user.id);
+          if (remote) {
+            const merged = mergeLockouts(loadLockout(), remote);
+            if (merged) {
+              saveLockout(merged); // sync local cache
+              setGuardLockout(merged);
+            }
+          }
+        } else {
+          // Guest: check device fingerprint for cross-browser lockout.
+          const fp = deviceFingerprint();
+          const remote = await loadGuestLockoutRemote(supabase, fp);
+          if (remote) {
+            const merged = mergeLockouts(loadLockout(), remote);
+            if (merged) {
+              saveLockout(merged);
+              setGuardLockout(merged);
+            }
           }
         }
       } catch { /* offline — localStorage fallback stands */ }
@@ -324,9 +340,15 @@ function ReplayPageInner() {
       saveLockout(lock);
       setGuardLockout(lock);
       setGuardWarned(false);
-      // Sync to Supabase for cross-browser persistence (signed-in users).
-      if (guardUserId && isSupabaseConfigured()) {
-        saveLockoutRemote(createClient(), guardUserId, lock);
+      // Sync to Supabase for cross-browser persistence.
+      // Signed-in: profiles table. Guest: device fingerprint.
+      if (isSupabaseConfigured()) {
+        const supabase = createClient();
+        if (guardUserId) {
+          saveLockoutRemote(supabase, guardUserId, lock);
+        } else {
+          saveGuestLockoutRemote(supabase, deviceFingerprint(), lock);
+        }
       }
     } else {
       setGuardWarned(true);

@@ -92,3 +92,17 @@ alter table public.profiles
   add column if not exists guard_lockout_expiry timestamptz,
   add column if not exists guard_lockout_threshold numeric,
   add column if not exists guard_lockout_started_at timestamptz;
+
+-- Psychology Guard: guest cross-browser lockout (device fingerprint).
+-- Not bulletproof (VPN/incognito/new device bypasses), but stops casual browser-switching.
+create table if not exists public.guest_guard_lockouts (
+  fingerprint text primary key,
+  expiry timestamptz not null,
+  threshold numeric,
+  started_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+alter table public.guest_guard_lockouts enable row level security;
+drop policy if exists "public guard lockout" on public.guest_guard_lockouts;
+create policy "public guard lockout" on public.guest_guard_lockouts
+  for all using (true) with check (true);

@@ -177,3 +177,81 @@ export function mergeLockouts(
   if (!remote) return local;
   return remote.expiry > local.expiry ? remote : local;
 }
+
+// --- Guest device fingerprint (public mode): same device, different browser ---
+
+/** Build a stable-ish device fingerprint from browser attributes. */
+export function deviceFingerprint(): string {
+  try {
+    const parts = [
+      navigator.userAgent,
+      navigator.language,
+      String(screen.width),
+      String(screen.height),
+      String(screen.colorDepth),
+      Intl.DateTimeFormat().resolvedOptions().timeZone || "",
+      String(new Date().getTimezoneOffset()),
+      // Canvas fingerprint
+      (() => {
+        try {
+          const c = document.createElement("canvas");
+          const ctx = c.getContext("2d");
+          if (!ctx) return "";
+          ctx.textBaseline = "top";
+          ctx.font = "14px Arial";
+          ctx.fillText("gg-lab", 2, 2);
+          return c.toDataURL().slice(-64);
+        } catch { return ""; }
+      })(),
+    ];
+    const s = parts.join("|");
+    // Simple FNV-1a hash
+    let h = 0x811c9dc5;
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return "gfp_" + h.toString(36);
+  } catch {
+    return "gfp_unknown";
+  }
+}
+
+/** Save guest lockout keyed by device fingerprint. */
+export async function saveGuestLockoutRemote(
+  supabase: AnyClient,
+  fingerprint: string,
+  l: LockoutState
+): Promise<void> {
+  try {
+    await supabase.from("guest_guard_lockouts").upsert({
+      fingerprint,
+      expiry: new Date(l.expiry).toISOString(),
+      threshold: l.threshold,
+      started_at: new Date(l.startedAt).toISOString(),
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "fingerprint" });
+  } catch { /* offline — localStorage fallback */ }
+}
+
+/** Load guest lockout by fingerprint. */
+export async function loadGuestLockoutRemote(
+  supabase: AnyClient,
+  fingerprint: string
+): Promise<LockoutState | null> {
+  try {
+    const { data } = await supabase.from("guest_guard_lockouts")
+      .select("expiry, threshold, started_at")
+      .eq("fingerprint", fingerprint).single();
+    if (!data?.expiry) return null;
+    const expiry = new Date(data.expiry as string).getTime();
+    if (expiry <= Date.now()) return null;
+    return {
+      expiry,
+      threshold: Number(data.threshold ?? 0),
+      startedAt: new Date(data.started_at as string).getTime() || Date.now(),
+    };
+  } catch {
+    return null;
+  }
+}
