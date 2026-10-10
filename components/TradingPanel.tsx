@@ -107,7 +107,8 @@ export default function TradingPanel({ snap, onBuy, onSell, onPlaceLimit, onCanc
           <div className="field">
             <label>Limit price</label>
             <input className="input num" type="number" min="0" step="0.01" placeholder={snap.price.toFixed(2)}
-              value={limitPx} onChange={(e) => setLimitPx(e.target.value)} disabled={disabled} />
+              value={limitPx} onChange={(e) => setLimitPx(e.target.value)} disabled={disabled}
+              onBlur={() => { if (limitPx) { const n = Number(limitPx); if (isFinite(n)) setLimitPx(n.toFixed(2)); } }} />
           </div>
         )}
       </div>
