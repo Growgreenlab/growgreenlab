@@ -198,30 +198,34 @@ function ReplayPageInner() {
       {eng && candles && meta && snap && (
         <>
           <div className="section card">
-            <div className="row" style={{ alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
+            <div className="chart-head">
               <div>
-                <strong style={{ fontSize: 20 }}>{meta.ticker}</strong>{" "}
-                <span className="hint">{meta.tradeDate}</span>{" "}
-                {meta.source === "sample"
-                  ? <span className="badge sample">SAMPLE DATA — not real market prices</span>
-                  : <span className="badge live">{meta.source === "twelvedata" ? "Twelve Data" : "CSV"} real data</span>}
+                <div className="ticker-name">{meta.ticker}</div>
+                <div className="ticker-sub">{meta.tradeDate}</div>
+                <div style={{ marginTop: 8 }}>
+                  {meta.source === "sample"
+                    ? <span className="badge sample">Sample data — not real market prices</span>
+                    : <span className="badge live">{meta.source === "twelvedata" ? "Twelve Data" : "CSV"} · real data</span>}
+                </div>
               </div>
-              <div className="num" style={{ textAlign: "right" }}>
-                <div style={{ fontSize: 22 }}>{formatMoney(snap.price)}</div>
-                <div className="hint">HOD <span className="num" style={{ color: "var(--amber)" }}>{formatMoney(eng.hod)}</span></div>
+              <div>
+                <div className="price-now num">{formatMoney(snap.price)}</div>
+                <div className="hod-line">HOD <span className="num" style={{ color: "var(--amber)", fontWeight: 700 }}>{formatMoney(eng.hod)}</span></div>
               </div>
             </div>
-            <CandleChart
-              candles={candles}
-              revealedCount={eng.index + 1}
-              overlays={{
-                hod: eng.hod,
-                stopLoss: eng.stopLoss,
-                takeProfit: eng.takeProfit,
-                fills: eng.fills,
-                lastPrice: snap.price,
-              }}
-            />
+            <div className="chart-frame">
+              <CandleChart
+                candles={candles}
+                revealedCount={eng.index + 1}
+                overlays={{
+                  hod: eng.hod,
+                  stopLoss: eng.stopLoss,
+                  takeProfit: eng.takeProfit,
+                  fills: eng.fills,
+                  lastPrice: snap.price,
+                }}
+              />
+            </div>
           </div>
 
           <div className="section grid2">
@@ -246,9 +250,20 @@ function ReplayPageInner() {
               </div>
               <div className="section card">
                 <h3>Session P/L</h3>
-                <div className="kv"><span className="k">Realized</span><span className={`num ${snap.realized >= 0 ? "pos" : "neg"}`}>{formatSigned(snap.realized)}</span></div>
-                <div className="kv"><span className="k">Unrealized</span><span className={`num ${snap.unreal >= 0 ? "pos" : "neg"}`}>{formatSigned(snap.unreal)}</span></div>
-                <div className="kv"><span className="k">Equity</span><span className="num">{formatMoney(snap.equity)}</span></div>
+                <div className="tiles">
+                  <div className="tile">
+                    <div className="tk">Realized</div>
+                    <div className={`tv num ${snap.realized >= 0 ? "pos" : "neg"}`}>{formatSigned(snap.realized)}</div>
+                  </div>
+                  <div className="tile">
+                    <div className="tk">Unrealized</div>
+                    <div className={`tv num ${snap.unreal >= 0 ? "pos" : "neg"}`}>{formatSigned(snap.unreal)}</div>
+                  </div>
+                  <div className="tile hero-tile">
+                    <div className="tk">Equity</div>
+                    <div className="tv num">{formatMoney(snap.equity)}</div>
+                  </div>
+                </div>
               </div>
             </div>
             <TradingPanel

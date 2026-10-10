@@ -4,11 +4,13 @@ import { useEffect, useRef } from "react";
 import type { Candle, Fill } from "../lib/types";
 import { formatEtTime } from "../lib/marketData";
 
-const UP = "#26a69a";
-const DOWN = "#ef5350";
-const GRID = "#1a2233";
-const AXIS = "#8b94a7";
-const HOD_COLOR = "#f5a623";
+const UP = "#10b981";
+const UP_WICK = "#34d399";
+const DOWN = "#f87171";
+const DOWN_WICK = "#fca5a5";
+const GRID = "rgba(148, 184, 172, 0.07)";
+const AXIS = "#7d8f99";
+const HOD_COLOR = "#fbbf24";
 
 export interface ChartOverlays {
   hod: number | null;
@@ -66,7 +68,11 @@ export default function CandleChart({ candles, revealedCount, overlays, height =
     const volH = Math.floor(h * 0.18);
     const priceH = h - padB - padT - volH - 8;
 
-    ctx.fillStyle = "#0b0e14";
+    // premium backdrop: subtle vertical gradient
+    const bgGrad = ctx.createLinearGradient(0, 0, 0, h);
+    bgGrad.addColorStop(0, "#0a0f12");
+    bgGrad.addColorStop(1, "#06090b");
+    ctx.fillStyle = bgGrad;
     ctx.fillRect(0, 0, w, h);
 
     if (data.length === 0) {
@@ -108,27 +114,50 @@ export default function CandleChart({ candles, revealedCount, overlays, height =
     }
     ctx.textAlign = "left";
 
-    // volume bars
+    // volume bars (soft, rounded feel)
     const volTop = padT + priceH + 8;
     for (let i = 0; i < n; i++) {
       const c = data[i];
       const vh = vMax > 0 ? (c.v / vMax) * volH : 0;
-      ctx.fillStyle = c.c >= c.o ? "rgba(38,166,154,.45)" : "rgba(239,83,80,.45)";
+      ctx.fillStyle = c.c >= c.o ? "rgba(16,185,129,.32)" : "rgba(248,113,113,.32)";
       ctx.fillRect(x(i) - bodyW / 2, volTop + volH - vh, bodyW, vh);
     }
 
     // candles
     for (let i = 0; i < n; i++) {
       const c = data[i];
-      const col = c.c >= c.o ? UP : DOWN;
+      const isUp = c.c >= c.o;
+      const col = isUp ? UP : DOWN;
+      const wickCol = isUp ? UP_WICK : DOWN_WICK;
       const cx = x(i);
-      ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1;
+      ctx.strokeStyle = wickCol; ctx.lineWidth = 1.2;
       ctx.beginPath(); ctx.moveTo(cx, y(c.h)); ctx.lineTo(cx, y(c.l)); ctx.stroke();
       const yo = y(c.o), yc = y(c.c);
       const top = Math.min(yo, yc);
-      const bh = Math.max(1, Math.abs(yc - yo));
+      const bh = Math.max(1.5, Math.abs(yc - yo));
+      ctx.fillStyle = col;
+      // subtle glow on the most recent candle
+      if (i === n - 1) {
+        ctx.shadowColor = col; ctx.shadowBlur = 12;
+      }
       ctx.fillRect(cx - bodyW / 2, top, bodyW, bh);
+      ctx.shadowBlur = 0;
     }
+
+    // pill label helper for overlay lines
+    const pill = (text: string, color: string, yy: number, bg: string) => {
+      ctx.font = "600 10.5px ui-monospace, monospace";
+      const tw = ctx.measureText(text).width;
+      const pw = tw + 14, ph = 18;
+      const px = 6, py = Math.max(padT + 2, Math.min(padT + priceH - ph - 2, yy - ph - 4));
+      ctx.fillStyle = bg;
+      ctx.strokeStyle = color; ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(px, py, pw, ph, 9);
+      ctx.fill(); ctx.stroke();
+      ctx.fillStyle = color;
+      ctx.fillText(text, px + 7, py + 12.5);
+    };
 
     const hline = (price: number, color: string, label: string, dashed = true) => {
       const yy = y(price);
@@ -137,8 +166,7 @@ export default function CandleChart({ candles, revealedCount, overlays, height =
       ctx.setLineDash(dashed ? [6, 4] : []);
       ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(plotW, yy); ctx.stroke();
       ctx.setLineDash([]);
-      ctx.fillStyle = color; ctx.font = "11px ui-monospace, monospace";
-      ctx.fillText(label, 4, yy - 5);
+      pill(label, color, yy, "rgba(6,10,12,0.88)");
     };
 
     if (overlays.hod != null) hline(overlays.hod, HOD_COLOR, `HOD ${overlays.hod.toFixed(2)}`);
@@ -147,10 +175,19 @@ export default function CandleChart({ candles, revealedCount, overlays, height =
     if (overlays.lastPrice != null) {
       const p = overlays.lastPrice;
       const yy = Math.max(padT, Math.min(padT + priceH, y(p)));
-      ctx.fillStyle = "#4da3ff";
-      ctx.fillRect(plotW, yy - 10, padR, 20);
-      ctx.fillStyle = "#fff"; ctx.font = "bold 11px ui-monospace, monospace";
-      ctx.fillText(p.toFixed(2), plotW + 6, yy + 4);
+      const label = p.toFixed(2);
+      ctx.font = "700 11px ui-monospace, monospace";
+      const tw = ctx.measureText(label).width;
+      const pw = tw + 14, ph = 21;
+      const py = yy - ph / 2;
+      ctx.fillStyle = "#10b981";
+      ctx.shadowColor = "rgba(16,185,129,.55)"; ctx.shadowBlur = 14;
+      ctx.beginPath();
+      ctx.roundRect(plotW + 1, py, padR - 3, ph, 6);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = "#04120d";
+      ctx.fillText(label, plotW + 8, yy + 4);
     }
 
     // trade markers

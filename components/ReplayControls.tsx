@@ -16,37 +16,42 @@ interface Props {
 const SPEEDS = [0.5, 1, 2, 4, 8];
 
 export default function ReplayControls(p: Props) {
+  const pct = p.total > 0 ? Math.min(100, ((p.index + 1) / p.total) * 100) : 0;
   return (
     <div className="card">
       <h3>Replay controls</h3>
       <div className="controlsbar">
         {!p.playing ? (
-          <button className="btn primary" disabled={!p.canPlay} onClick={p.onPlay}>
-            ▶ Play
+          <button className="btn primary ctl-btn ctl-play" disabled={!p.canPlay} onClick={p.onPlay} title="Play">
+            ▶
           </button>
         ) : (
-          <button className="btn" onClick={p.onPause}>
-            ⏸ Pause
+          <button className="btn ctl-btn ctl-play" onClick={p.onPause} title="Pause">
+            ⏸
           </button>
         )}
-        <button className="btn" disabled={!p.canPlay} onClick={p.onNext}>
-          Next candle ⏭
+        <button className="btn ctl-btn" disabled={!p.canPlay} onClick={p.onNext} title="Next candle">
+          ⏭
         </button>
-        <button className="btn" disabled={!p.canPlay} onClick={p.onReset}>
-          ⟲ Reset
+        <button className="btn ctl-btn" disabled={!p.canPlay} onClick={p.onReset} title="Reset replay">
+          ⟲
         </button>
-        <select
-          className="select speedsel"
-          value={p.speed}
-          onChange={(e) => p.onSpeed(Number(e.target.value))}
-          aria-label="Replay speed"
-        >
+        <div className="seg" role="group" aria-label="Replay speed">
           {SPEEDS.map((s) => (
-            <option key={s} value={s}>
+            <button
+              key={s}
+              className={p.speed === s ? "on" : ""}
+              onClick={() => p.onSpeed(s)}
+              disabled={!p.canPlay}
+              title={`${s}x speed`}
+            >
               {s}x
-            </option>
+            </button>
           ))}
-        </select>
+        </div>
+      </div>
+      <div className="progress" aria-hidden>
+        <i style={{ width: `${pct}%` }} />
       </div>
       <div className="hint" style={{ marginTop: 8 }}>
         Candle {Math.min(p.index + 1, p.total)} of {p.total} · future candles stay hidden

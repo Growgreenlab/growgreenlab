@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Grow Green Lab logo">
+  <defs>
+    <linearGradient id="ggl-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#10b981"/>
+      <stop offset="1" stop-color="#065f46"/>
+    </linearGradient>
+    <linearGradient id="ggl-candle" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#a7f3d0"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="url(#ggl-bg)"/>
+  <rect width="64" height="64" rx="16" fill="none" stroke="#ffffff" stroke-opacity="0.18" stroke-width="1.5"/>
+  <!-- ascending candlesticks -->
+  <g stroke="url(#ggl-candle)" stroke-width="3" stroke-linecap="round">
+    <line x1="18" y1="46" x2="18" y2="34"/>
+    <line x1="32" y1="46" x2="32" y2="24"/>
+    <line x1="46" y1="46" x2="46" y2="16"/>
+  </g>
+  <g fill="url(#ggl-candle)">
+    <rect x="14" y="37" width="8" height="11" rx="2.5"/>
+    <rect x="28" y="28" width="8" height="13" rx="2.5"/>
+    <rect x="42" y="19" width="8" height="13" rx="2.5"/>
+  </g>
+  <!-- growth trend line -->
+  <path d="M12 50 L28 38 L37 43 L54 24" fill="none" stroke="#ecfdf5" stroke-width="3"
+        stroke-linecap="round" stroke-linejoin="round" opacity="0.9"/>
+  <path d="M45 24 L54 24 L54 33" fill="none" stroke="#ecfdf5" stroke-width="3"
+        stroke-linecap="round" stroke-linejoin="round" opacity="0.9"/>
+</svg>

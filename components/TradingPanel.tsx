@@ -52,11 +52,29 @@ export default function TradingPanel({ snap, onBuy, onSell, onSetBrackets, disab
           Simulated — not real orders
         </span>
       </h3>
-      <div className="kv"><span className="k">Cash</span><span className="num">{formatMoney(snap.cash)}</span></div>
-      <div className="kv"><span className="k">Position</span><span className="num">{snap.qty} sh @ {snap.qty > 0 ? formatMoney(snap.avg) : "—"}</span></div>
-      <div className="kv"><span className="k">Unrealized P/L</span><span className={`num ${snap.unreal >= 0 ? "pos" : "neg"}`}>{formatSigned(snap.unreal)}</span></div>
-      <div className="kv"><span className="k">Realized P/L</span><span className={`num ${snap.realized >= 0 ? "pos" : "neg"}`}>{formatSigned(snap.realized)}</span></div>
-      <div className="kv"><span className="k">Equity</span><span className="num">{formatMoney(snap.equity)}</span></div>
+      <div className="tiles">
+        <div className="tile">
+          <div className="tk">Cash</div>
+          <div className="tv num">{formatMoney(snap.cash)}</div>
+        </div>
+        <div className="tile">
+          <div className="tk">Position</div>
+          <div className="tv num">{snap.qty} <span style={{ fontSize: 12, color: "var(--muted)" }}>sh</span></div>
+          <div className="hint num" style={{ fontSize: 11 }}>{snap.qty > 0 ? `@ ${formatMoney(snap.avg)}` : "flat"}</div>
+        </div>
+        <div className="tile">
+          <div className="tk">Unrealized</div>
+          <div className={`tv num ${snap.unreal >= 0 ? "pos" : "neg"}`}>{formatSigned(snap.unreal)}</div>
+        </div>
+        <div className="tile">
+          <div className="tk">Realized</div>
+          <div className={`tv num ${snap.realized >= 0 ? "pos" : "neg"}`}>{formatSigned(snap.realized)}</div>
+        </div>
+        <div className="tile hero-tile">
+          <div className="tk">Equity</div>
+          <div className="tv num">{formatMoney(snap.equity)}</div>
+        </div>
+      </div>
 
       <div className="field" style={{ marginTop: 12 }}>
         <label>Share quantity</label>
