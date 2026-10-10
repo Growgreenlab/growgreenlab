@@ -18,6 +18,8 @@ interface Props {
   hasPosition: boolean;
   positionAvg: number;
   positionQty: number;
+  positionRealized: number;
+  unrealizedPnl: number;
   onPlannedChange: (sl: number | null, tp: number | null) => void;
   onActiveChange: (sl: number | null, tp: number | null) => void;
   onApplyBrackets: (sl: number | null, tp: number | null) => void;
@@ -40,6 +42,8 @@ export default function RiskCalculator({
   hasPosition,
   positionAvg,
   positionQty,
+  positionRealized,
+  unrealizedPnl,
   onPlannedChange,
   onActiveChange,
   onApplyBrackets,
@@ -51,6 +55,11 @@ export default function RiskCalculator({
   const [riskPct, setRiskPct] = useState("1");
   const [entry, setEntry] = useState("");
   const [entryEdited, setEntryEdited] = useState(false);
+
+  // Auto-expand when a position opens; stay expanded while open.
+  useEffect(() => {
+    if (hasPosition) setOpen(true);
+  }, [hasPosition]);
   const [sl, setSl] = useState("");
   const [tp, setTp] = useState("");
   const [fees, setFees] = useState("0");
@@ -291,9 +300,29 @@ export default function RiskCalculator({
                   </span>
                 </div>
                 {hasPosition && (
-                  <div className="hint" style={{ marginTop: 6, fontSize: 11 }}>
-                    Position open — entry and size locked to actual fills. Dragging SL/TP recalculates risk/reward only.
-                  </div>
+                  <>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, paddingTop: 6, borderTop: "1px solid rgba(255,255,255,0.1)" }}>
+                      <span className="dim">Realized P&L (sold)</span>
+                      <span style={{ color: positionRealized >= 0 ? "#2ebd85" : "#f6465d" }}>
+                        {positionRealized >= 0 ? "+" : ""}{money(positionRealized)}
+                      </span>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <span className="dim">Unrealized P&L (open)</span>
+                      <span style={{ color: unrealizedPnl >= 0 ? "#2ebd85" : "#f6465d" }}>
+                        {unrealizedPnl >= 0 ? "+" : ""}{money(unrealizedPnl)}
+                      </span>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <span className="dim"><b>Total P&L</b></span>
+                      <b style={{ color: (positionRealized + unrealizedPnl) >= 0 ? "#2ebd85" : "#f6465d" }}>
+                        {(positionRealized + unrealizedPnl) >= 0 ? "+" : ""}{money(positionRealized + unrealizedPnl)}
+                      </b>
+                    </div>
+                    <div className="hint" style={{ marginTop: 6, fontSize: 11 }}>
+                      Position open — entry and size locked to actual fills. Dragging SL/TP recalculates risk/reward only.
+                    </div>
+                  </>
                 )}
                 <div className="hint" style={{ marginTop: 6, fontSize: 11, opacity: 0.7 }}>
                   *Estimates only. Real fills may differ — gaps and slippage can exceed planned risk.

@@ -218,6 +218,19 @@ function ReplayPageInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bracketKey]);
 
+  // Per-position realized P&L: capture session realized baseline when a
+  // position opens (qty 0 -> positive). Position realized = session - baseline.
+  // Survives partial sells and add-on buys; resets on next open.
+  const posRealizedBaseline = useRef(0);
+  const prevPosQty = useRef(0);
+  const engForPnl = engineRef.current;
+  const curQty = engForPnl?.positionQty ?? 0;
+  if (prevPosQty.current === 0 && curQty > 0) {
+    posRealizedBaseline.current = engForPnl?.realizedPnl ?? 0;
+  }
+  prevPosQty.current = curQty;
+  const positionRealized = (engForPnl?.realizedPnl ?? 0) - posRealizedBaseline.current;
+
   const buyErr = (qty: number): string | null => {
     const eng = engineRef.current;
     if (!eng) return "Load a session first.";
@@ -500,6 +513,8 @@ function ReplayPageInner() {
                 hasPosition={eng.positionQty > 0}
                 positionAvg={eng.positionAvg}
                 positionQty={eng.positionQty}
+                positionRealized={positionRealized}
+                unrealizedPnl={snap.unreal}
                 onPlannedChange={(sl, tp) => { setPlannedLevels(sl != null ? normalizePrice(sl) : null, tp != null ? normalizePrice(tp) : null); }}
                 onActiveChange={(sl, tp) => {
                   const e = engineRef.current;
