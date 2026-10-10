@@ -4,8 +4,17 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { createClient, isSupabaseConfigured } from "../lib/supabaseClient";
 
+const NAV_LINKS = [
+  { label: "Replay Lab", href: "/replay" },
+  { label: "Features", href: "/#features" },
+  { label: "How It Works", href: "/#how-it-works" },
+  { label: "Pricing", href: "/#pricing" },
+  { label: "About", href: "/#about" },
+];
+
 export default function Header() {
   const [email, setEmail] = useState<string | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
   const configured = isSupabaseConfigured();
 
   useEffect(() => {
@@ -25,35 +34,59 @@ export default function Header() {
   };
 
   return (
-    <header className="topbar">
-      <div className="wrap" style={{ display: "flex", width: "100%", alignItems: "center", justifyContent: "space-between" }}>
-        <Link href="/" className="brand">
-          <img src="/growgreenlab-logo.png" alt="Grow Green Lab" className="brand-logo-wide" />
-          <span className="brand-text">
-            <span className="brand-product">Trade Replay Lab</span>
-          </span>
+    <header className="ggl-nav">
+      <div className="ggl-nav-inner">
+        <Link href="/" className="ggl-brand" aria-label="Grow Green Lab home">
+          <img src="/growgreenlab-logo.png" alt="Grow Green Lab" className="ggl-brand-logo" />
         </Link>
-        <nav className="navlinks">
-          <span className="badge sim">Simulated — not real orders</span>
+
+        <nav className="ggl-nav-links" aria-label="Primary">
+          {NAV_LINKS.map((l) => (
+            <Link key={l.href} href={l.href}>
+              {l.label}
+            </Link>
+          ))}
+        </nav>
+
+        <div className="ggl-nav-actions">
           {email ? (
             <>
-              <Link href="/replay">Replay</Link>
-              <Link href="/sessions">My Sessions</Link>
-              <span className="badge user">{email}</span>
-              <button className="btn" onClick={signOut} style={{ padding: "6px 10px" }}>
+              <span className="ggl-user-badge" title={email}>{email}</span>
+              <button className="ggl-btn ggl-btn-ghost" onClick={signOut}>
                 Sign out
               </button>
             </>
           ) : (
-            <>
-              <Link href="/replay">Replay</Link>
-              <Link href="/login" className="btn" style={{ padding: "6px 12px" }}>
-                Sign in
-              </Link>
-            </>
+            <Link href="/login" className="ggl-btn ggl-btn-ghost">
+              Sign In
+            </Link>
           )}
-        </nav>
+          <Link href="/replay" className="ggl-btn ggl-btn-primary">
+            Launch Simulator <span aria-hidden="true">→</span>
+          </Link>
+          <button
+            className="ggl-menu-btn"
+            onClick={() => setMenuOpen((o) => !o)}
+            aria-label={menuOpen ? "Close menu" : "Open menu"}
+            aria-expanded={menuOpen}
+          >
+            {menuOpen ? "✕" : "☰"}
+          </button>
+        </div>
       </div>
+
+      {menuOpen && (
+        <nav className="ggl-mobile-menu" aria-label="Mobile">
+          {NAV_LINKS.map((l) => (
+            <Link key={l.href} href={l.href} onClick={() => setMenuOpen(false)}>
+              {l.label}
+            </Link>
+          ))}
+          <Link href="/replay" className="ggl-btn ggl-btn-primary" onClick={() => setMenuOpen(false)}>
+            Launch Simulator <span aria-hidden="true">→</span>
+          </Link>
+        </nav>
+      )}
     </header>
   );
 }
