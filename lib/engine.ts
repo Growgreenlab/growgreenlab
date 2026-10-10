@@ -79,6 +79,12 @@ export class ReplayEngine {
   readonly startIndex: number;
   /** Index of the first real candle; leading `syn` premarket context is visual only. */
   readonly sessionStart: number;
+  /**
+   * Optional guard called before any buy (market or limit). Return an error
+   * message to block the order, or null to allow. Used by Psychology Guard.
+   * Sells and historical replay (buyAt) are never blocked.
+   */
+  tradeGuard: (() => string | null) | null = null;
 
   index: number;
   cash: number;
@@ -243,6 +249,10 @@ export class ReplayEngine {
 
   /** Market buy at the live price. Returns the fill or null if rejected. */
   buy(qty: number): Fill | null {
+    if (this.tradeGuard) {
+      const err = this.tradeGuard();
+      if (err) return null;
+    }
     return this.execBuy(
       Math.floor(qty),
       this.executionPrice(),
@@ -288,6 +298,10 @@ export class ReplayEngine {
     if (!(qty > 0)) return "Enter a share quantity.";
     if (!(limitPrice > 0)) return "Enter a limit price.";
     if (side === "buy") {
+      if (this.tradeGuard) {
+        const err = this.tradeGuard();
+        if (err) return err;
+      }
       if (qty * limitPrice > this.cash + 1e-9) return "Not enough virtual cash for that size.";
     } else {
       if (this.positionQty <= 0) return "No open position to sell.";

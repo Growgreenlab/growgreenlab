@@ -16,6 +16,18 @@ import { diag } from "../../lib/diag";
 import { DEFAULT_HOTKEYS, isTypingTarget } from "../../lib/hotkeys";
 import { normalizePrice } from "../../lib/price";
 import type { Drawing, DrawingTool } from "../../lib/drawings";
+import {
+  calculatePositionLoss,
+  activeThreshold,
+  loadThresholds,
+  saveThresholds,
+  loadLockout,
+  saveLockout,
+  clearLockout,
+  formatCountdown,
+} from "../../lib/psychGuard";
+import type { GuardThreshold, PositionBaseline, LockoutState } from "../../lib/psychGuard";
+import PsychologyGuardPanel from "../../components/PsychologyGuardPanel";
 
 const START_CASH = 100_000;
 
@@ -235,10 +247,89 @@ function ReplayPageInner() {
   prevPosQty.current = curQty;
   const positionRealized = (engForPnl?.realizedPnl ?? 0) - posRealizedBaseline.current;
 
+  // --- Psychology Guard V1 (position-based) ---
+  const [guardThresholds, setGuardThresholds] = useState<GuardThreshold[]>(() => loadThresholds());
+  const [guardLockout, setGuardLockout] = useState<LockoutState | null>(() => loadLockout());
+  const [guardWarned, setGuardWarned] = useState(false);
+  const guardBaseline = useRef<PositionBaseline | null>(null);
+  const guardLastTrigger = useRef<number>(0); // highest threshold already acted on
+  const guardPrevQty = useRef(0);
+
+  // Track position baseline: set on open (0 -> N), update on adds, clear on close.
+  const gQty = engForPnl?.positionQty ?? 0;
+  const gAvg = engForPnl?.positionAvg ?? 0;
+  if (guardPrevQty.current === 0 && gQty > 0) {
+    guardBaseline.current = { shares: gQty, avgEntry: gAvg, value: gQty * gAvg };
+    guardLastTrigger.current = 0;
+    setGuardWarned(false);
+  } else if (guardPrevQty.current > 0 && gQty > guardPrevQty.current) {
+    // Added shares: extend baseline to new total.
+    guardBaseline.current = { shares: gQty, avgEntry: gAvg, value: gQty * gAvg };
+  } else if (gQty === 0 && guardPrevQty.current > 0) {
+    guardBaseline.current = null;
+    guardLastTrigger.current = 0;
+    setGuardWarned(false);
+  }
+  guardPrevQty.current = gQty;
+
+  const guardLoss = calculatePositionLoss(
+    guardBaseline.current,
+    positionRealized,
+    engForPnl?.unrealizedPnl() ?? 0
+  );
+  const guardLossPct = guardLoss?.lossPct ?? null;
+
+  // Evaluate thresholds (highest applicable, once per crossing).
+  const hitThreshold = guardLossPct != null ? activeThreshold(guardLossPct, guardThresholds) : null;
+  if (hitThreshold && hitThreshold.lossPct > guardLastTrigger.current && guardBaseline.current) {
+    guardLastTrigger.current = hitThreshold.lossPct;
+    if (hitThreshold.lockMinutes > 0) {
+      const lock: LockoutState = {
+        expiry: Date.now() + hitThreshold.lockMinutes * 60_000,
+        threshold: hitThreshold.lossPct,
+        startedAt: Date.now(),
+      };
+      saveLockout(lock);
+      setGuardLockout(lock);
+      setGuardWarned(false);
+    } else {
+      setGuardWarned(true);
+    }
+  }
+
+  // Lockout expiry check (for display; loadLockout also cleans on read).
+  const nowTs = Date.now();
+  const lockoutActive = guardLockout != null && guardLockout.expiry > nowTs;
+  if (guardLockout && !lockoutActive) {
+    clearLockout();
+    setGuardLockout(null);
+  }
+
+  // Install engine guard: blocks buys (market + limit) during lockout.
+  // Sells, SL/TP triggers, and historical replay are never blocked.
+  if (engForPnl) {
+    engForPnl.tradeGuard = lockoutActive
+      ? () => `Psychology Guard: new entries locked for ${formatCountdown(guardLockout!.expiry - Date.now())} (${guardLockout!.threshold}% position loss). Exits allowed.`
+      : null;
+  }
+
+  // Countdown ticker to refresh remaining-time display.
+  const [, setGuardTick] = useState(0);
+  useEffect(() => {
+    if (!lockoutActive) return;
+    const id = setInterval(() => setGuardTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [lockoutActive]);
+
   const buyErr = (qty: number): string | null => {
     const eng = engineRef.current;
     if (!eng) return "Load a session first.";
     if (!(qty > 0)) return "Enter a share quantity.";
+    // Psychology Guard: block entries during lockout (engine also enforces).
+    if (eng.tradeGuard) {
+      const msg = eng.tradeGuard();
+      if (msg) return msg;
+    }
     const f = eng.buy(Math.floor(qty));
     if (f) {
       // Activate any planned SL/TP on the new position.
@@ -534,6 +625,21 @@ function ReplayPageInner() {
                 }}
                 onBuySized={(qty) => buyErr(qty)}
                 disabled={false}
+              />
+              <PsychologyGuardPanel
+                accountBalance={START_CASH}
+                baseline={guardBaseline.current}
+                positionQty={eng.positionQty}
+                positionAvg={eng.positionAvg}
+                positionPnl={guardLoss?.pnl ?? null}
+                lossPct={guardLossPct}
+                lockout={lockoutActive ? guardLockout : null}
+                warned={guardWarned}
+                thresholds={guardThresholds}
+                onThresholdsChange={(t) => {
+                  setGuardThresholds(t);
+                  saveThresholds(t);
+                }}
               />
             </aside>
           </div>
