@@ -27,7 +27,7 @@ export function buildTwelveDataUrl(
   const p = new URLSearchParams({
     symbol: ticker.toUpperCase().trim(),
     interval: "1min",
-    start_date: `${dateStr} 09:30:00`,
+    start_date: `${dateStr} 04:00:00`,
     end_date: `${dateStr} 16:00:00`,
     timezone: "America/New_York",
     apikey: apiKey,

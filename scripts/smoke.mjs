@@ -145,12 +145,12 @@ const tape = [
      e.fills.length === 0 && e.realizedPnl === 0, "reset restores state");
 }
 
-// 10. sample generator: deterministic, 390 1-min candles, sane OHLC
+// 10. sample generator: deterministic, 720 1-min candles (04:00 premarket + 09:30 session), sane OHLC
 {
   const a = MD.generateSampleSession("VEEA", "2026-10-09");
   const b = MD.generateSampleSession("VEEA", "2026-10-09");
   const c = MD.generateSampleSession("AAPL", "2026-10-09");
-  ok(a.length === 390, "390 candles");
+  ok(a.length === 720, "720 candles");
   ok(JSON.stringify(a) === JSON.stringify(b), "deterministic per ticker+date");
   ok(JSON.stringify(a) !== JSON.stringify(c), "differs per ticker");
   ok(a.every((x, i) => x.h >= x.l && x.h >= x.o && x.h >= x.c && x.l <= x.o && x.l <= x.c),
@@ -168,7 +168,7 @@ const tape = [
 {
   const url = TW.buildTwelveDataUrl("veea", "2026-10-09", "KEY123");
   ok(url.includes("symbol=VEEA") && url.includes("interval=1min") &&
-     url.includes("start_date=2026-10-09+09%3A30%3A00") &&
+     url.includes("start_date=2026-10-09+04%3A00%3A00") &&
      url.includes("timezone=America%2FNew_York") && url.includes("apikey=KEY123"),
     "URL contract: " + url);
   ok(TW.extractApiKey("  KEY123  ") === "KEY123", "raw key trimmed");

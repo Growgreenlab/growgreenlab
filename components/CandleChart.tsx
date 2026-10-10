@@ -24,6 +24,8 @@ interface Props {
   revealedCount: number; // render candles[0..revealedCount-1] only
   overlays: ChartOverlays;
   height?: number;
+  /** Candles before this index are pre-replay history: rendered dimmed. */
+  historyCount?: number;
 }
 
 /**
@@ -32,7 +34,7 @@ interface Props {
  * pane, crisp time/price axes. Only the revealed prefix of the candle
  * array is ever drawn, so future candles stay hidden.
  */
-export default function CandleChart({ candles, revealedCount, overlays, height = 460 }: Props) {
+export default function CandleChart({ candles, revealedCount, overlays, height = 460, historyCount = 0 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -147,32 +149,37 @@ export default function CandleChart({ candles, revealedCount, overlays, height =
     }
     ctx.textAlign = "left";
 
-    // volume bars — full-height pane, direction-colored
+    // volume bars — full-height pane, direction-colored (history dimmed)
     for (let i = 0; i < n; i++) {
       const c = data[i];
       const vh = vMax > 0 ? Math.max(1, (c.v / vMax) * (volH - 4)) : 0;
+      ctx.globalAlpha = i < historyCount ? 0.28 : 1;
       ctx.fillStyle = c.c >= c.o ? "rgba(46,189,133,0.55)" : "rgba(246,70,93,0.55)";
       ctx.fillRect(x(i) - bodyW / 2, volTop + volH - vh, bodyW, vh);
     }
+    ctx.globalAlpha = 1;
 
-    // candles
+    // candles (pre-replay history rendered dimmed for context)
     for (let i = 0; i < n; i++) {
       const c = data[i];
       const isUp = c.c >= c.o;
       const col = isUp ? UP : DOWN;
       const cx = x(i);
+      const dimmed = i < historyCount;
+      ctx.globalAlpha = dimmed ? 0.42 : 1;
       ctx.strokeStyle = col; ctx.lineWidth = Math.max(1, bodyW * 0.18);
       ctx.beginPath(); ctx.moveTo(cx, y(c.h)); ctx.lineTo(cx, y(c.l)); ctx.stroke();
       const yo = y(c.o), yc = y(c.c);
       const top = Math.min(yo, yc);
       const bh = Math.max(1.5, Math.abs(yc - yo));
       ctx.fillStyle = col;
-      if (i === n - 1) {
+      if (i === n - 1 && !dimmed) {
         ctx.shadowColor = col; ctx.shadowBlur = 10;
       }
       ctx.fillRect(cx - bodyW / 2, top, bodyW, bh);
       ctx.shadowBlur = 0;
     }
+    ctx.globalAlpha = 1;
 
     // pill label helper for overlay lines
     const pill = (text: string, color: string, yy: number) => {

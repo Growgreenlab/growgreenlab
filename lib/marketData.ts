@@ -98,6 +98,27 @@ export function generateSampleSession(ticker: string, dateStr: string): Candle[]
   const base = 2 + rand() * 3; // $2-$5 penny-stock zone
   let price = base;
 
+  const pushCandle = (o: number, c: number, h: number, l: number, v: number, t: number) => {
+    candles.push({ t, o, h, l, c, v });
+  };
+
+  // Premarket 04:00-09:29: thin, drifty tape — context the replay starts into.
+  for (let i = 0; i < 330; i++) {
+    const o = price;
+    const drift = (rand() - 0.52) * 0.0015; // slight fade bias overnight
+    const shock = (rand() - 0.5) * 0.006;
+    const c = Math.max(0.2, o * (1 + drift + shock));
+    const h = Math.max(o, c) * (1 + rand() * 0.002);
+    const l = Math.min(o, c) * (1 - rand() * 0.002);
+    const move = Math.abs(c - o) / o;
+    const v = Math.round(2_000 + rand() * 8_000 + move * 1_000_000);
+    pushCandle(o, c, h, l, v, etToUtcMs(dateStr, minutesToHhmm(4 * 60 + i)));
+    price = c;
+  }
+
+  // Overnight gap into the regular-session open, like a real print.
+  price = Math.max(0.2, price * (1 + (rand() - 0.45) * 0.02));
+
   const regimes: Array<[number, number, number]> = [
     [0, 29, 0.0012],
     [30, 89, -0.0009],

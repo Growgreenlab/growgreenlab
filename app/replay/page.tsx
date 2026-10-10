@@ -233,6 +233,7 @@ function ReplayPageInner() {
               <CandleChart
                 candles={eng.displayCandles}
                 revealedCount={eng.displayCandles.length}
+                historyCount={meta.startIndex}
                 overlays={{
                   hod: eng.hod,
                   stopLoss: eng.stopLoss,
