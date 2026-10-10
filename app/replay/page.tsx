@@ -8,6 +8,7 @@ import DiagPanel from "../../components/DiagPanel";
 import DataSourcePanel from "../../components/DataSourcePanel";
 import ReplayControls from "../../components/ReplayControls";
 import TradingPanel from "../../components/TradingPanel";
+import RiskCalculator from "../../components/RiskCalculator";
 import { ReplayEngine, formatMoney, formatSigned, countdownText, TICKS_PER_CANDLE, SECONDS_PER_CANDLE } from "../../lib/engine";
 import type { Candle, SessionMeta } from "../../lib/types";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
@@ -452,6 +453,19 @@ function ReplayPageInner() {
                   }
                   bump();
                 }}
+                disabled={false}
+              />
+              <RiskCalculator
+                currentPrice={snap.price}
+                cash={snap.cash}
+                plannedSL={plannedSL}
+                plannedTP={plannedTP}
+                onApplyBrackets={(sl, tp) => {
+                  setPlannedSL(sl);
+                  setPlannedTP(tp);
+                  bump();
+                }}
+                onBuySized={(qty) => buyErr(qty)}
                 disabled={false}
               />
             </aside>
