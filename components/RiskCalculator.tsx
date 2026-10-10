@@ -23,7 +23,7 @@ interface Props {
   onPlannedChange: (sl: number | null, tp: number | null) => void;
   onActiveChange: (sl: number | null, tp: number | null) => void;
   onApplyBrackets: (sl: number | null, tp: number | null) => void;
-  onBuySized: (qty: number) => string | null;
+  onBuySized: (qty: number) => string | null | Promise<string | null>;
   disabled: boolean;
 }
 
@@ -145,7 +145,7 @@ export default function RiskCalculator({
     setMsg("Brackets applied to chart (planned).");
   };
 
-  const buySized = () => {
+  const buySized = async () => {
     if (!result.valid) {
       setMsg("Fix the errors first.");
       return;
@@ -154,7 +154,7 @@ export default function RiskCalculator({
       setMsg("Short is calculation-only — the simulator executes long positions.");
       return;
     }
-    const err = onBuySized(result.suggestedQty);
+    const err = await onBuySized(result.suggestedQty);
     setMsg(err ?? `Bought ${result.suggestedQty} shares (simulated).`);
   };
 

@@ -35,6 +35,13 @@ import {
 } from "../../lib/psychGuard";
 import type { GuardThreshold, PositionBaseline, LockoutState } from "../../lib/psychGuard";
 import PsychologyGuardPanel from "../../components/PsychologyGuardPanel";
+import GuestLimitModal from "../../components/GuestLimitModal";
+import {
+  GUEST_DAILY_LIMIT,
+  getGuestFingerprint,
+  getGuestTradesRemaining,
+  consumeGuestTrade,
+} from "../../lib/guestTrades";
 
 const START_CASH = 100_000;
 
@@ -260,6 +267,25 @@ function ReplayPageInner() {
   const [guardThresholds, setGuardThresholds] = useState<GuardThreshold[]>(() => loadThresholds());
   const [guardLockout, setGuardLockout] = useState<LockoutState | null>(() => loadLockout());
   const [guardUserId, setGuardUserId] = useState<string | null>(null);
+  // Guest trade limit (5/day, guests only).
+  const [guestRemaining, setGuestRemaining] = useState<number>(GUEST_DAILY_LIMIT);
+  const [showGuestModal, setShowGuestModal] = useState(false);
+
+  // Refresh guest remaining count (guests only; signed-in always see full).
+  const refreshGuestTrades = async () => {
+    if (guardUserId || !isSupabaseConfigured()) {
+      setGuestRemaining(GUEST_DAILY_LIMIT);
+      return;
+    }
+    const r = await getGuestTradesRemaining(createClient(), getGuestFingerprint());
+    setGuestRemaining(r);
+  };
+
+  // Load guest count on mount and when auth state resolves.
+  useEffect(() => {
+    refreshGuestTrades();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [guardUserId]);
 
   // On mount: sync lockout across browsers.
   // Signed-in: via profiles table. Guest: via device fingerprint.
@@ -410,6 +436,32 @@ function ReplayPageInner() {
     return f ? null : "No open position to sell.";
   };
 
+  // Guest trade limit gate: wraps buyErr for new positions (guests only).
+  // Adds, closes, failed orders, and signed-in users are never gated.
+  const gateBuy = async (qty: number): Promise<string | null> => {
+    const eng = engineRef.current;
+    if (!eng) return "Load a session first.";
+    const isNewPosition = eng.positionQty === 0;
+    const isGuest = !guardUserId && isSupabaseConfigured();
+    // Pre-check: block before consuming if already at limit.
+    if (isNewPosition && isGuest) {
+      const remaining = await getGuestTradesRemaining(createClient(), getGuestFingerprint());
+      setGuestRemaining(remaining);
+      if (remaining <= 0) {
+        setShowGuestModal(true);
+        return "Daily guest limit reached (5 trades).";
+      }
+    }
+    const result = buyErr(qty);
+    // Consume only on successful NEW position open.
+    if (result === null && isNewPosition && isGuest) {
+      await consumeGuestTrade(createClient(), getGuestFingerprint());
+      const remaining = await getGuestTradesRemaining(createClient(), getGuestFingerprint());
+      setGuestRemaining(remaining);
+    }
+    return result;
+  };
+
   // Basic trading hotkeys (Phase A1). Disabled while typing in inputs.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -422,7 +474,7 @@ function ReplayPageInner() {
 
       if (match(DEFAULT_HOTKEYS.buy)) {
         e.preventDefault();
-        buyErr(Math.floor(Number(orderQty) || 0));
+        gateBuy(Math.floor(Number(orderQty) || 0));
       } else if (match(DEFAULT_HOTKEYS.exit)) {
         e.preventDefault();
         if (eng.positionQty > 0) sellErr(eng.positionQty);
@@ -668,6 +720,30 @@ function ReplayPageInner() {
                 ))}
               </div>
               <div style={{ display: rightTab === "order" ? "block" : "none" }}>
+              {/* Guest trade counter (guests only) */}
+              {!guardUserId && (
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    padding: "7px 12px",
+                    marginBottom: 8,
+                    fontSize: 12.5,
+                    fontWeight: 600,
+                    color: guestRemaining > 0 ? "#94a3b8" : "#fb7185",
+                    background: "rgba(255,255,255,0.04)",
+                    border: "1px solid rgba(255,255,255,0.08)",
+                    borderRadius: 8,
+                  }}
+                  title="Free practice trades reset daily at midnight UTC"
+                >
+                  <span>Guest Trades</span>
+                  <span style={{ fontVariantNumeric: "tabular-nums" }}>
+                    {guestRemaining}/{GUEST_DAILY_LIMIT} Remaining Today
+                  </span>
+                </div>
+              )}
               <TradingPanel
                 snap={snap}
                 qty={orderQty}
@@ -678,7 +754,7 @@ function ReplayPageInner() {
                 activeSL={brackets.activeSL}
                 activeTP={brackets.activeTP}
                 hasPosition={eng.positionQty > 0}
-                onBuy={buyErr}
+                onBuy={gateBuy}
                 onSell={sellErr}
                 onPlaceLimit={placeLimitErr}
                 onCancelOrder={(id) => { eng.cancelOrder(id); bump(); }}
@@ -723,7 +799,7 @@ function ReplayPageInner() {
                   setPlannedLevels(sl, tp);
                   bump();
                 }}
-                onBuySized={(qty) => buyErr(qty)}
+                onBuySized={gateBuy}
                 disabled={false}
               />
               </div>
@@ -746,6 +822,17 @@ function ReplayPageInner() {
               </div>
             </aside>
           </div>
+
+          {/* Guest daily limit modal */}
+          {showGuestModal && (
+            <GuestLimitModal
+              onCreateAccount={() => {
+                setShowGuestModal(false);
+                window.location.href = "/login";
+              }}
+              onDismiss={() => setShowGuestModal(false)}
+            />
+          )}
 
           {/* data source popover */}
           {dataOpen && (

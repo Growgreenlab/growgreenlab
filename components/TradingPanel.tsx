@@ -28,7 +28,7 @@ interface Props {
   activeSL: number | null;
   activeTP: number | null;
   hasPosition: boolean;
-  onBuy: (qty: number) => string | null;
+  onBuy: (qty: number) => string | null | Promise<string | null>;
   onSell: (qty: number) => string | null;
   onPlaceLimit: (side: "buy" | "sell", qty: number, price: number) => string | null;
   onCancelOrder: (id: number) => void;
@@ -68,10 +68,10 @@ export default function TradingPanel({ snap, qty, onQtyChange, plannedSL, planne
 
   const effLimit = limitPx ? Number(limitPx) : snap.price;
 
-  const submit = (side: "buy" | "sell") => {
+  const submit = async (side: "buy" | "sell") => {
     const q = Number(qty);
     if (orderType === "market") {
-      const err = side === "buy" ? onBuy(q) : onSell(q);
+      const err = side === "buy" ? await onBuy(q) : onSell(q);
       setMsg(err ?? `${side === "buy" ? "Bought" : "Sold"} ${q} @ ${formatMoney(snap.price)} (simulated)`);
     } else {
       const err = onPlaceLimit(side, q, effLimit);

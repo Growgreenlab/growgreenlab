@@ -106,3 +106,51 @@ alter table public.guest_guard_lockouts enable row level security;
 drop policy if exists "public guard lockout" on public.guest_guard_lockouts;
 create policy "public guard lockout" on public.guest_guard_lockouts
   for all using (true) with check (true);
+
+-- Guest trade limit: 5 new positions per day (fingerprint-based).
+create table if not exists public.guest_trade_usage (
+  fingerprint text not null,
+  trade_date date not null default current_date,
+  count int not null default 0,
+  updated_at timestamptz not null default now(),
+  primary key (fingerprint, trade_date)
+);
+alter table public.guest_trade_usage enable row level security;
+drop policy if exists "public guest usage" on public.guest_trade_usage;
+create policy "public guest usage" on public.guest_trade_usage
+  for all using (true) with check (true);
+
+-- Remaining trades for a fingerprint today.
+create or replace function public.guest_trades_remaining(fp text)
+returns int as $$
+declare c int;
+begin
+  select count into c from public.guest_trade_usage
+  where fingerprint = fp and trade_date = current_date;
+  if not found then return 5; end if;
+  return greatest(0, 5 - c);
+end;
+$$ language plpgsql security definer;
+
+-- Atomically consume one trade. Returns true if consumed, false if at limit.
+create or replace function public.try_consume_guest_trade(fp text, max_trades int)
+returns boolean as $$
+declare current_count int;
+begin
+  select count into current_count from public.guest_trade_usage
+  where fingerprint = fp and trade_date = current_date
+  for update;
+  if not found then
+    insert into public.guest_trade_usage (fingerprint, trade_date, count)
+    values (fp, current_date, 1);
+    return true;
+  end if;
+  if current_count >= max_trades then
+    return false;
+  end if;
+  update public.guest_trade_usage
+  set count = count + 1, updated_at = now()
+  where fingerprint = fp and trade_date = current_date;
+  return true;
+end;
+$$ language plpgsql security definer;
