@@ -59,9 +59,11 @@ function mulberry32(seed: number): () => number {
  * safe to unit-test in Node. Long-only: buys open/add to a long
  * position, sells close/reduce it.
  *
- * `index` is the last finalized candle. The chart must render only
- * finalized candles plus the live-forming candle via `displayCandles`;
- * future candles are never exposed by this class.
+ * `index` is the last finalized candle. `startIndex` names the first LIVE
+ * candle: everything before it is history, and the replay opens with it
+ * forming tick-by-tick (so `index` starts at `startIndex - 1`). The chart
+ * must render only finalized candles plus the live-forming candle via
+ * `displayCandles`; future candles are never exposed by this class.
  *
  * Live formation: each candle is revealed tick-by-tick (TICKS_PER_CANDLE
  * ticks per simulated minute) from a deterministic, seeded intra-candle
@@ -96,15 +98,22 @@ export class ReplayEngine {
     if (candles.length === 0) throw new Error("Engine needs at least one candle");
     this.candles = candles;
     this.startCash = startCash;
+    // startIndex = the first LIVE candle: everything before it is history,
+    // and the replay opens with it forming tick-by-tick.
     this.startIndex = Math.max(0, Math.min(startIndex, candles.length - 1));
     const firstReal = candles.findIndex((c) => !c.syn);
     this.sessionStart = firstReal === -1 ? 0 : Math.min(firstReal, this.startIndex);
-    this.index = this.startIndex;
+    this.index = this.startIndex - 1;
     this.cash = startCash;
     this.positionQty = 0;
     this.positionAvg = 0;
     this.realizedPnl = 0;
     this.fills = [];
+    this.nextFillId = 1;
+    this.nextOrderId = 1;
+    // The start candle is live from the first render: no index=-1 edge
+    // cases anywhere, and no future close leaking into the price header.
+    if (!this.atEnd) this.beginForming();
   }
 
   /** Candles the trader is allowed to see right now (finalized only). */
@@ -351,9 +360,9 @@ export class ReplayEngine {
     this.takeProfit = null;
   }
 
-  /** Restore starting cash/position; keep the same start index. */
+  /** Restore starting cash/position; the start candle forms live again. */
   reset(): void {
-    this.index = this.startIndex;
+    this.index = this.startIndex - 1;
     this.cash = this.startCash;
     this.positionQty = 0;
     this.positionAvg = 0;
@@ -364,6 +373,7 @@ export class ReplayEngine {
     this.forming = null;
     this.nextFillId = 1;
     this.nextOrderId = 1;
+    if (!this.atEnd) this.beginForming();
   }
 
   private executionPrice(): number {

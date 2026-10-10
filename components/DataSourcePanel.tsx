@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 import type { Candle, DataSource, SessionMeta } from "../lib/types";
-import { generateSampleSession, startTimeOptions, generatePremarketBridge, stripSynthetic } from "../lib/marketData";
+import { generateSampleSession, generatePremarketBridge, stripSynthetic } from "../lib/marketData";
 import { fetchTwelveData } from "../lib/marketData.twelve";
 import { parseCsv, candlesToCsv } from "../lib/marketData.csv";
 
@@ -64,7 +64,10 @@ export default function DataSourcePanel({ candles, meta, defaultTicker, defaultD
       if (firstMins >= 9 * 60 + 29) {
         cs = [...generatePremarketBridge(ticker, date, real[0].o, real[0].t), ...real];
       }
-      onLoad(cs, { ticker: ticker.toUpperCase().trim(), tradeDate: date, source: "twelvedata", startIndex: timeToIndex(cs, startTime) });
+      // Never start the replay inside synthetic context: first real candle at the earliest.
+      const firstReal = cs.findIndex((c) => !c.syn);
+      const si = Math.max(timeToIndex(cs, startTime), firstReal === -1 ? 0 : firstReal);
+      onLoad(cs, { ticker: ticker.toUpperCase().trim(), tradeDate: date, source: "twelvedata", startIndex: si });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Twelve Data request failed.");
     } finally {
@@ -115,9 +118,13 @@ export default function DataSourcePanel({ candles, meta, defaultTicker, defaultD
         </div>
         <div className="field" style={{ marginBottom: 0 }}>
           <label>Replay starts at</label>
-          <select className="select" value={startTime} onChange={(e) => setStartTime(e.target.value)}>
-            {startTimeOptions().map((t) => <option key={t} value={t}>{t} ET</option>)}
-          </select>
+          <input
+            className="input num" type="time" step={60}
+            value={startTime} onChange={(e) => setStartTime(e.target.value)}
+            min={tab === "sample" ? "04:00" : tab === "twelvedata" ? "09:30" : undefined}
+            max={tab === "csv" ? undefined : "15:55"}
+            title="Pick any start time — the replay opens with that candle forming live"
+          />
         </div>
       </div>
 

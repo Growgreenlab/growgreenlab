@@ -145,13 +145,6 @@ export function generateSampleSession(ticker: string, dateStr: string): Candle[]
   return candles;
 }
 
-/** Replay start-time choices (ET) for the session setup. */
-export function startTimeOptions(): string[] {
-  const out: string[] = [];
-  for (let m = 9 * 60 + 30; m <= 15 * 60; m += 10) out.push(minutesToHhmm(m));
-  return out;
-}
-
 /**
  * Simulated premarket context: deterministic 1-minute candles ending right
  * before the real session open, random-walking backward from the real open

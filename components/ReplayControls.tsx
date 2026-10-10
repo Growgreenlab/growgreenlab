@@ -54,7 +54,7 @@ export default function ReplayControls(p: Props) {
             </button>
           ))}
         </div>
-        <div className="ctl-count num">Candle {Math.min(p.index + 1, p.total)} / {p.total}</div>
+        <div className="ctl-count num">Candle {Math.min(p.index + 2, p.total)} / {p.total}</div>
       </div>
       <div className="progress" aria-hidden>
         <i style={{ width: `${pct}%` }} />
@@ -67,7 +67,7 @@ export default function ReplayControls(p: Props) {
       <h3>Replay controls</h3>
       {bar}
       <div className="hint" style={{ marginTop: 8 }}>
-        Candle {Math.min(p.index + 1, p.total)} of {p.total} · 1x = live market speed (60s per candle) · future candles stay hidden
+        Candle {Math.min(p.index + 2, p.total)} of {p.total} · 1x = live market speed (60s per candle) · future candles stay hidden
       </div>
     </div>
   );

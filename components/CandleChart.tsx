@@ -33,6 +33,8 @@ interface Props {
   height?: number;
   /** Candles before this index are pre-replay history: rendered dimmed. */
   historyCount?: number;
+  /** Identity of the loaded session — the view refits when it changes. */
+  sessionKey?: string;
 }
 
 /**
@@ -42,12 +44,13 @@ interface Props {
  * spacing scale together with zoom; volume bars share the same x-mapping
  * so everything stays aligned. Only the revealed prefix is ever drawn.
  */
-export default function CandleChart({ candles, revealedCount, overlays, height, historyCount = 0 }: Props) {
+export default function CandleChart({ candles, revealedCount, overlays, height, historyCount = 0, sessionKey = "" }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef({ slot: DEFAULT_SLOT, scrollX: 0 });
   const userZoomedRef = useRef(false);
   const prevNRef = useRef(0);
+  const prevKeyRef = useRef("");
   const drawRef = useRef<() => void>(() => {});
   const fitViewRef = useRef<() => void>(() => {});
   const propsRef = useRef({ candles, revealedCount, overlays, height, historyCount });
@@ -77,6 +80,14 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
       const w = plotW();
       if (n * slot <= w) return (w - n * slot) / 2; // center narrow content
       return Math.min(0, Math.max(w - n * slot, sx));
+    };
+    // Looser clamp used while dragging: lets the chart stretch up to 80px
+    // past the data edge so the drag feels alive even at the boundary,
+    // then snaps back on release.
+    const clampScrollLoose = (sx: number, slot: number, n: number) => {
+      const w = plotW();
+      if (n * slot <= w) return (w - n * slot) / 2;
+      return Math.min(80, Math.max(w - n * slot - 80, sx));
     };
 
     const fitView = () => {
@@ -372,7 +383,7 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
         }
       } else if (pointers.size === 1 && drag) {
         const v = viewRef.current;
-        v.scrollX = clampScroll(drag.scrollX + (e.clientX - drag.x), v.slot, n);
+        v.scrollX = clampScrollLoose(drag.scrollX + (e.clientX - drag.x), v.slot, n);
         markZoomed();
         drawRef.current();
       }
@@ -383,6 +394,14 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
       if (pointers.size === 0) {
         drag = null;
         canvas.style.cursor = "grab";
+        // snap back any elastic overscroll at the data edges
+        const v = viewRef.current;
+        const n = dataOf().length;
+        const snapped = clampScroll(v.scrollX, v.slot, n);
+        if (snapped !== v.scrollX) {
+          v.scrollX = snapped;
+          drawRef.current();
+        }
       }
     };
     const onDblClick = () => { fitViewRef.current(); drawRef.current(); };
@@ -412,13 +431,16 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // React to data/prop changes: keep the live edge pinned while playing
-  // (unless the user zoomed/panned away), then redraw.
+  // React to data/prop changes: refit on a new session, keep the live
+  // edge pinned while playing (unless the user zoomed/panned away).
   useEffect(() => {
     const n = Math.max(0, Math.min(revealedCount, candles.length));
     const prevN = prevNRef.current;
-    if (prevNRef.current === 0 || n < prevN - 5) {
-      fitViewRef.current(); // fresh session
+    if (prevKeyRef.current !== sessionKey) {
+      prevKeyRef.current = sessionKey;
+      fitViewRef.current(); // fresh session (ticker/date/source reload)
+    } else if (prevNRef.current === 0 || n < prevN - 5) {
+      fitViewRef.current();
     } else if (n > prevN && userZoomedRef.current) {
       const w = (wrapRef.current?.clientWidth ?? 800) - 68;
       const v = viewRef.current;
@@ -432,7 +454,7 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
     prevNRef.current = n;
     drawRef.current();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [candles, revealedCount, overlays, height]);
+  }, [candles, revealedCount, overlays, height, sessionKey]);
 
   return (
     <div ref={wrapRef} style={{ width: "100%", height: "100%", position: "relative", minHeight: 240 }}>

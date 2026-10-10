@@ -45,42 +45,43 @@ const tape = [
   C(5.15, 5.18, 5.10, 5.12, 1100, 5),
 ];
 
-// 1. futures hidden
+// 1. futures hidden; startIndex = first LIVE candle (forming, not finalized)
 {
   const e = new ReplayEngine(tape, 100_000, 2);
-  ok(e.index === 2, "engine starts at startIndex");
-  ok(e.revealed.length === 3, "only 3 candles revealed");
-  ok(!e.revealed.some((c) => c.t > tape[2].t), "no future candle leaks");
-  eq(e.hod, 5.12, "HOD over revealed candles");
+  ok(e.index === 1, "engine starts one before the live candle");
+  ok(e.revealed.length === 2, "only 2 finalized candles revealed");
+  ok(e.displayCandles.length === 3, "plus the live-forming candle");
+  ok(!e.displayCandles.some((c) => c.t > tape[2].t), "no future candle leaks");
+  eq(e.hod, 5.10, "HOD over revealed candles");
 }
 
-// 2. buy opens position
+// 2. buy opens position at the live forming price
 {
-  const e = new ReplayEngine(tape, 100_000, 1); // price 5.08
+  const e = new ReplayEngine(tape, 100_000, 1); // live candle 1, opens 5.02
   const f = e.buy(100);
   ok(!!f, "buy fills");
   eq(e.positionQty, 100, "position qty");
-  eq(e.positionAvg, 5.08, "avg price");
-  eq(e.cash, 100_000 - 508, "cash reduced");
+  eq(e.positionAvg, 5.02, "avg price");
+  eq(e.cash, 100_000 - 502, "cash reduced");
   eq(e.unrealizedPnl(), 0, "unrealized zero at entry");
 }
 
 // 3. sell closes with correct P/L
 {
   const e = new ReplayEngine(tape, 100_000, 1);
-  e.buy(100); // @5.08
-  e.step(); e.step(); // index 3, price 4.92
+  e.buy(100); // @5.02
+  e.step(); e.step(); e.step(); // index 3, closed 4.92
   const f = e.sell(100);
   ok(!!f, "sell fills");
-  eq(f.realizedPnl, (4.92 - 5.08) * 100, "realized loss math");
-  eq(e.realizedPnl, -16, "engine realized total");
+  eq(f.realizedPnl, (4.92 - 5.02) * 100, "realized loss math");
+  eq(e.realizedPnl, -10, "engine realized total");
   eq(e.positionQty, 0, "flat after sell");
-  eq(e.cash, 100_000 - 508 + 492, "cash after round trip");
+  eq(e.cash, 100_000 - 502 + 492, "cash after round trip");
 }
 
 // 4. stop-loss triggers on the right candle
 {
-  const e = new ReplayEngine(tape, 100_000, 1);
+  const e = new ReplayEngine(tape, 100_000, 2); // live candle 2, opens 5.08
   e.buy(100); // @5.08
   e.setBrackets(5.0, null);
   const r = e.step(); // index 2: low 5.03, no trigger
@@ -96,7 +97,7 @@ const tape = [
 
 // 5. take-profit triggers
 {
-  const e = new ReplayEngine(tape, 100_000, 3); // price 4.92
+  const e = new ReplayEngine(tape, 100_000, 4); // live candle 4, opens 4.92
   e.buy(100);
   e.setBrackets(null, 5.18);
   const r = e.step(); // index 4: high 5.20 >= 5.18 -> fill at 5.18
@@ -119,9 +120,10 @@ const tape = [
 {
   const gap = [C(5.0, 5.05, 4.98, 5.02, 1000, 0), C(4.80, 4.85, 4.70, 4.75, 1000, 1)];
   const e = new ReplayEngine(gap, 100_000, 0);
-  e.buy(100); // @5.02
+  e.buy(100); // @5.00 (live open)
   e.setBrackets(4.9, null);
-  const r = e.step(); // opens at 4.80 < 4.90
+  e.step(); // candle 0 completes, low 4.98, no trigger
+  const r = e.step(); // candle 1 opens at 4.80 < 4.90
   eq(r.autoFills[0].price, 4.8, "gap-down stop fills at open");
 }
 
@@ -141,7 +143,7 @@ const tape = [
   const e = new ReplayEngine(tape, 100_000, 2);
   e.buy(10); e.step();
   e.reset();
-  ok(e.index === 2 && e.cash === 100_000 && e.positionQty === 0 &&
+  ok(e.index === 1 && e.cash === 100_000 && e.positionQty === 0 &&
      e.fills.length === 0 && e.realizedPnl === 0, "reset restores state");
 }
 
@@ -251,7 +253,7 @@ const tape = [
 // 15. live candle formation: ticks stay in range, finalize exact, deterministic
 {
   const { TICKS_PER_CANDLE } = require(join(OUT, "engine.js"));
-  const mk = () => new ReplayEngine(tape, 100_000, 1);
+  const mk = () => new ReplayEngine(tape, 100_000, 2); // live candle 2
   const e1 = mk(), e2 = mk();
   const seen1 = [];
   let r;
@@ -284,13 +286,14 @@ const tape = [
 
 // 16. buy during formation fills at the live tick price; HOD tracks live
 {
-  const e = new ReplayEngine(tape, 100_000, 1);
+  const e = new ReplayEngine(tape, 100_000, 1); // live candle 1
   e.tick(); e.tick();
   const live = e.displayPrice;
   const f = e.buy(100);
   ok(f !== null && Math.abs(f.price - live) < 1e-9, "buy fills at live tick price");
-  ok(f.candleIndex === 2, "formation fill tagged to forming candle");
-  ok(e.hod >= Math.max(tape[0].h, tape[1].h), "HOD includes forming high");
+  ok(f.candleIndex === 1, "formation fill tagged to forming candle");
+  const forming = e.displayCandles[e.displayCandles.length - 1];
+  eq(e.hod, Math.max(tape[0].h, forming.h), "HOD includes forming high");
   const un = e.unrealizedPnl();
   ok(Math.abs(un - (live - f.price) * 100) < 1e-9, "unrealized uses live price");
 }
@@ -349,7 +352,7 @@ const tape = [
   ok(e.placeLimitOrder("buy", 100, 9.7) === null, "limit buy accepted");
   eq(e.pendingOrders.length, 1, "one working order");
   let filled = null;
-  for (let k = 0; k < 400 && !filled; k++) { e.tick(); filled = e.fills[0]; }
+  for (let k = 0; k < 800 && !filled; k++) { e.tick(); filled = e.fills[0]; }
   ok(filled && filled.side === "buy" && filled.qty === 100, "limit buy filled on touch");
   ok(filled.price <= 9.7 + 1e-9, "filled at tick <= limit, got " + filled.price);
   ok(filled.note && filled.note.startsWith("limit"), "fill tagged as limit");
@@ -364,6 +367,24 @@ const tape = [
   e.reset();
   eq(e.pendingOrders.length, 0, "reset clears pending orders");
   eq(e.positionQty, 0, "reset flat");
+}
+
+// 20. custom start time: startIndex names the first LIVE candle
+{
+  const cs = MD.generateSampleSession("VEEA", "2026-10-09");
+  // 12:55 ET -> 330 premarket + (12:55 - 09:30) = 205 -> index 535
+  const e = new ReplayEngine(cs, 100_000, 535);
+  eq(e.index, 534, "index one before the live candle");
+  eq(e.startIndex, 535, "startIndex preserved");
+  const live = e.displayCandles[e.displayCandles.length - 1];
+  const et = new Date(new Date(cs[535].t).toLocaleString("en-US", { timeZone: "America/New_York" }));
+  eq(et.getHours() * 60 + et.getMinutes(), 12 * 60 + 55, "live candle is 12:55 ET");
+  eq(e.displayPrice, live.c, "price header tracks the live candle");
+  ok(e.displayCandles.every((c) => c.t <= live.t), "no future candles displayed");
+  // reset re-arms the same live candle
+  e.step(); e.reset();
+  eq(e.index, 534, "reset returns to one before the live candle");
+  ok(e.displayCandles[e.displayCandles.length - 1].t === cs[535].t, "reset re-arms 12:55");
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

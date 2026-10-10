@@ -52,8 +52,14 @@ function ReplayPageInner() {
     let acc = 0;
     const id = setInterval(() => {
       const now = performance.now();
-      acc += ((now - last) / 1000) * speed * (TICKS_PER_CANDLE / SECONDS_PER_CANDLE);
+      // Cap the delta: a hidden tab, laptop sleep, or devtools pause can
+      // leave a gap of minutes/hours. Accumulating all of it would fire
+      // thousands of catch-up ticks back-to-back, saturating the main
+      // thread so the chart appears frozen. The replay simply resumes
+      // from the live edge instead, like a real terminal.
+      const dt = Math.min((now - last) / 1000, 0.25);
       last = now;
+      acc += dt * speed * (TICKS_PER_CANDLE / SECONDS_PER_CANDLE);
       let finished = false;
       let guard = 0;
       let ran = 0;
@@ -276,6 +282,7 @@ function ReplayPageInner() {
                   candles={eng.displayCandles}
                   revealedCount={eng.displayCandles.length}
                   historyCount={meta.startIndex}
+                  sessionKey={`${meta.ticker}|${meta.tradeDate}|${meta.source}|${candles.length}`}
                   overlays={{
                     hod: eng.hod,
                     stopLoss: eng.stopLoss,
