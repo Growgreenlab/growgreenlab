@@ -273,11 +273,14 @@ function ReplayPageInner() {
 
   // Refresh guest remaining count (guests only; signed-in always see full).
   const refreshGuestTrades = async () => {
-    if (guardUserId || !isSupabaseConfigured()) {
+    if (guardUserId) {
       setGuestRemaining(GUEST_DAILY_LIMIT);
       return;
     }
-    const r = await getGuestTradesRemaining(createClient(), getGuestFingerprint());
+    const r = await getGuestTradesRemaining(
+      isSupabaseConfigured() ? createClient() : null,
+      getGuestFingerprint()
+    );
     setGuestRemaining(r);
   };
 
@@ -442,11 +445,14 @@ function ReplayPageInner() {
     const eng = engineRef.current;
     if (!eng) return "Load a session first.";
     const isNewPosition = eng.positionQty === 0;
-    const isGuest = !guardUserId && isSupabaseConfigured();
+    const isGuest = !guardUserId; // works with or without Supabase (localStorage fallback)
     console.log("[gateBuy] isNewPosition:", isNewPosition, "isGuest:", isGuest, "guardUserId:", guardUserId);
     // Pre-check: block before consuming if already at limit.
     if (isNewPosition && isGuest) {
-      const remaining = await getGuestTradesRemaining(createClient(), getGuestFingerprint());
+      const remaining = await getGuestTradesRemaining(
+        isSupabaseConfigured() ? createClient() : null,
+        getGuestFingerprint()
+      );
       console.log("[gateBuy] pre-check remaining:", remaining);
       setGuestRemaining(remaining);
       if (remaining <= 0) {
@@ -458,9 +464,15 @@ function ReplayPageInner() {
     console.log("[gateBuy] buyErr result:", result);
     // Consume only on successful NEW position open.
     if (result === null && isNewPosition && isGuest) {
-      const consumed = await consumeGuestTrade(createClient(), getGuestFingerprint());
+      const consumed = await consumeGuestTrade(
+        isSupabaseConfigured() ? createClient() : null,
+        getGuestFingerprint()
+      );
       console.log("[gateBuy] consumed:", consumed);
-      const remaining = await getGuestTradesRemaining(createClient(), getGuestFingerprint());
+      const remaining = await getGuestTradesRemaining(
+        isSupabaseConfigured() ? createClient() : null,
+        getGuestFingerprint()
+      );
       console.log("[gateBuy] post-buy remaining:", remaining);
       setGuestRemaining(remaining);
     }

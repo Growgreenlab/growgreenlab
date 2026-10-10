@@ -49,9 +49,12 @@ type AnyClient = any;
 
 /** Get remaining guest trades for today. Falls back to localStorage offline. */
 export async function getGuestTradesRemaining(
-  supabase: AnyClient,
+  supabase: AnyClient | null,
   fingerprint: string
 ): Promise<number> {
+  const local = readLocal();
+  const localRemaining = Math.max(0, GUEST_DAILY_LIMIT - local.count);
+  if (!supabase) return localRemaining;
   try {
     const { data, error } = await supabase.rpc("guest_trades_remaining", {
       fp: fingerprint,
@@ -59,13 +62,9 @@ export async function getGuestTradesRemaining(
     if (error) throw error;
     const server = typeof data === "number" ? data : GUEST_DAILY_LIMIT;
     // Merge with local: take the lower remaining (stricter)
-    const local = readLocal();
-    const localRemaining = Math.max(0, GUEST_DAILY_LIMIT - local.count);
     return Math.min(server, localRemaining);
   } catch {
-    // Offline: use localStorage
-    const local = readLocal();
-    return Math.max(0, GUEST_DAILY_LIMIT - local.count);
+    return localRemaining;
   }
 }
 
@@ -75,15 +74,16 @@ export async function getGuestTradesRemaining(
  * Always writes localStorage; also writes server when online.
  */
 export async function consumeGuestTrade(
-  supabase: AnyClient,
+  supabase: AnyClient | null,
   fingerprint: string
 ): Promise<boolean> {
-  // Always increment local first (works offline)
+  // Always increment local first (works offline / without Supabase)
   const local = readLocal();
   const localAllowed = local.count < GUEST_DAILY_LIMIT;
   if (localAllowed) {
     writeLocal({ date: local.date, count: local.count + 1 });
   }
+  if (!supabase) return localAllowed;
 
   try {
     const { data, error } = await supabase.rpc("try_consume_guest_trade", {
@@ -91,13 +91,10 @@ export async function consumeGuestTrade(
       max_trades: GUEST_DAILY_LIMIT,
     });
     if (error) throw error;
-    // Server is authoritative when reachable; reconcile local
     if (data === true) return true;
-    // Server says at limit — ensure local reflects it
     writeLocal({ date: todayUTC(), count: GUEST_DAILY_LIMIT });
     return false;
   } catch {
-    // Offline: rely on localStorage
     return localAllowed;
   }
 }
