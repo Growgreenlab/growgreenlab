@@ -66,17 +66,25 @@ export default function RiskCalculator({
   }, [sourceSL, sourceTP, hasPosition]);
 
   const handleSLInput = (v: string) => {
+    // Update local state only while typing; commit on blur to avoid
+    // the sync effect overwriting in-progress input (e.g. "3" -> "3.00").
     setSl(v);
-    const n = v === "" ? null : Number(v);
-    if (v !== "" && !isFinite(n!)) return;
-    if (hasPosition) onActiveChange(n, activeTP);
-    else onPlannedChange(n, plannedTP);
   };
 
   const handleTPInput = (v: string) => {
     setTp(v);
-    const n = v === "" ? null : Number(v);
-    if (v !== "" && !isFinite(n!)) return;
+  };
+
+  const commitSL = () => {
+    const n = sl === "" ? null : Number(sl);
+    if (sl !== "" && (!isFinite(n!) || n! <= 0)) return;
+    if (hasPosition) onActiveChange(n, activeTP);
+    else onPlannedChange(n, plannedTP);
+  };
+
+  const commitTP = () => {
+    const n = tp === "" ? null : Number(tp);
+    if (tp !== "" && (!isFinite(n!) || n! <= 0)) return;
     if (hasPosition) onActiveChange(activeSL, n);
     else onPlannedChange(plannedSL, n);
   };
@@ -127,7 +135,8 @@ export default function RiskCalculator({
     label: string,
     value: string,
     onChange: (v: string) => void,
-    placeholder?: string
+    placeholder?: string,
+    onBlur?: () => void
   ) => (
     <div className="field">
       <label>{label}</label>
@@ -138,6 +147,8 @@ export default function RiskCalculator({
         value={value}
         placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
+        onBlur={onBlur}
+        onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
         disabled={disabled}
       />
     </div>
@@ -180,8 +191,8 @@ export default function RiskCalculator({
             </div>
           </div>
           <div className="field-row" style={{ marginTop: 6 }}>
-            {field("Stop-loss $", sl, handleSLInput, "—")}
-            {field("Take-profit $", tp, handleTPInput, "—")}
+            {field("Stop-loss $", sl, handleSLInput, "—", commitSL)}
+            {field("Take-profit $", tp, handleTPInput, "—", commitTP)}
           </div>
           <div className="field-row" style={{ marginTop: 6 }}>
             {field("Fees $", fees, setFees)}
