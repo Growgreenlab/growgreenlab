@@ -20,6 +20,11 @@ function ReplayPageInner() {
   const [candles, setCandles] = useState<Candle[] | null>(null);
   const [meta, setMeta] = useState<SessionMeta | null>(null);
   const [playing, setPlaying] = useState(false);
+  // Bumped to force the timer effect to re-run on restart even when
+  // `playing` doesn't net-change (React batches setPlaying(false) +
+  // setPlaying(true) into a no-op, which used to leave the replay frozen
+  // with no timer running).
+  const [playNonce, setPlayNonce] = useState(0);
   const [speed, setSpeed] = useState(1);
   const [ended, setEnded] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -86,7 +91,7 @@ function ReplayPageInner() {
       if (timerRef.current === id) timerRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playing, speed]);
+  }, [playing, speed, playNonce]);
 
   const handleLoad = useCallback((cs: Candle[], m: SessionMeta) => {
     stopTimer();
@@ -282,11 +287,11 @@ function ReplayPageInner() {
                 playing={playing}
                 canPlay={!eng.atEnd}
                 ended={ended}
-                onPlay={() => { setEnded(false); setPlaying(true); }}
+                onPlay={() => { setEnded(false); setPlayNonce((n) => n + 1); setPlaying(true); }}
                 onPause={stopTimer}
                 onNext={() => { eng.step(); setEnded(eng.atEnd); bump(); }}
                 onReset={() => { stopTimer(); setEnded(false); eng.reset(); bump(); }}
-                onRestart={() => { stopTimer(); setEnded(false); eng.reset(); bump(); setPlaying(true); }}
+                onRestart={() => { stopTimer(); setEnded(false); eng.reset(); bump(); setPlayNonce((n) => n + 1); setPlaying(true); }}
                 speed={speed}
                 onSpeed={setSpeed}
                 index={eng.index}
