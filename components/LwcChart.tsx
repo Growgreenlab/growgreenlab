@@ -330,7 +330,8 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     }
   };
 
-  // Drawing coordinate helpers.
+  // Drawing coordinate helpers. All coordinates are element-relative
+  // (relative to the chart div), matching e.clientX - rect.left.
   const drawingCoords = () => {
     const chart = chartRef.current;
     const cs = candleSeriesRef.current;
@@ -339,20 +340,14 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     const rect = el.getBoundingClientRect();
     return {
       chart, cs, rect,
-      toPrice: (y: number) => cs.coordinateToPrice(y - rect.top),
+      toPrice: (y: number) => cs.coordinateToPrice(y),
       toTime: (x: number) => {
-        const t = chart.timeScale().coordinateToTime(x - rect.left);
+        const t = chart.timeScale().coordinateToTime(x);
         // coordinateToTime returns UTCTimestamp (seconds) or null
         return t == null ? null : Number(t) * 1000;
       },
-      toY: (price: number) => {
-        const c = cs.priceToCoordinate(price);
-        return c == null ? null : c + rect.top;
-      },
-      toX: (timeMs: number) => {
-        const c = chart.timeScale().timeToCoordinate(Math.floor(timeMs / 1000) as UTCTimestamp);
-        return c == null ? null : c + rect.left;
-      },
+      toY: (price: number) => cs.priceToCoordinate(price),
+      toX: (timeMs: number) => chart.timeScale().timeToCoordinate(Math.floor(timeMs / 1000) as UTCTimestamp),
     };
   };
 
@@ -425,14 +420,8 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
 
     // Select mode: hit-test drawings first, then SL/TP lines.
     if (tool === "select") {
-      const toX = (t: number) => {
-        const c = dc.toX(t);
-        return c == null ? null : c - rect.left;
-      };
-      const toY = (p: number) => {
-        const c = dc.toY(p);
-        return c == null ? null : c - rect.top;
-      };
+      const toX = (t: number) => dc.toX(t);
+      const toY = (p: number) => dc.toY(p);
       for (const d of drawingsRef.current) {
         if (hitTestDrawing(d, x, y, toX, toY)) {
           e.preventDefault();
