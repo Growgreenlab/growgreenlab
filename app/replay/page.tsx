@@ -6,7 +6,7 @@ import CandleChart from "../../components/CandleChart";
 import DataSourcePanel from "../../components/DataSourcePanel";
 import ReplayControls from "../../components/ReplayControls";
 import TradingPanel from "../../components/TradingPanel";
-import { ReplayEngine, formatMoney, formatSigned, TICKS_PER_CANDLE } from "../../lib/engine";
+import { ReplayEngine, formatMoney, formatSigned, TICKS_PER_CANDLE, SECONDS_PER_CANDLE } from "../../lib/engine";
 import type { Candle, SessionMeta } from "../../lib/types";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
 
@@ -34,9 +34,9 @@ function ReplayPageInner() {
 
   useEffect(() => stopTimer, [stopTimer]);
 
-  // Play loop: wall-clock paced ticks so each 1-minute candle forms
-  // gradually in real time (one simulated minute per 1/speed seconds),
-  // with the price ticking live as the candle builds.
+  // Play loop: wall-clock paced ticks. 1x = live market speed: each
+  // 1-minute candle forms gradually over 60 real seconds, the price
+  // ticking continuously as the candle builds, then finalizing.
   useEffect(() => {
     if (!playing) return;
     const eng = engineRef.current;
@@ -45,16 +45,18 @@ function ReplayPageInner() {
     let acc = 0;
     const id = setInterval(() => {
       const now = performance.now();
-      acc += ((now - last) / 1000) * speed * TICKS_PER_CANDLE;
+      acc += ((now - last) / 1000) * speed * (TICKS_PER_CANDLE / SECONDS_PER_CANDLE);
       last = now;
       let finished = false;
       let guard = 0;
-      while (acc >= 1 && guard++ < 1000) {
+      let ran = 0;
+      while (acc >= 1 && guard++ < 2000) {
         acc -= 1;
+        ran++;
         const r = eng.tick();
         if (r.atEnd) { finished = true; acc = 0; break; }
       }
-      bump();
+      if (ran > 0) bump();
       if (finished) stopTimer();
     }, 50);
     return () => clearInterval(id);

@@ -17,10 +17,14 @@ export interface TickResult {
 }
 
 /** Intra-candle ticks per simulated minute. Fixed so sessions animate identically. */
-export const TICKS_PER_CANDLE = 24;
+export const TICKS_PER_CANDLE = 360; // ~6 ticks/sec at 1x real-time speed
+/** Real seconds for one 1-minute candle to form at 1x speed (live market pace). */
+export const SECONDS_PER_CANDLE = 60;
 
 interface FormingState {
   ticks: number[];
+  /** Cumulative volume fraction per tick (0..1), bursts with price activity. */
+  volFrac: number[];
   pos: number; // index of the latest applied tick
   o: number;
   h: number;
@@ -178,7 +182,7 @@ export class ReplayEngine {
     f.c = tick;
     if (tick > f.h) f.h = tick;
     if (tick < f.l) f.l = tick;
-    f.v = target.v * ((f.pos + 1) / TICKS_PER_CANDLE);
+    f.v = target.v * f.volFrac[f.pos];
 
     // Bracket triggers, evaluated per tick. Stop-first when the candle's
     // true range would touch both (conservative, matches step()).
@@ -303,8 +307,10 @@ export class ReplayEngine {
 
   private beginForming(): void {
     const target = this.candles[this.index + 1];
+    const { ticks, volFrac } = makeTicks(target);
     this.forming = {
-      ticks: makeTicks(target),
+      ticks,
+      volFrac,
       pos: -1,
       o: target.o,
       h: target.o,
@@ -380,34 +386,58 @@ export class ReplayEngine {
 }
 
 /**
- * Deterministic intra-candle tick path: starts at the open, ends at the
- * close, random-walks with pull toward the open→close line, stays inside
- * [low, high], and is pinned to touch the true high and low once so the
- * forming candle reaches its real extremes with no snap at finalize.
+ * Deterministic intra-candle tick path: a Brownian bridge pinned to the
+ * open and close, so the price fluctuates naturally like a live tape —
+ * drifting, pulling back, and breathing around the open→close line.
+ * The path is clamped to the candle's true [low, high], pinned to touch
+ * the true high and low once (no visual snap at finalize), and volume
+ * accumulates in bursts proportional to price movement, as in real markets.
  */
-function makeTicks(c: Candle): number[] {
+function makeTicks(c: Candle): { ticks: number[]; volFrac: number[] } {
   const n = TICKS_PER_CANDLE;
   const rand = mulberry32(hashSeed(c.t, c.o, c.h, c.l, c.c, c.v));
-  const pts: number[] = new Array(n);
-  pts[0] = c.o;
-  let p = c.o;
+  const zn = () => (rand() + rand() + rand() - 1.5) * 2; // ~N(0,1)
+
+  // random walk with unit variance at t=1, then bridge it between open and close
+  const w: number[] = new Array(n);
+  w[0] = 0;
+  const step = 1 / Math.sqrt(n);
+  for (let k = 1; k < n; k++) w[k] = w[k - 1] + zn() * step;
   const range = Math.max(c.h - c.l, 1e-9);
-  for (let k = 1; k < n - 1; k++) {
-    const target = c.o + (c.c - c.o) * (k / (n - 1));
-    p += (rand() - 0.5) * range * 0.6 + (target - p) * 0.3;
+  const sigma = range * 0.5;
+  const pts: number[] = new Array(n);
+  for (let k = 0; k < n; k++) {
+    const t = k / (n - 1);
+    let p = c.o + (c.c - c.o) * t + sigma * (w[k] - t * w[n - 1]);
     if (p > c.h) p = c.h;
     if (p < c.l) p = c.l;
     pts[k] = p;
   }
+  pts[0] = c.o;
   pts[n - 1] = c.c;
-  if (c.h > c.l) {
+  if (c.h > c.l && n > 4) {
     const iH = 1 + Math.floor(rand() * (n - 2));
     let iL = 1 + Math.floor(rand() * (n - 2));
     if (iL === iH) iL = iL >= n - 2 ? 1 : iL + 1;
     pts[iH] = c.h;
     pts[iL] = c.l;
   }
-  return pts;
+
+  // volume follows price activity: bursts on moves, quiet on drifts
+  const deltas: number[] = new Array(n);
+  deltas[0] = 0;
+  let tot = 0;
+  for (let k = 1; k < n; k++) {
+    deltas[k] = Math.abs(pts[k] - pts[k - 1]);
+    tot += deltas[k];
+  }
+  const volFrac: number[] = new Array(n);
+  let acc = 0;
+  for (let k = 0; k < n; k++) {
+    acc += deltas[k];
+    volFrac[k] = tot > 1e-12 ? acc / tot : (k + 1) / n;
+  }
+  return { ticks: pts, volFrac };
 }
 
 export function formatMoney(n: number): string {

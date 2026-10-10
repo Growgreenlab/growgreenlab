@@ -58,7 +58,7 @@ export default function ReplayControls(p: Props) {
         <i style={{ width: `${pct}%` }} />
       </div>
       <div className="hint" style={{ marginTop: 8 }}>
-        Candle {Math.min(p.index + 1, p.total)} of {p.total} · future candles stay hidden
+        Candle {Math.min(p.index + 1, p.total)} of {p.total} · 1x = live market speed (60s per candle) · future candles stay hidden
       </div>
     </div>
   );
