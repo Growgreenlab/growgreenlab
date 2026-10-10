@@ -15,6 +15,7 @@ import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
 import { diag } from "../../lib/diag";
 import { DEFAULT_HOTKEYS, isTypingTarget } from "../../lib/hotkeys";
 import { normalizePrice } from "../../lib/price";
+import type { Drawing, DrawingTool } from "../../lib/drawings";
 
 const START_CASH = 100_000;
 
@@ -33,6 +34,9 @@ function ReplayPageInner() {
   // Planned entry: captured when levels are first set, fixed thereafter.
   // Used for R:R calculations so they don't drift with live price.
   const [plannedEntry, setPlannedEntry] = useState<number | null>(null);
+  // Chart drawings (in-memory; per session).
+  const [drawings, setDrawings] = useState<Drawing[]>([]);
+  const [drawingTool, setDrawingTool] = useState<DrawingTool>("select");
 
   const setPlannedLevels = (sl: number | null, tp: number | null) => {
     if ((sl != null || tp != null) && plannedEntry == null) {
@@ -437,6 +441,10 @@ function ReplayPageInner() {
                       const e = engineRef.current;
                       if (e) { e.setBrackets(sl, tp); bump(); }
                     }}
+                    drawings={drawings}
+                    onDrawingsChange={setDrawings}
+                    drawingTool={drawingTool}
+                    onDrawingToolChange={setDrawingTool}
                   />
                 )}
               </div>

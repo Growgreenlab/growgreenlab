@@ -8,7 +8,7 @@
  */
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   createChart,
   CandlestickSeries,
@@ -21,6 +21,10 @@ import {
 import type { Candle } from "../lib/types";
 import { diag } from "../lib/diag";
 import { normalizePrice, formatPrice } from "../lib/price";
+import type { Drawing, DrawingTool } from "../lib/drawings";
+import { newDrawingId, DRAWING_COLORS } from "../lib/drawings";
+import DrawingToolbar from "./DrawingToolbar";
+import DrawingLayer, { hitTestDrawing } from "./DrawingLayer";
 
 const UP = "#2ebd85";
 const DOWN = "#f6465d";
@@ -43,9 +47,13 @@ interface Props {
   brackets: BracketLevels;
   onPlannedDrag: (sl: number | null, tp: number | null) => void;
   onActiveDrag: (sl: number | null, tp: number | null) => void;
+  drawings: Drawing[];
+  onDrawingsChange: (drawings: Drawing[]) => void;
+  drawingTool: DrawingTool;
+  onDrawingToolChange: (tool: DrawingTool) => void;
 }
 
-export default function LwcChart({ candles, revealedCount, sessionKey, countdown, lastPrice, brackets, onPlannedDrag, onActiveDrag }: Props) {
+export default function LwcChart({ candles, revealedCount, sessionKey, countdown, lastPrice, brackets, onPlannedDrag, onActiveDrag, drawings, onDrawingsChange, drawingTool, onDrawingToolChange }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const elRef = useRef<HTMLDivElement>(null);
   const countdownRef = useRef<HTMLDivElement>(null);
@@ -64,6 +72,21 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
   // Latest brackets for use in pointer handlers (avoids stale closures).
   const bracketsRef = useRef(brackets);
   bracketsRef.current = brackets;
+  // Drawing state.
+  const [selectedDrawingId, setSelectedDrawingId] = useState<string | null>(null);
+  const drawingsRef = useRef(drawings);
+  drawingsRef.current = drawings;
+  const toolRef = useRef(drawingTool);
+  toolRef.current = drawingTool;
+  // Pending first point for trendline placement; drag state for drawings.
+  const pendingTrendRef = useRef<{ time: number; price: number } | null>(null);
+  const drawingDragRef = useRef<{
+    id: string;
+    mode: "move" | "p1" | "p2";
+    startX: number;
+    startY: number;
+  } | null>(null);
+  const [chartSize, setChartSize] = useState({ w: 0, h: 0 });
 
   // Create the chart once.
   useEffect(() => {
@@ -130,8 +153,10 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
 
     const ro = new ResizeObserver(() => {
       chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
+      setChartSize({ w: el.clientWidth, h: el.clientHeight });
     });
     ro.observe(wrap);
+    setChartSize({ w: el.clientWidth, h: el.clientHeight });
     return () => {
       ro.disconnect();
       chart.remove();
@@ -305,29 +330,191 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     }
   };
 
+  // Drawing coordinate helpers.
+  const drawingCoords = () => {
+    const chart = chartRef.current;
+    const cs = candleSeriesRef.current;
+    const el = elRef.current;
+    if (!chart || !cs || !el) return null;
+    const rect = el.getBoundingClientRect();
+    return {
+      chart, cs, rect,
+      toPrice: (y: number) => cs.coordinateToPrice(y - rect.top),
+      toTime: (x: number) => {
+        const t = chart.timeScale().coordinateToTime(x - rect.left);
+        // coordinateToTime returns UTCTimestamp (seconds) or null
+        return t == null ? null : Number(t) * 1000;
+      },
+      toY: (price: number) => {
+        const c = cs.priceToCoordinate(price);
+        return c == null ? null : c + rect.top;
+      },
+      toX: (timeMs: number) => {
+        const c = chart.timeScale().timeToCoordinate(Math.floor(timeMs / 1000) as UTCTimestamp);
+        return c == null ? null : c + rect.left;
+      },
+    };
+  };
+
+  const disableChartNav = () => {
+    const chart = chartRef.current;
+    if (chart) chart.applyOptions({ handleScroll: false, handleScale: false });
+    if (wrapRef.current) wrapRef.current.style.touchAction = "none";
+  };
+  const enableChartNav = () => {
+    const chart = chartRef.current;
+    if (chart) chart.applyOptions({ handleScroll: true, handleScale: true });
+    if (wrapRef.current) wrapRef.current.style.touchAction = "";
+  };
+
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     const chart = chartRef.current;
     const el = elRef.current;
     if (!chart || !el) return;
-    const rect = el.getBoundingClientRect();
+    const dc = drawingCoords();
+    if (!dc) return;
+    const rect = dc.rect;
+    const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
+    const tool = toolRef.current;
+
+    // Drawing placement modes: disable pan, place on click.
+    if (tool === "hline") {
+      e.preventDefault();
+      e.stopPropagation();
+      const price = dc.toPrice(y);
+      if (price != null && isFinite(price) && price > 0) {
+        const clean = normalizePrice(price);
+        const d: Drawing = {
+          id: newDrawingId(),
+          type: "hline",
+          price: clean,
+          color: DRAWING_COLORS.hline,
+        };
+        onDrawingsChange([...drawingsRef.current, d]);
+        setSelectedDrawingId(d.id);
+      }
+      return;
+    }
+    if (tool === "trendline") {
+      e.preventDefault();
+      e.stopPropagation();
+      const price = dc.toPrice(y);
+      const time = dc.toTime(x);
+      if (price == null || !isFinite(price) || price <= 0 || time == null) return;
+      const cleanPrice = normalizePrice(price);
+      if (!pendingTrendRef.current) {
+        // First point.
+        pendingTrendRef.current = { time, price: cleanPrice };
+      } else {
+        // Second point: create the trendline.
+        const p1 = pendingTrendRef.current;
+        pendingTrendRef.current = null;
+        const d: Drawing = {
+          id: newDrawingId(),
+          type: "trendline",
+          p1,
+          p2: { time, price: cleanPrice },
+          color: DRAWING_COLORS.trendline,
+        };
+        onDrawingsChange([...drawingsRef.current, d]);
+        setSelectedDrawingId(d.id);
+      }
+      return;
+    }
+
+    // Select mode: hit-test drawings first, then SL/TP lines.
+    if (tool === "select") {
+      const toX = (t: number) => {
+        const c = dc.toX(t);
+        return c == null ? null : c - rect.left;
+      };
+      const toY = (p: number) => {
+        const c = dc.toY(p);
+        return c == null ? null : c - rect.top;
+      };
+      for (const d of drawingsRef.current) {
+        if (hitTestDrawing(d, x, y, toX, toY)) {
+          e.preventDefault();
+          e.stopPropagation();
+          setSelectedDrawingId(d.id);
+          // Check if hitting an endpoint (for trendline).
+          let mode: "move" | "p1" | "p2" = "move";
+          if (d.type === "trendline" && d.p1 && d.p2) {
+            const x1 = toX(d.p1.time); const y1 = toY(d.p1.price);
+            const x2 = toX(d.p2.time); const y2 = toY(d.p2.price);
+            if (x1 != null && y1 != null && Math.hypot(x - x1, y - y1) < 10) mode = "p1";
+            else if (x2 != null && y2 != null && Math.hypot(x - x2, y - y2) < 10) mode = "p2";
+          }
+          drawingDragRef.current = { id: d.id, mode, startX: x, startY: y };
+          disableChartNav();
+          (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+          return;
+        }
+      }
+      // Clicked empty space: deselect.
+      if (selectedDrawingId) setSelectedDrawingId(null);
+    }
+
+    // SL/TP line drag (existing behavior).
     const hit = hitTestBracket(y);
     if (hit) {
       e.preventDefault();
       e.stopPropagation();
       dragRef.current = { kind: hit };
-      // Disable chart pan/zoom so dragging the line doesn't move the chart.
-      chart.applyOptions({ handleScroll: false, handleScale: false });
-      // Prevent browser touch gestures during line drag (re-enabled on release).
-      if (wrapRef.current) wrapRef.current.style.touchAction = "none";
+      disableChartNav();
       (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
     }
   };
 
   const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
+    const dDrag = drawingDragRef.current;
     const cs = candleSeriesRef.current;
     const el = elRef.current;
+
+    // Drawing drag in progress.
+    if (dDrag && cs && el) {
+      const dc = drawingCoords();
+      if (!dc) return;
+      const rect = dc.rect;
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      const price = dc.toPrice(y);
+      const time = dc.toTime(x);
+      if (price == null || !isFinite(price) || price <= 0) return;
+      const cleanPrice = normalizePrice(price);
+      const updated = drawingsRef.current.map((d) => {
+        if (d.id !== dDrag.id) return d;
+        if (d.type === "hline") {
+          return { ...d, price: cleanPrice };
+        }
+        if (d.type === "trendline" && d.p1 && d.p2) {
+          if (dDrag.mode === "p1") return { ...d, p1: { time: time ?? d.p1.time, price: cleanPrice } };
+          if (dDrag.mode === "p2") return { ...d, p2: { time: time ?? d.p2.time, price: cleanPrice } };
+          // Move whole line: shift both points by delta.
+          const dx = x - dDrag.startX;
+          const dy = y - dDrag.startY;
+          // Convert pixel delta to time/price delta via current scale.
+          const p1x = dc.toX(d.p1.time); const p1y = dc.toY(d.p1.price);
+          const p2x = dc.toX(d.p2.time); const p2y = dc.toY(d.p2.price);
+          if (p1x == null || p1y == null || p2x == null || p2y == null) return d;
+          const newP1Time = dc.toTime(p1x + dx); const newP1Price = dc.toPrice(p1y + dy);
+          const newP2Time = dc.toTime(p2x + dx); const newP2Price = dc.toPrice(p2y + dy);
+          if (newP1Time == null || newP1Price == null || newP2Time == null || newP2Price == null) return d;
+          dDrag.startX = x; dDrag.startY = y; // update for incremental moves
+          return {
+            ...d,
+            p1: { time: newP1Time, price: normalizePrice(newP1Price) },
+            p2: { time: newP2Time, price: normalizePrice(newP2Price) },
+          };
+        }
+        return d;
+      });
+      onDrawingsChange(updated);
+      return;
+    }
+
     if (!drag || !cs || !el) {
       // Not dragging: just update hover cursor.
       onPointerMoveHover(e);
@@ -353,15 +540,17 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
   };
 
   const onPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    // End drawing drag.
+    if (drawingDragRef.current) {
+      drawingDragRef.current = null;
+      enableChartNav();
+    }
     const drag = dragRef.current;
     const chart = chartRef.current;
     if (!drag) return;
     const pendingPrice = (drag as { pendingPrice?: number }).pendingPrice;
     dragRef.current = null;
-    if (chart) {
-      chart.applyOptions({ handleScroll: true, handleScale: true });
-    }
-    if (wrapRef.current) wrapRef.current.style.touchAction = "";
+    enableChartNav();
     if (pendingPrice != null && isFinite(pendingPrice) && pendingPrice > 0) {
       // Normalize to valid tick increment to avoid float artifacts.
       const clean = normalizePrice(pendingPrice);
@@ -373,6 +562,26 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     }
   };
 
+  // Keyboard: Delete/Backspace removes selected drawing, Esc exits tool.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if ((e.key === "Delete" || e.key === "Backspace") && selectedDrawingId) {
+        e.preventDefault();
+        onDrawingsChange(drawingsRef.current.filter((d) => d.id !== selectedDrawingId));
+        setSelectedDrawingId(null);
+      }
+      if (e.key === "Escape") {
+        pendingTrendRef.current = null;
+        if (toolRef.current !== "select") onDrawingToolChange("select");
+        setSelectedDrawingId(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectedDrawingId, onDrawingsChange, onDrawingToolChange]);
+
   return (
     <div
       ref={wrapRef}
@@ -383,6 +592,25 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       onPointerCancel={onPointerUp}
     >
       <div ref={elRef} style={{ width: "100%", height: "100%" }} />
+      <DrawingLayer
+        chart={chartRef.current}
+        series={candleSeriesRef.current}
+        drawings={drawings}
+        selectedId={selectedDrawingId}
+        width={chartSize.w}
+        height={chartSize.h}
+      />
+      <DrawingToolbar
+        tool={drawingTool}
+        onToolChange={onDrawingToolChange}
+        onDeleteSelected={() => {
+          if (selectedDrawingId) {
+            onDrawingsChange(drawings.filter((d) => d.id !== selectedDrawingId));
+            setSelectedDrawingId(null);
+          }
+        }}
+        hasSelection={selectedDrawingId != null}
+      />
       <div
         ref={countdownRef}
         style={{
