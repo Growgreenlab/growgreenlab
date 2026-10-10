@@ -460,6 +460,14 @@ function ReplayPageInner() {
                 cash={snap.cash}
                 plannedSL={plannedSL}
                 plannedTP={plannedTP}
+                activeSL={eng.stopLoss}
+                activeTP={eng.takeProfit}
+                hasPosition={eng.positionQty > 0}
+                onPlannedChange={(sl, tp) => { setPlannedSL(sl); setPlannedTP(tp); }}
+                onActiveChange={(sl, tp) => {
+                  const e = engineRef.current;
+                  if (e) { e.setBrackets(sl, tp); bump(); }
+                }}
                 onApplyBrackets={(sl, tp) => {
                   setPlannedSL(sl);
                   setPlannedTP(tp);

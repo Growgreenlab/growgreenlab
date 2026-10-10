@@ -4,7 +4,7 @@
  */
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { calculateRisk } from "../lib/risk";
 
 interface Props {
@@ -12,6 +12,11 @@ interface Props {
   cash: number;
   plannedSL: number | null;
   plannedTP: number | null;
+  activeSL: number | null;
+  activeTP: number | null;
+  hasPosition: boolean;
+  onPlannedChange: (sl: number | null, tp: number | null) => void;
+  onActiveChange: (sl: number | null, tp: number | null) => void;
   onApplyBrackets: (sl: number | null, tp: number | null) => void;
   onBuySized: (qty: number) => string | null;
   disabled: boolean;
@@ -26,6 +31,11 @@ export default function RiskCalculator({
   cash,
   plannedSL,
   plannedTP,
+  activeSL,
+  activeTP,
+  hasPosition,
+  onPlannedChange,
+  onActiveChange,
   onApplyBrackets,
   onBuySized,
   disabled,
@@ -41,10 +51,40 @@ export default function RiskCalculator({
   const [direction, setDirection] = useState<"long" | "short">("long");
   const [msg, setMsg] = useState<string | null>(null);
 
-  // Sync from planned brackets / current price when opened or when they change.
+  // Two-way sync: the source of truth is planned (flat) or active (position).
+  // When lines are dragged, props update → inputs follow. When inputs are
+  // typed, handlers push to the source. Guard prevents feedback loops.
+  const sourceSL = hasPosition ? activeSL : plannedSL;
+  const sourceTP = hasPosition ? activeTP : plannedTP;
+
+  useEffect(() => {
+    const wantSL = sourceSL != null ? sourceSL.toFixed(2) : "";
+    const wantTP = sourceTP != null ? sourceTP.toFixed(2) : "";
+    if (sl !== wantSL) setSl(wantSL);
+    if (tp !== wantTP) setTp(wantTP);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceSL, sourceTP, hasPosition]);
+
+  const handleSLInput = (v: string) => {
+    setSl(v);
+    const n = v === "" ? null : Number(v);
+    if (v !== "" && !isFinite(n!)) return;
+    if (hasPosition) onActiveChange(n, activeTP);
+    else onPlannedChange(n, plannedTP);
+  };
+
+  const handleTPInput = (v: string) => {
+    setTp(v);
+    const n = v === "" ? null : Number(v);
+    if (v !== "" && !isFinite(n!)) return;
+    if (hasPosition) onActiveChange(activeSL, n);
+    else onPlannedChange(plannedSL, n);
+  };
+
+  // Effective values for calculation (inputs are now the source).
   const effEntry = entry !== "" ? Number(entry) : currentPrice;
-  const effSL = sl !== "" ? Number(sl) : plannedSL;
-  const effTP = tp !== "" ? Number(tp) : plannedTP;
+  const effSL = sl !== "" ? Number(sl) : null;
+  const effTP = tp !== "" ? Number(tp) : null;
 
   const result = useMemo(
     () =>
@@ -140,8 +180,8 @@ export default function RiskCalculator({
             </div>
           </div>
           <div className="field-row" style={{ marginTop: 6 }}>
-            {field("Stop-loss $", sl, setSl, plannedSL != null ? plannedSL.toFixed(2) : "—")}
-            {field("Take-profit $", tp, setTp, plannedTP != null ? plannedTP.toFixed(2) : "—")}
+            {field("Stop-loss $", sl, handleSLInput, "—")}
+            {field("Take-profit $", tp, handleTPInput, "—")}
           </div>
           <div className="field-row" style={{ marginTop: 6 }}>
             {field("Fees $", fees, setFees)}
