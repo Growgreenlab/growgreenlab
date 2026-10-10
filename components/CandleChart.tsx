@@ -383,9 +383,26 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
 
     const pointers = new Map<number, { x: number; y: number }>();
     let pinch: { dist: number; midX: number } | null = null;
-    let drag: { x: number; y: number; scrollX: number; priceShift: number } | null = null;
+    let drag: { x: number; y: number; scrollX: number; priceShift: number; t: number; vx: number; vy: number } | null = null;
+    // Coalesce pointermove redraws to vsync: many moves per frame collapse
+    // into a single canvas draw, which is what makes the drag feel buttery.
+    let drawQueued = false;
+    const queueDraw = () => {
+      if (drawQueued) return;
+      drawQueued = true;
+      requestAnimationFrame(() => {
+        drawQueued = false;
+        drawRef.current();
+      });
+    };
+    // Momentum (flick) animation state.
+    let momentumId: number | null = null;
+    const stopMomentum = () => {
+      if (momentumId !== null) { cancelAnimationFrame(momentumId); momentumId = null; }
+    };
 
     const onPointerDown = (e: PointerEvent) => {
+      stopMomentum(); // a new gesture cancels any glide
       pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       try { canvas.setPointerCapture(e.pointerId); } catch { /* noop */ }
       const rect = canvas.getBoundingClientRect();
@@ -397,7 +414,8 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
         };
         drag = null;
       } else if (pointers.size === 1) {
-        drag = { x: e.clientX, y: e.clientY, scrollX: viewRef.current.scrollX, priceShift: viewRef.current.priceShift };
+        const now = performance.now();
+        drag = { x: e.clientX, y: e.clientY, scrollX: viewRef.current.scrollX, priceShift: viewRef.current.priceShift, t: now, vx: 0, vy: 0 };
         canvas.style.cursor = "grabbing";
       }
     };
@@ -432,16 +450,58 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
             v.priceShift = drag.priceShift + (dy / priceHRef.current) * (vhi - vlo);
           }
         }
-        markZoomed();
-        drawRef.current();
+        // Track velocity for the release flick (exponential moving average).
+        const now = performance.now();
+        const dt = Math.max(1, now - drag.t);
+        const instVx = (e.clientX - drag.x) / dt;
+        const instVy = (e.clientY - drag.y) / dt;
+        const k = 0.35;
+        drag.vx = drag.vx + (instVx - drag.vx) * k;
+        drag.vy = drag.vy + (instVy - drag.vy) * k;
+        drag.x = e.clientX; drag.y = e.clientY; drag.t = now;
+        drag.scrollX = v.scrollX; drag.priceShift = v.priceShift;
+        if (!userZoomedRef.current) markZoomed();
+        queueDraw();
       }
     };
     const endPointer = (e: PointerEvent) => {
       pointers.delete(e.pointerId);
       if (pointers.size < 2) pinch = null;
       if (pointers.size === 0) {
+        // Flick momentum: keep gliding with friction, like Webull.
+        const fling = drag;
         drag = null;
         canvas.style.cursor = "grab";
+        if (fling && (Math.abs(fling.vx) > 0.15 || Math.abs(fling.vy) > 0.15)) {
+          const v = viewRef.current;
+          const n = dataOf().length;
+          let vx = fling.vx * 16; // px per frame at 60fps
+          let vy = fling.vy * 16;
+          const friction = 0.94;
+          const step = () => {
+            const prevX = v.scrollX;
+            const prevShift = v.priceShift;
+            v.scrollX = clampScroll(v.scrollX + vx, v.slot, n);
+            // vertical momentum, converted with the last drawn price scale
+            if (priceHRef.current > 0) {
+              const p = propsRef.current;
+              const data = p.candles.slice(0, Math.max(0, Math.min(p.revealedCount, p.candles.length)));
+              let vlo = Infinity, vhi = -Infinity;
+              for (const c of data) { if (c.l < vlo) vlo = c.l; if (c.h > vhi) vhi = c.h; }
+              if (isFinite(vlo) && vhi > vlo) v.priceShift = v.priceShift + (vy / priceHRef.current) * (vhi - vlo);
+            }
+            vx *= friction; vy *= friction;
+            const hitXEdge = v.scrollX === prevX;
+            const hitYEdge = v.priceShift === prevShift;
+            drawRef.current();
+            if ((Math.abs(vx) > 0.4 || Math.abs(vy) > 0.4) && !(hitXEdge && hitYEdge)) {
+              momentumId = requestAnimationFrame(step);
+            } else {
+              momentumId = null;
+            }
+          };
+          momentumId = requestAnimationFrame(step);
+        }
         // No snap-back: the chart stays exactly where the user left it.
       }
     };
@@ -461,6 +521,7 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
 
     draw();
     return () => {
+      stopMomentum();
       ro.disconnect();
       canvas.removeEventListener("wheel", onWheel);
       canvas.removeEventListener("pointerdown", onPointerDown);
