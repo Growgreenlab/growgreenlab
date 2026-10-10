@@ -50,16 +50,10 @@ export default function RiskCalculator({
   onBuySized,
   disabled,
 }: Props) {
-  const [open, setOpen] = useState(false);
   const [balance, setBalance] = useState("100000");
   const [riskPct, setRiskPct] = useState("1");
   const [entry, setEntry] = useState("");
   const [entryEdited, setEntryEdited] = useState(false);
-
-  // Auto-expand when a position opens; stay expanded while open.
-  useEffect(() => {
-    if (hasPosition) setOpen(true);
-  }, [hasPosition]);
   const [sl, setSl] = useState("");
   const [tp, setTp] = useState("");
   const [fees, setFees] = useState("0");
@@ -188,17 +182,12 @@ export default function RiskCalculator({
   );
 
   return (
-    <div className="ws-panel" style={{ marginTop: 8 }}>
-      <div
-        className="ws-panel-head"
-        style={{ cursor: "pointer" }}
-        onClick={() => setOpen((o) => !o)}
-      >
+    <div className="ws-panel">
+      <div className="ws-panel-head">
         <span className="ws-panel-title">Risk Calculator</span>
         <span className="badge sim">{hasPosition ? "Active" : "Estimates"}</span>
-        <span style={{ marginLeft: "auto", opacity: 0.7 }}>{open ? "▾" : "▸"}</span>
       </div>
-      {open && (
+      {(
         <div style={{ padding: "0 2px" }}>
           <div className="field-row">
             {field("Balance $", balance, setBalance)}

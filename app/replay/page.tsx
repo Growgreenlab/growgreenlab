@@ -48,6 +48,8 @@ function ReplayPageInner() {
   const [plannedEntry, setPlannedEntry] = useState<number | null>(null);
   // Chart drawings (in-memory; per session).
   const [drawings, setDrawings] = useState<Drawing[]>([]);
+  // Right sidebar tabs: order / risk / guard (no scrolling).
+  const [rightTab, setRightTab] = useState<"order" | "risk" | "guard">("order");
   const [drawingTool, setDrawingTool] = useState<DrawingTool>("select");
 
   const setPlannedLevels = (sl: number | null, tp: number | null) => {
@@ -271,6 +273,10 @@ function ReplayPageInner() {
     setGuardWarned(false);
   }
   guardPrevQty.current = gQty;
+  // Auto-switch to Risk tab when a position opens.
+  const prevTabPos = useRef(false);
+  if (gQty > 0 && !prevTabPos.current) setRightTab("risk");
+  prevTabPos.current = gQty > 0;
 
   const guardLoss = calculatePositionLoss(
     guardBaseline.current,
@@ -570,6 +576,28 @@ function ReplayPageInner() {
 
             {/* right: order entry + ledger */}
             <aside className="ws-right">
+              <div style={{ display: "flex", gap: 4, marginBottom: 8 }}>
+                {(["order", "risk", "guard"] as const).map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setRightTab(t)}
+                    style={{
+                      flex: 1,
+                      padding: "8px 4px",
+                      fontSize: 13,
+                      fontWeight: 600,
+                      background: rightTab === t ? "#1e40af" : "rgba(255,255,255,0.06)",
+                      color: rightTab === t ? "#fff" : "#94a3b8",
+                      border: "1px solid rgba(255,255,255,0.1)",
+                      borderRadius: 8,
+                      cursor: "pointer",
+                    }}
+                  >
+                    {t === "order" ? "Order" : t === "risk" ? "Risk" : "Guard"}
+                  </button>
+                ))}
+              </div>
+              <div style={{ display: rightTab === "order" ? "block" : "none" }}>
               <TradingPanel
                 snap={snap}
                 qty={orderQty}
@@ -601,6 +629,8 @@ function ReplayPageInner() {
                 }}
                 disabled={false}
               />
+              </div>
+              <div style={{ display: rightTab === "risk" ? "block" : "none" }}>
               <RiskCalculator
                 currentPrice={snap.price}
                 cash={snap.cash}
@@ -626,6 +656,8 @@ function ReplayPageInner() {
                 onBuySized={(qty) => buyErr(qty)}
                 disabled={false}
               />
+              </div>
+              <div style={{ display: rightTab === "guard" ? "block" : "none" }}>
               <PsychologyGuardPanel
                 accountBalance={START_CASH}
                 baseline={guardBaseline.current}
@@ -641,6 +673,7 @@ function ReplayPageInner() {
                   saveThresholds(t);
                 }}
               />
+              </div>
             </aside>
           </div>
 
