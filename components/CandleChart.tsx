@@ -22,12 +22,14 @@ export interface ChartOverlays {
   takeProfit: number | null;
   fills: Fill[];
   lastPrice: number | null;
+  pendingOrders: Array<{ side: "buy" | "sell"; price: number }>;
 }
 
 interface Props {
   candles: Candle[];
   revealedCount: number; // render candles[0..revealedCount-1] only
   overlays: ChartOverlays;
+  /** Fixed height; when omitted the chart fills its container. */
   height?: number;
   /** Candles before this index are pre-replay history: rendered dimmed. */
   historyCount?: number;
@@ -40,7 +42,7 @@ interface Props {
  * spacing scale together with zoom; volume bars share the same x-mapping
  * so everything stays aligned. Only the revealed prefix is ever drawn.
  */
-export default function CandleChart({ candles, revealedCount, overlays, height = 460, historyCount = 0 }: Props) {
+export default function CandleChart({ candles, revealedCount, overlays, height, historyCount = 0 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef({ slot: DEFAULT_SLOT, scrollX: 0 });
@@ -106,7 +108,7 @@ export default function CandleChart({ candles, revealedCount, overlays, height =
       const p = propsRef.current;
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       const w = wrap.clientWidth;
-      const h = p.height;
+      const h = p.height ?? Math.max(240, wrap.clientHeight);
       canvas.width = w * dpr;
       canvas.height = h * dpr;
       canvas.style.width = `${w}px`;
@@ -278,6 +280,11 @@ export default function CandleChart({ candles, revealedCount, overlays, height =
       if (ov.hod != null) hline(ov.hod, HOD_COLOR, `HOD ${ov.hod.toFixed(2)}`);
       if (ov.stopLoss != null) hline(ov.stopLoss, DOWN, `SL ${ov.stopLoss.toFixed(2)}`);
       if (ov.takeProfit != null) hline(ov.takeProfit, UP, `TP ${ov.takeProfit.toFixed(2)}`);
+      // working limit orders: sky-blue dashed lines
+      const LMT = "#38bdf8";
+      for (const o of ov.pendingOrders) {
+        hline(o.price, LMT, `LMT ${o.side === "buy" ? "B" : "S"} ${o.price.toFixed(2)}`);
+      }
 
       if (ov.lastPrice != null) {
         const pr = ov.lastPrice;
@@ -426,7 +433,7 @@ export default function CandleChart({ candles, revealedCount, overlays, height =
   }, [candles, revealedCount, overlays, height]);
 
   return (
-    <div ref={wrapRef} style={{ width: "100%", position: "relative" }}>
+    <div ref={wrapRef} style={{ width: "100%", height: "100%", position: "relative", minHeight: 240 }}>
       <canvas ref={canvasRef} style={{ touchAction: "none", cursor: "grab", display: "block" }} />
       {canReset && (
         <button

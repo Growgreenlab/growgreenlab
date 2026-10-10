@@ -26,6 +26,14 @@ export interface Fill {
 
 export type DataSource = "sample" | "twelvedata" | "csv";
 
+/** A working limit order: rests until the live tick touches its price. */
+export interface PendingOrder {
+  id: number;
+  side: Side;
+  qty: number;
+  limitPrice: number;
+}
+
 export interface SessionMeta {
   ticker: string;
   tradeDate: string; // YYYY-MM-DD

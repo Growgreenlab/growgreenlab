@@ -24,6 +24,7 @@ function ReplayPageInner() {
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
   const [loadingSession, setLoadingSession] = useState(false);
+  const [dataOpen, setDataOpen] = useState(false);
   const bump = useCallback(() => setVersion((v) => v + 1), []);
 
   const stopTimer = useCallback(() => {
@@ -33,6 +34,12 @@ function ReplayPageInner() {
   }, []);
 
   useEffect(() => stopTimer, [stopTimer]);
+
+  // Trading-workspace mode: hide the site footer so the workspace owns the screen.
+  useEffect(() => {
+    document.body.classList.add("ws-active");
+    return () => document.body.classList.remove("ws-active");
+  }, []);
 
   // Play loop: wall-clock paced ticks. 1x = live market speed: each
   // 1-minute candle forms gradually over 60 real seconds, the price
@@ -69,6 +76,7 @@ function ReplayPageInner() {
     setCandles(cs);
     setMeta(m);
     setSaveMsg(null);
+    setDataOpen(false);
     bump();
   }, [bump, stopTimer]);
 
@@ -127,6 +135,7 @@ function ReplayPageInner() {
       realized: eng.realizedPnl,
       equity: eng.equity(),
       fills: eng.fills,
+      pendingOrders: eng.pendingOrders,
       stopLoss: eng.stopLoss,
       takeProfit: eng.takeProfit,
     };
@@ -147,6 +156,13 @@ function ReplayPageInner() {
     const f = eng.sell(Math.floor(qty));
     bump();
     return f ? null : "No open position to sell.";
+  };
+  const placeLimitErr = (side: "buy" | "sell", qty: number, price: number): string | null => {
+    const eng = engineRef.current;
+    if (!eng) return "Load a session first.";
+    const err = eng.placeLimitOrder(side, qty, price);
+    bump();
+    return err;
   };
 
   const saveSession = async () => {
@@ -202,52 +218,47 @@ function ReplayPageInner() {
   };
 
   const eng = engineRef.current;
+  const daily = snap ? snap.realized + snap.unreal : 0;
 
   return (
-    <div>
-      <div className="section">
-        <DataSourcePanel candles={candles} meta={meta} onLoad={handleLoad} />
-      </div>
-
-      {loadingSession && <div className="hint">Loading saved session…</div>}
+    <div className="ws">
+      {(!eng || !candles || !meta || !snap) && (
+        <div className="ws-welcome">
+          {loadingSession && <div className="hint">Loading saved session…</div>}
+          <DataSourcePanel candles={candles} meta={meta} onLoad={handleLoad} />
+          {saveMsg && <div className="err" style={{ marginTop: 12 }}>{saveMsg}</div>}
+        </div>
+      )}
 
       {eng && candles && meta && snap && (
         <>
-          <div className="section card">
-            <div className="chart-head">
-              <div>
-                <div className="ticker-name">{meta.ticker}</div>
-                <div className="ticker-sub">{meta.tradeDate}</div>
-                <div style={{ marginTop: 8 }}>
-                  {meta.source === "sample"
-                    ? <span className="badge sample">Sample data — not real market prices</span>
-                    : <span className="badge live">{meta.source === "twelvedata" ? "Twelve Data" : "CSV"} · real data</span>}
-                </div>
-              </div>
-              <div>
-                <div className="price-now num">{formatMoney(snap.price)}</div>
-                <div className="hod-line">HOD <span className="num" style={{ color: "var(--amber)", fontWeight: 700 }}>{formatMoney(eng.hod)}</span></div>
-              </div>
+          {/* top strip: instrument + price + actions */}
+          <div className="ws-top">
+            <div className="ws-sym">
+              <span className="ticker-name">{meta.ticker}</span>
+              <span className="ticker-sub">{meta.tradeDate}</span>
+              {meta.source === "sample"
+                ? <span className="badge sample">Sample — simulated prices</span>
+                : <span className="badge live">{meta.source === "twelvedata" ? "Twelve Data" : "CSV"} · real data</span>}
             </div>
-            <div className="chart-frame">
-              <CandleChart
-                candles={eng.displayCandles}
-                revealedCount={eng.displayCandles.length}
-                historyCount={meta.startIndex}
-                overlays={{
-                  hod: eng.hod,
-                  stopLoss: eng.stopLoss,
-                  takeProfit: eng.takeProfit,
-                  fills: eng.fills,
-                  lastPrice: snap.price,
-                }}
-              />
+            <div className="ws-quote">
+              <span className="price-now num">{formatMoney(snap.price)}</span>
+              <span className="hod-line">HOD <b className="num">{formatMoney(eng.hod)}</b></span>
+            </div>
+            <div className="ws-top-actions">
+              {saveMsg && <span className={saveMsg.startsWith("Session saved") ? "ok" : "err"} style={{ fontSize: 12 }}>{saveMsg}</span>}
+              <button className="btn" onClick={() => setDataOpen((v) => !v)}>Data</button>
+              <button className="btn primary" onClick={saveSession} disabled={saving}>
+                {saving ? "Saving…" : "Save"}
+              </button>
             </div>
           </div>
 
-          <div className="section grid2">
-            <div>
+          <div className="ws-main">
+            {/* left: chart column */}
+            <div className="ws-left">
               <ReplayControls
+                compact
                 playing={playing}
                 canPlay={!eng.atEnd}
                 onPlay={() => setPlaying(true)}
@@ -260,38 +271,71 @@ function ReplayPageInner() {
                 total={candles.length}
                 progress={(eng.index + eng.formationProgress + 1) / Math.max(1, candles.length)}
               />
-              <div className="section">
-                <button className="btn big" onClick={saveSession} disabled={saving}>
-                  {saving ? "Saving…" : "💾 Save session"}
-                </button>
-                {saveMsg && <div className={saveMsg.startsWith("Session saved") ? "ok" : "err"}>{saveMsg}</div>}
+              <div className="ws-chart">
+                <CandleChart
+                  candles={eng.displayCandles}
+                  revealedCount={eng.displayCandles.length}
+                  historyCount={meta.startIndex}
+                  overlays={{
+                    hod: eng.hod,
+                    stopLoss: eng.stopLoss,
+                    takeProfit: eng.takeProfit,
+                    fills: eng.fills,
+                    lastPrice: snap.price,
+                    pendingOrders: eng.pendingOrders.map((o) => ({ side: o.side, price: o.limitPrice })),
+                  }}
+                />
               </div>
-              <div className="section card">
-                <h3>Session P/L</h3>
-                <div className="tiles">
-                  <div className="tile">
-                    <div className="tk">Realized</div>
-                    <div className={`tv num ${snap.realized >= 0 ? "pos" : "neg"}`}>{formatSigned(snap.realized)}</div>
-                  </div>
-                  <div className="tile">
-                    <div className="tk">Unrealized</div>
-                    <div className={`tv num ${snap.unreal >= 0 ? "pos" : "neg"}`}>{formatSigned(snap.unreal)}</div>
-                  </div>
-                  <div className="tile hero-tile">
-                    <div className="tk">Equity</div>
-                    <div className="tv num">{formatMoney(snap.equity)}</div>
-                  </div>
+              {/* persistent P&L strip */}
+              <div className="ws-pnl">
+                <div className="pnl-cell">
+                  <div className="tk">Realized</div>
+                  <div className={`tv num ${snap.realized >= 0 ? "pos" : "neg"}`}>{formatSigned(snap.realized)}</div>
+                </div>
+                <div className="pnl-cell">
+                  <div className="tk">Unrealized</div>
+                  <div className={`tv num ${snap.unreal >= 0 ? "pos" : "neg"}`}>{formatSigned(snap.unreal)}</div>
+                </div>
+                <div className="pnl-cell">
+                  <div className="tk">Daily P/L</div>
+                  <div className={`tv num ${daily >= 0 ? "pos" : "neg"}`}>{formatSigned(daily)}</div>
+                </div>
+                <div className="pnl-cell">
+                  <div className="tk">Position</div>
+                  <div className="tv num">{snap.qty > 0 ? `${snap.qty} @ ${formatMoney(snap.avg)}` : "—"}</div>
+                </div>
+                <div className="pnl-cell">
+                  <div className="tk">Cash</div>
+                  <div className="tv num">{formatMoney(snap.cash)}</div>
+                </div>
+                <div className="pnl-cell hero">
+                  <div className="tk">Equity</div>
+                  <div className="tv num">{formatMoney(snap.equity)}</div>
                 </div>
               </div>
             </div>
-            <TradingPanel
-              snap={snap}
-              onBuy={buyErr}
-              onSell={sellErr}
-              onSetBrackets={(sl, tp) => { eng.setBrackets(sl, tp); bump(); }}
-              disabled={false}
-            />
+
+            {/* right: order entry + ledger */}
+            <aside className="ws-right">
+              <TradingPanel
+                snap={snap}
+                onBuy={buyErr}
+                onSell={sellErr}
+                onPlaceLimit={placeLimitErr}
+                onCancelOrder={(id) => { eng.cancelOrder(id); bump(); }}
+                onSetBrackets={(sl, tp) => { eng.setBrackets(sl, tp); bump(); }}
+                disabled={false}
+              />
+            </aside>
           </div>
+
+          {/* data source popover */}
+          {dataOpen && (
+            <div className="ws-data-pop" role="dialog" aria-label="Data source">
+              <button className="mini-x ws-data-x" onClick={() => setDataOpen(false)} title="Close">✕</button>
+              <DataSourcePanel candles={candles} meta={meta} onLoad={handleLoad} />
+            </div>
+          )}
         </>
       )}
     </div>

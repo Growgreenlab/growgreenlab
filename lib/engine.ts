@@ -1,4 +1,4 @@
-import type { Candle, Fill, Side } from "./types";
+import type { Candle, Fill, PendingOrder, Side } from "./types";
 
 export interface StepResult {
   /** Fills produced by automatic stop-loss / take-profit triggers this step. */
@@ -86,8 +86,10 @@ export class ReplayEngine {
   fills: Fill[];
   stopLoss: number | null = null;
   takeProfit: number | null = null;
+  pendingOrders: PendingOrder[] = [];
 
   private nextFillId = 1;
+  private nextOrderId = 1;
   private forming: FormingState | null = null;
 
   constructor(candles: Candle[], startCash = 100_000, startIndex = 0) {
@@ -206,6 +208,9 @@ export class ReplayEngine {
       }
     }
 
+    // Working limit orders fill when the live tick touches their price.
+    this.fillPendingOrders(tick);
+
     let finalized = false;
     if (f.pos >= TICKS_PER_CANDLE - 1) {
       this.index += 1;
@@ -263,6 +268,68 @@ export class ReplayEngine {
     return this.execSell(Math.floor(qty), price, candleIndex, time);
   }
 
+  /**
+   * Place a limit order. It rests until a live tick touches its price
+   * (buy: tick <= limit, sell: tick >= limit) and fills at the tick price
+   * (price improvement, like a real book). Returns an error string, or null
+   * when the order is accepted and working.
+   */
+  placeLimitOrder(side: Side, qty: number, limitPrice: number): string | null {
+    qty = Math.floor(qty);
+    if (!(qty > 0)) return "Enter a share quantity.";
+    if (!(limitPrice > 0)) return "Enter a limit price.";
+    if (side === "buy") {
+      if (qty * limitPrice > this.cash + 1e-9) return "Not enough virtual cash for that size.";
+    } else {
+      if (this.positionQty <= 0) return "No open position to sell.";
+      if (qty > this.positionQty) return `Only ${this.positionQty} shares in position.`;
+    }
+    this.pendingOrders.push({ id: this.nextOrderId++, side, qty, limitPrice });
+    return null;
+  }
+
+  /** Cancel one working limit order. Returns true if it existed. */
+  cancelOrder(id: number): boolean {
+    const i = this.pendingOrders.findIndex((o) => o.id === id);
+    if (i === -1) return false;
+    this.pendingOrders.splice(i, 1);
+    return true;
+  }
+
+  /** Cancel all working limit orders. */
+  cancelAllOrders(): void {
+    this.pendingOrders = [];
+  }
+
+  /** Cancel all working limit orders for one side. */
+  private cancelWorkingSide(side: Side): void {
+    this.pendingOrders = this.pendingOrders.filter((o) => o.side !== side);
+  }
+
+  /** Try to fill working limit orders against a live tick price. */
+  private fillPendingOrders(tick: number): void {
+    if (this.pendingOrders.length === 0) return;
+    const idx = this.executionIndex();
+    const time = this.executionTime();
+    const done: number[] = [];
+    for (const o of this.pendingOrders) {
+      let fill: Fill | null = null;
+      if (o.side === "buy" && tick <= o.limitPrice) {
+        fill = this.execBuy(o.qty, tick, idx, time);
+        if (fill) fill.note = `limit ${o.limitPrice.toFixed(2)}`;
+      } else if (o.side === "sell" && tick >= o.limitPrice) {
+        fill = this.execSell(o.qty, tick, idx, time);
+        if (fill) fill.note = `limit ${o.limitPrice.toFixed(2)}`;
+      }
+      if (fill) done.push(o.id);
+      // if validation failed (e.g. cash moved), the order keeps working
+    }
+    if (done.length > 0) {
+      const gone = new Set(done);
+      this.pendingOrders = this.pendingOrders.filter((o) => !gone.has(o.id));
+    }
+  }
+
   /** Unrealized P/L of the open position at the live price. */
   unrealizedPnl(): number {
     if (this.positionQty <= 0) return 0;
@@ -293,8 +360,10 @@ export class ReplayEngine {
     this.realizedPnl = 0;
     this.fills = [];
     this.clearBrackets();
+    this.pendingOrders = [];
     this.forming = null;
     this.nextFillId = 1;
+    this.nextOrderId = 1;
   }
 
   private executionPrice(): number {
@@ -352,7 +421,10 @@ export class ReplayEngine {
     this.positionQty -= sellQty;
     this.cash += sellQty * price;
     this.realizedPnl += realized;
-    if (this.positionQty === 0) this.clearBrackets();
+    if (this.positionQty === 0) {
+      this.clearBrackets();
+      this.cancelWorkingSide("sell"); // exit orders die with the position
+    }
     const fill: Fill = {
       id: this.nextFillId++,
       side: "sell",
@@ -374,6 +446,7 @@ export class ReplayEngine {
     this.positionQty = 0;
     this.positionAvg = 0;
     this.clearBrackets();
+    this.cancelWorkingSide("sell");
     const fill: Fill = {
       id: this.nextFillId++,
       side: "sell",

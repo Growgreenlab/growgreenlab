@@ -335,6 +335,37 @@ const tape = [
   eq(e2.cash, e.cash, "reload reproduces cash exactly");
 }
 
+// 19. limit orders: rest until touched, fill at tick, cancel, reset clears
+{
+  const C = (o, h, l, c, v = 1000, i = 0) => ({ t: 1000 + i * 60000, o, h, l, c, v });
+  const falling = [C(10, 10.1, 9.9, 10, 1000, 0), C(10, 10.05, 9.5, 9.6, 1000, 1), C(9.6, 9.7, 9.4, 9.5, 1000, 2)];
+  const e = new ReplayEngine(falling, 100_000, 0);
+  // validation
+  ok(e.placeLimitOrder("buy", 0, 9.5) !== null, "rejects zero qty");
+  ok(e.placeLimitOrder("buy", 100, -1) !== null, "rejects bad price");
+  ok(e.placeLimitOrder("buy", 100000, 9.5) !== null, "rejects unaffordable size");
+  ok(e.placeLimitOrder("sell", 10, 10.5) !== null, "rejects sell with no position");
+  // limit buy below the falling price: fills when the tick reaches it
+  ok(e.placeLimitOrder("buy", 100, 9.7) === null, "limit buy accepted");
+  eq(e.pendingOrders.length, 1, "one working order");
+  let filled = null;
+  for (let k = 0; k < 400 && !filled; k++) { e.tick(); filled = e.fills[0]; }
+  ok(filled && filled.side === "buy" && filled.qty === 100, "limit buy filled on touch");
+  ok(filled.price <= 9.7 + 1e-9, "filled at tick <= limit, got " + filled.price);
+  ok(filled.note && filled.note.startsWith("limit"), "fill tagged as limit");
+  eq(e.pendingOrders.length, 0, "filled order removed");
+  // limit sell above: place and fill
+  ok(e.placeLimitOrder("sell", 100, 12) === null, "limit sell accepted above market");
+  ok(e.cancelOrder(e.pendingOrders[0].id) === true, "cancel works");
+  eq(e.pendingOrders.length, 0, "cancelled order gone");
+  ok(e.cancelOrder(999) === false, "cancel unknown id false");
+  // reset clears working orders
+  e.placeLimitOrder("sell", 50, 9.0);
+  e.reset();
+  eq(e.pendingOrders.length, 0, "reset clears pending orders");
+  eq(e.positionQty, 0, "reset flat");
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 rmSync(OUT, { recursive: true, force: true });
 process.exit(failed ? 1 : 0);

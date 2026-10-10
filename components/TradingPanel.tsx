@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import type { Fill } from "../lib/types";
+import type { Fill, PendingOrder } from "../lib/types";
 import { formatMoney, formatSigned } from "../lib/engine";
 
 export interface TradingSnapshot {
@@ -13,6 +13,7 @@ export interface TradingSnapshot {
   realized: number;
   equity: number;
   fills: Fill[];
+  pendingOrders: PendingOrder[];
   stopLoss: number | null;
   takeProfit: number | null;
 }
@@ -21,111 +22,155 @@ interface Props {
   snap: TradingSnapshot;
   onBuy: (qty: number) => string | null;
   onSell: (qty: number) => string | null;
+  onPlaceLimit: (side: "buy" | "sell", qty: number, price: number) => string | null;
+  onCancelOrder: (id: number) => void;
   onSetBrackets: (sl: number | null, tp: number | null) => void;
   disabled: boolean;
 }
 
-export default function TradingPanel({ snap, onBuy, onSell, onSetBrackets, disabled }: Props) {
+/**
+ * Compact Webull-style order entry panel: market/limit toggle, quantity,
+ * buy/sell, stop-loss / take-profit brackets, working limit orders, and
+ * the fill ledger. Built for a narrow right-hand column.
+ */
+export default function TradingPanel({ snap, onBuy, onSell, onPlaceLimit, onCancelOrder, onSetBrackets, disabled }: Props) {
   const [qty, setQty] = useState("100");
+  const [orderType, setOrderType] = useState<"market" | "limit">("market");
+  const [limitPx, setLimitPx] = useState("");
   const [sl, setSl] = useState("");
   const [tp, setTp] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
 
-  const doBuy = () => {
-    const err = onBuy(Number(qty));
-    setMsg(err ?? `Bought ${qty} @ ${formatMoney(snap.price)} (simulated)`);
+  const effLimit = limitPx ? Number(limitPx) : snap.price;
+
+  const submit = (side: "buy" | "sell") => {
+    const q = Number(qty);
+    if (orderType === "market") {
+      const err = side === "buy" ? onBuy(q) : onSell(q);
+      setMsg(err ?? `${side === "buy" ? "Bought" : "Sold"} ${q} @ ${formatMoney(snap.price)} (simulated)`);
+    } else {
+      const err = onPlaceLimit(side, q, effLimit);
+      setMsg(err ?? `Limit ${side} ${q} @ ${formatMoney(effLimit)} working (simulated)`);
+      if (!err) setLimitPx("");
+    }
   };
-  const doSell = () => {
-    const err = onSell(Number(qty));
-    setMsg(err ?? `Sold ${qty} @ ${formatMoney(snap.price)} (simulated)`);
-  };
+
   const applyBrackets = () => {
     onSetBrackets(sl ? Number(sl) : null, tp ? Number(tp) : null);
     setMsg("Stop-loss / take-profit updated.");
   };
 
   return (
-    <div className="card">
-      <h3>
-        Simulated trading{" "}
-        <span className="badge sim" style={{ marginLeft: 6 }}>
-          Simulated — not real orders
+    <div className="ws-panel order-panel">
+      <div className="ws-panel-head">
+        <span className="ws-panel-title">Order</span>
+        <span className="badge sim">Simulated</span>
+      </div>
+
+      {/* position summary */}
+      <div className="pos-line">
+        <span className="tk">Position</span>
+        <span className="num">
+          {snap.qty > 0 ? <><b>{snap.qty} sh</b> @ {formatMoney(snap.avg)}</> : <span className="dim">flat</span>}
         </span>
-      </h3>
-      <div className="tiles">
-        <div className="tile">
-          <div className="tk">Cash</div>
-          <div className="tv num">{formatMoney(snap.cash)}</div>
-        </div>
-        <div className="tile">
-          <div className="tk">Position</div>
-          <div className="tv num">{snap.qty} <span style={{ fontSize: 12, color: "var(--muted)" }}>sh</span></div>
-          <div className="hint num" style={{ fontSize: 11 }}>{snap.qty > 0 ? `@ ${formatMoney(snap.avg)}` : "flat"}</div>
-        </div>
-        <div className="tile">
-          <div className="tk">Unrealized</div>
-          <div className={`tv num ${snap.unreal >= 0 ? "pos" : "neg"}`}>{formatSigned(snap.unreal)}</div>
-        </div>
-        <div className="tile">
-          <div className="tk">Realized</div>
-          <div className={`tv num ${snap.realized >= 0 ? "pos" : "neg"}`}>{formatSigned(snap.realized)}</div>
-        </div>
-        <div className="tile hero-tile">
-          <div className="tk">Equity</div>
-          <div className="tv num">{formatMoney(snap.equity)}</div>
-        </div>
+        <span className={`num ${snap.unreal >= 0 ? "pos" : "neg"}`}>{formatSigned(snap.unreal)}</span>
       </div>
 
-      <div className="field" style={{ marginTop: 12 }}>
-        <label>Share quantity</label>
-        <input className="input num" type="number" min="1" step="1" value={qty}
-          onChange={(e) => setQty(e.target.value)} disabled={disabled} />
+      {/* order type */}
+      <div className="seg seg-2" role="tablist" aria-label="Order type">
+        {(["market", "limit"] as const).map((t) => (
+          <button
+            key={t}
+            className={`seg-btn ${orderType === t ? "on" : ""}`}
+            onClick={() => { setOrderType(t); if (t === "limit" && !limitPx) setLimitPx(snap.price.toFixed(2)); }}
+            disabled={disabled}
+          >
+            {t === "market" ? "Market" : "Limit"}
+          </button>
+        ))}
       </div>
+
+      <div className="field-row">
+        <div className="field">
+          <label>Qty</label>
+          <input className="input num" type="number" min="1" step="1" value={qty}
+            onChange={(e) => setQty(e.target.value)} disabled={disabled} />
+        </div>
+        {orderType === "limit" && (
+          <div className="field">
+            <label>Limit price</label>
+            <input className="input num" type="number" min="0" step="0.01" placeholder={snap.price.toFixed(2)}
+              value={limitPx} onChange={(e) => setLimitPx(e.target.value)} disabled={disabled} />
+          </div>
+        )}
+      </div>
+
       <div className="row">
-        <button className="btn buy big" onClick={doBuy} disabled={disabled}>Buy</button>
-        <button className="btn sell big" onClick={doSell} disabled={disabled || snap.qty <= 0}>Sell</button>
+        <button className="btn buy big" onClick={() => submit("buy")} disabled={disabled}>Buy</button>
+        <button className="btn sell big" onClick={() => submit("sell")} disabled={disabled || (orderType === "market" && snap.qty <= 0)}>Sell</button>
       </div>
 
-      <div className="row" style={{ marginTop: 10 }}>
-        <div className="field" style={{ marginBottom: 0 }}>
+      {/* brackets */}
+      <div className="field-row" style={{ marginTop: 10 }}>
+        <div className="field">
           <label>Stop-loss</label>
           <input className="input num" type="number" step="0.01" placeholder="e.g. 5.20"
             value={sl} onChange={(e) => setSl(e.target.value)} disabled={disabled} />
         </div>
-        <div className="field" style={{ marginBottom: 0 }}>
+        <div className="field">
           <label>Take-profit</label>
           <input className="input num" type="number" step="0.01" placeholder="e.g. 5.80"
             value={tp} onChange={(e) => setTp(e.target.value)} disabled={disabled} />
         </div>
       </div>
-      <button className="btn" style={{ marginTop: 8, width: "100%" }} onClick={applyBrackets} disabled={disabled}>
+      <button className="btn ghost" style={{ width: "100%", marginTop: 6 }} onClick={applyBrackets} disabled={disabled}>
         Set brackets
       </button>
       {(snap.stopLoss != null || snap.takeProfit != null) && (
         <div className="hint" style={{ marginTop: 6 }}>
-          Active: {snap.stopLoss != null ? `SL ${formatMoney(snap.stopLoss)}` : ""}{" "}
-          {snap.takeProfit != null ? `TP ${formatMoney(snap.takeProfit)}` : ""} — auto-triggers as candles advance.
+          Active: {snap.stopLoss != null ? `SL ${formatMoney(snap.stopLoss)}` : ""}
+          {snap.takeProfit != null ? ` TP ${formatMoney(snap.takeProfit)}` : ""} — auto-triggers live.
         </div>
       )}
+
+      {/* working limit orders */}
+      {snap.pendingOrders.length > 0 && (
+        <div style={{ marginTop: 10 }}>
+          <div className="tk" style={{ marginBottom: 6 }}>Working orders ({snap.pendingOrders.length})</div>
+          {snap.pendingOrders.map((o) => (
+            <div key={o.id} className="work-order">
+              <span className={o.side === "buy" ? "pos" : "neg"} style={{ fontWeight: 700 }}>
+                {o.side === "buy" ? "LMT B" : "LMT S"}
+              </span>
+              <span className="num">{o.qty} @ {formatMoney(o.limitPrice)}</span>
+              <button className="mini-x" onClick={() => { onCancelOrder(o.id); setMsg("Order cancelled."); }} title="Cancel order">✕</button>
+            </div>
+          ))}
+        </div>
+      )}
+
       {msg && <div className="hint" style={{ marginTop: 8 }}>{msg}</div>}
 
-      <h3 style={{ marginTop: 16 }}>Trade ledger</h3>
+      {/* ledger */}
+      <div className="ws-panel-head" style={{ marginTop: 12 }}>
+        <span className="ws-panel-title">Ledger</span>
+        <span className="tk">{snap.fills.length} fills</span>
+      </div>
       {snap.fills.length === 0 ? (
         <div className="hint">No fills yet.</div>
       ) : (
-        <div style={{ overflowX: "auto" }}>
+        <div className="ledger-scroll">
           <table className="ledger">
-            <thead><tr><th>Side</th><th>Qty</th><th>Price</th><th>P/L</th><th>Note</th></tr></thead>
+            <thead><tr><th>Side</th><th>Qty</th><th>Price</th><th>P/L</th></tr></thead>
             <tbody>
               {snap.fills.slice().reverse().map((f) => (
-                <tr key={f.id}>
-                  <td style={{ color: f.side === "buy" ? "var(--green)" : "var(--red)" }}>{f.side.toUpperCase()}</td>
+                <tr key={f.id} title={f.note ?? ""}>
+                  <td style={{ color: f.side === "buy" ? "var(--green)" : "var(--red)", fontWeight: 700 }}>{f.side === "buy" ? "B" : "S"}</td>
                   <td className="num">{f.qty}</td>
                   <td className="num">{formatMoney(f.price)}</td>
                   <td className={`num ${f.realizedPnl >= 0 ? "pos" : "neg"}`}>
                     {f.side === "sell" ? formatSigned(f.realizedPnl) : "—"}
                   </td>
-                  <td>{f.note ?? ""}</td>
                 </tr>
               ))}
             </tbody>
