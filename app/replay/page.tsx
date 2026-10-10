@@ -310,15 +310,7 @@ function ReplayPageInner() {
                 progress={(eng.index + eng.formationProgress + 1) / Math.max(1, candles.length)}
               />
               <div className="ws-chart">
-                {searchParams.get("chart") === "lwc" ? (
-                  <LwcChart
-                    candles={eng.displayCandles}
-                    revealedCount={eng.displayCandles.length}
-                    sessionKey={`${meta.ticker}|${meta.tradeDate}|${meta.source}|${candles.length}`}
-                    countdown={playing ? countdownText(eng.formationProgress, speed) : null}
-                    lastPrice={snap.price}
-                  />
-                ) : (
+                {searchParams.get("chart") === "canvas" ? (
                 <CandleChart
                   candles={eng.displayCandles}
                   revealedCount={eng.displayCandles.length}
@@ -334,6 +326,14 @@ function ReplayPageInner() {
                     countdown: playing ? countdownText(eng.formationProgress, speed) : null,
                   }}
                 />
+                ) : (
+                  <LwcChart
+                    candles={eng.displayCandles}
+                    revealedCount={eng.displayCandles.length}
+                    sessionKey={`${meta.ticker}|${meta.tradeDate}|${meta.source}|${candles.length}`}
+                    countdown={playing ? countdownText(eng.formationProgress, speed) : null}
+                    lastPrice={snap.price}
+                  />
                 )}
               </div>
               {/* persistent P&L strip */}
