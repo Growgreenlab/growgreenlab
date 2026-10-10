@@ -103,7 +103,11 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
       if (n === 0) return;
       const v = viewRef.current;
       const idx = (cx - v.scrollX) / v.slot; // candle position under cursor
-      const slot = Math.min(MAX_SLOT, Math.max(MIN_SLOT, v.slot * factor));
+      // Never zoom out past "fit to width": at that point every candle is
+      // visible, so horizontal panning would have nowhere to go (a dead end
+      // that feels like broken dragging). The floor keeps pan always alive.
+      const fitSlot = Math.min(MAX_SLOT, plotW() / n);
+      const slot = Math.min(MAX_SLOT, Math.max(Math.max(MIN_SLOT, fitSlot), v.slot * factor));
       if (slot === v.slot) return;
       v.slot = slot;
       v.scrollX = clampScroll(cx - idx * slot, slot, n); // keep cursor anchored
@@ -401,8 +405,10 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
         }
       } else if (pointers.size === 1 && drag) {
         const v = viewRef.current;
-        // Hard clamp: the chart stays exactly where the user leaves it.
-        v.scrollX = clampScroll(drag.scrollX + (e.clientX - drag.x), v.slot, n);
+        // Horizontal: timeline-style — drag LEFT to go back in time (older
+        // candles), drag RIGHT to go forward. Hard clamp: the chart stays
+        // exactly where the user leaves it.
+        v.scrollX = clampScroll(drag.scrollX - (e.clientX - drag.x), v.slot, n);
         // Vertical drag pans the price scale (grab-style: content follows
         // the cursor). Convert pixels to price using the last drawn range.
         const dy = e.clientY - drag.y;
