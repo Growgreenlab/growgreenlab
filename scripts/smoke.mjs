@@ -217,6 +217,93 @@ const tape = [
   ok(threw.includes('missing a "datetime"'), "missing column error names it");
 }
 
+// 15. live candle formation: ticks stay in range, finalize exact, deterministic
+{
+  const { TICKS_PER_CANDLE } = require(join(OUT, "engine.js"));
+  const mk = () => new ReplayEngine(tape, 100_000, 1);
+  const e1 = mk(), e2 = mk();
+  const seen1 = [];
+  let r;
+  for (let i = 0; i < TICKS_PER_CANDLE; i++) {
+    r = e1.tick();
+    const d = e1.displayCandles;
+    const f = d[d.length - 1];
+    seen1.push([f.o, f.h, f.l, f.c]);
+    ok(f.h <= tape[2].h + 1e-9 && f.l >= tape[2].l - 1e-9, "forming candle stays in true range");
+  }
+  ok(r.finalized === true, "candle finalizes on last tick");
+  ok(e1.index === 2, "index advances on finalize");
+  const fin = e1.displayCandles[e1.displayCandles.length - 1];
+  eq(fin.o, tape[2].o, "finalized open exact");
+  eq(fin.h, tape[2].h, "finalized high exact");
+  eq(fin.l, tape[2].l, "finalized low exact");
+  eq(fin.c, tape[2].c, "finalized close exact");
+  // determinism: second engine, same ticks
+  for (let i = 0; i < TICKS_PER_CANDLE; i++) { e2.tick(); }
+  const d2 = e2.displayCandles, f2 = d2[d2.length - 1];
+  ok(JSON.stringify([f2.o, f2.h, f2.l, f2.c]) === JSON.stringify([fin.o, fin.h, fin.l, fin.c]),
+    "tick path deterministic across engines");
+  void seen1;
+  // formation progress 0..1
+  const e3 = mk();
+  eq(e3.formationProgress, 0, "no progress before ticks");
+  e3.tick();
+  ok(e3.formationProgress > 0 && e3.formationProgress < 1, "progress mid-formation");
+}
+
+// 16. buy during formation fills at the live tick price; HOD tracks live
+{
+  const e = new ReplayEngine(tape, 100_000, 1);
+  e.tick(); e.tick();
+  const live = e.displayPrice;
+  const f = e.buy(100);
+  ok(f !== null && Math.abs(f.price - live) < 1e-9, "buy fills at live tick price");
+  ok(f.candleIndex === 2, "formation fill tagged to forming candle");
+  ok(e.hod >= Math.max(tape[0].h, tape[1].h), "HOD includes forming high");
+  const un = e.unrealizedPnl();
+  ok(Math.abs(un - (live - f.price) * 100) < 1e-9, "unrealized uses live price");
+}
+
+// 17. stop triggers mid-formation at the stop price (temporal, not at close)
+{
+  const both = [C(5.0, 5.3, 4.9, 5.1, 1000, 0), C(5.1, 5.5, 4.8, 5.2, 1000, 1)];
+  const e = new ReplayEngine(both, 100_000, 0);
+  e.buy(100);
+  e.setBrackets(4.95, 5.4); // both inside candle 1 -> stop must win
+  let fills = [];
+  let fin = false;
+  const { TICKS_PER_CANDLE } = require(join(OUT, "engine.js"));
+  for (let i = 0; i < TICKS_PER_CANDLE && !fin; i++) {
+    const r = e.tick();
+    fills.push(...r.autoFills);
+    fin = r.finalized;
+  }
+  ok(fin, "formation completes");
+  ok(fills.length === 1 && fills[0].note === "stop-loss", "stop wins intra-candle when both in range");
+  eq(fills[0].price, 4.95, "mid-formation stop fills at stop price");
+  eq(e.positionQty, 0, "flat after mid-formation stop");
+}
+
+// 18. buyAt/sellAt replay recorded fills exactly (session reload fidelity)
+{
+  const e = new ReplayEngine(tape, 100_000, 1);
+  e.tick(); e.tick(); e.tick();
+  const b = e.buy(50); // live tick price
+  ok(b !== null, "formation buy ok");
+  while (!e.tick().finalized) { /* drain */ }
+  const s = e.sell(50);
+  ok(s !== null, "sell after finalize ok");
+  const e2 = new ReplayEngine(tape, 100_000, 1);
+  const rec = e.fills.map((x) => ({ ...x }));
+  for (const t of rec) {
+    while (e2.index < t.candleIndex) e2.step();
+    if (t.side === "buy") e2.buyAt(t.qty, t.price, t.candleIndex, t.time);
+    else e2.sellAt(t.qty, t.price, t.candleIndex, t.time);
+  }
+  eq(e2.realizedPnl, e.realizedPnl, "reload reproduces realized P/L exactly");
+  eq(e2.cash, e.cash, "reload reproduces cash exactly");
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 rmSync(OUT, { recursive: true, force: true });
 process.exit(failed ? 1 : 0);

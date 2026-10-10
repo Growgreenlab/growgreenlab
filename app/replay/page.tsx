@@ -6,7 +6,7 @@ import CandleChart from "../../components/CandleChart";
 import DataSourcePanel from "../../components/DataSourcePanel";
 import ReplayControls from "../../components/ReplayControls";
 import TradingPanel from "../../components/TradingPanel";
-import { ReplayEngine, formatMoney, formatSigned } from "../../lib/engine";
+import { ReplayEngine, formatMoney, formatSigned, TICKS_PER_CANDLE } from "../../lib/engine";
 import type { Candle, SessionMeta } from "../../lib/types";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
 
@@ -34,17 +34,30 @@ function ReplayPageInner() {
 
   useEffect(() => stopTimer, [stopTimer]);
 
-  // Play loop
+  // Play loop: wall-clock paced ticks so each 1-minute candle forms
+  // gradually in real time (one simulated minute per 1/speed seconds),
+  // with the price ticking live as the candle builds.
   useEffect(() => {
     if (!playing) return;
-    timerRef.current = setInterval(() => {
-      const eng = engineRef.current;
-      if (!eng) return;
-      const r = eng.step();
-      if (r.atEnd) stopTimer();
+    const eng = engineRef.current;
+    if (!eng) return;
+    let last = performance.now();
+    let acc = 0;
+    const id = setInterval(() => {
+      const now = performance.now();
+      acc += ((now - last) / 1000) * speed * TICKS_PER_CANDLE;
+      last = now;
+      let finished = false;
+      let guard = 0;
+      while (acc >= 1 && guard++ < 1000) {
+        acc -= 1;
+        const r = eng.tick();
+        if (r.atEnd) { finished = true; acc = 0; break; }
+      }
       bump();
-    }, 1000 / speed);
-    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+      if (finished) stopTimer();
+    }, 50);
+    return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playing, speed]);
 
@@ -79,12 +92,13 @@ function ReplayPageInner() {
           .order("created_at", { ascending: true });
         stopTimer();
         const eng = new ReplayEngine(cs, START_CASH, s.start_index ?? 0);
-        // fast-forward through the recorded fills to rebuild state
+        // fast-forward through the recorded fills to rebuild state,
+        // replaying each at its exact recorded price for P/L fidelity
         const fills = (trades ?? []).slice().sort((a, b) => a.candle_index - b.candle_index);
         for (const t of fills) {
           while (eng.index < t.candle_index) eng.step();
-          if (t.side === "buy") eng.buy(Number(t.qty));
-          else eng.sell(Number(t.qty));
+          if (t.side === "buy") eng.buyAt(Number(t.qty), Number(t.price), t.candle_index, new Date(t.candle_time).getTime());
+          else eng.sellAt(Number(t.qty), Number(t.price), t.candle_index, new Date(t.candle_time).getTime());
         }
         engineRef.current = eng;
         setCandles(cs);
@@ -103,7 +117,7 @@ function ReplayPageInner() {
     const eng = engineRef.current;
     if (!eng) return null;
     return {
-      price: eng.currentPrice,
+      price: eng.displayPrice,
       cash: eng.cash,
       qty: eng.positionQty,
       avg: eng.positionAvg,
@@ -215,8 +229,8 @@ function ReplayPageInner() {
             </div>
             <div className="chart-frame">
               <CandleChart
-                candles={candles}
-                revealedCount={eng.index + 1}
+                candles={eng.displayCandles}
+                revealedCount={eng.displayCandles.length}
                 overlays={{
                   hod: eng.hod,
                   stopLoss: eng.stopLoss,
@@ -241,6 +255,7 @@ function ReplayPageInner() {
                 onSpeed={setSpeed}
                 index={eng.index}
                 total={candles.length}
+                progress={(eng.index + eng.formationProgress + 1) / Math.max(1, candles.length)}
               />
               <div className="section">
                 <button className="btn big" onClick={saveSession} disabled={saving}>

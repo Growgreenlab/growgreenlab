@@ -11,12 +11,16 @@ interface Props {
   onSpeed: (s: number) => void;
   index: number;
   total: number;
+  /** 0..1 overall progress (includes intra-candle formation). */
+  progress?: number;
 }
 
 const SPEEDS = [0.5, 1, 2, 4, 8];
 
 export default function ReplayControls(p: Props) {
-  const pct = p.total > 0 ? Math.min(100, ((p.index + 1) / p.total) * 100) : 0;
+  const pct = Math.min(100, Math.max(0,
+    p.progress != null ? p.progress * 100 : ((p.index + 1) / Math.max(1, p.total)) * 100
+  ));
   return (
     <div className="card">
       <h3>Replay controls</h3>
