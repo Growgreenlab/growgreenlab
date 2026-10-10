@@ -42,9 +42,12 @@ export default function Header() {
               </button>
             </>
           ) : (
-            <Link href="/login" className="btn" style={{ padding: "6px 12px" }}>
-              Sign in
-            </Link>
+            <>
+              <Link href="/replay">Replay</Link>
+              <Link href="/login" className="btn" style={{ padding: "6px 12px" }}>
+                Sign in
+              </Link>
+            </>
           )}
         </nav>
       </div>

@@ -18,6 +18,7 @@ export default function SessionsPage() {
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [guest, setGuest] = useState(false);
 
   const load = async () => {
     if (!isSupabaseConfigured()) {
@@ -27,6 +28,8 @@ export default function SessionsPage() {
     }
     try {
       const supabase = createClient();
+      const { data: { user } } = await supabase.auth.getUser();
+      setGuest(!user);
       const { data, error } = await supabase
         .from("replay_sessions")
         .select("id,ticker,trade_date,source,realized_pnl,created_at")
@@ -63,8 +66,16 @@ export default function SessionsPage() {
         {error && <div className="err">{error}</div>}
         {!loading && !error && rows.length === 0 && (
           <div className="card">
-            <p className="hint">No saved sessions yet. Run a replay, then hit “Save session”.</p>
-            <Link href="/replay" className="btn primary">Open Replay Lab</Link>
+            <p className="hint">
+              {guest
+                ? "Sign in to save sessions to your account and open them on any device."
+                : "No saved sessions yet. Run a replay, then hit “Save session”."}
+            </p>
+            {guest ? (
+              <Link href="/login" className="btn primary">Sign in</Link>
+            ) : (
+              <Link href="/replay" className="btn primary">Open Replay Lab</Link>
+            )}
           </div>
         )}
         {rows.map((r) => (

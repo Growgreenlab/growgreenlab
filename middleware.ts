@@ -1,7 +1,10 @@
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-const PROTECTED = ["/replay", "/sessions"];
+const PROTECTED: string[] = [];
+// Auth enforcement is currently DISABLED (guest mode): everyone can use the
+// Replay Lab without signing in. To require login again (e.g. when
+// monetizing), set PROTECTED back to ["/replay", "/sessions"].
 
 export async function middleware(req: NextRequest) {
   const res = NextResponse.next();
