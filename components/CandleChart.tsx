@@ -101,11 +101,16 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
     };
     fitViewRef.current = fitView;
 
-    const zoomAt = (cx: number, factor: number) => {
+    const zoomAt = (_cx: number, factor: number) => {
       const n = dataOf().length;
       if (n === 0) return;
       const v = viewRef.current;
-      const idx = (cx - v.scrollX) / v.slot; // candle position under cursor
+      // Anchor the viewport CENTER (not the cursor): zooming expands or
+      // contracts symmetrically around what you're looking at, so the view
+      // never slides sideways and the newest candles don't snap back to the
+      // right edge on zoom-out.
+      const centerX = plotW() / 2;
+      const idx = (centerX - v.scrollX) / v.slot; // candle at screen center
       // Never zoom out past "fit to width": at that point every candle is
       // visible, so horizontal panning would have nowhere to go (a dead end
       // that feels like broken dragging). The floor keeps pan always alive.
@@ -113,7 +118,7 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
       const slot = Math.min(MAX_SLOT, Math.max(Math.max(MIN_SLOT, fitSlot), v.slot * factor));
       if (slot === v.slot) return;
       v.slot = slot;
-      v.scrollX = clampScroll(cx - idx * slot, slot, n); // keep cursor anchored
+      v.scrollX = clampScroll(centerX - idx * slot, slot, n); // keep center fixed
       markZoomed();
       drawRef.current();
     };
