@@ -139,7 +139,7 @@ export default function RiskCalculator({
         direction,
         fixedQty: effQty,
       }),
-    [balance, riskPct, effEntry, effSL, effTP, fees, slippage, direction]
+    [balance, riskPct, effEntry, effSL, effTP, fees, slippage, direction, effQty]
   );
 
   const applyToChart = () => {
@@ -195,7 +195,7 @@ export default function RiskCalculator({
         onClick={() => setOpen((o) => !o)}
       >
         <span className="ws-panel-title">Risk Calculator</span>
-        <span className="badge sim">Estimates</span>
+        <span className="badge sim">{hasPosition ? "Active" : "Estimates"}</span>
         <span style={{ marginLeft: "auto", opacity: 0.7 }}>{open ? "▾" : "▸"}</span>
       </div>
       {open && (
