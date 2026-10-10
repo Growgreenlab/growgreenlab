@@ -25,6 +25,10 @@ import {
   saveLockout,
   clearLockout,
   formatCountdown,
+  saveLockoutRemote,
+  loadLockoutRemote,
+  clearLockoutRemote,
+  mergeLockouts,
 } from "../../lib/psychGuard";
 import type { GuardThreshold, PositionBaseline, LockoutState } from "../../lib/psychGuard";
 import PsychologyGuardPanel from "../../components/PsychologyGuardPanel";
@@ -252,6 +256,28 @@ function ReplayPageInner() {
   // --- Psychology Guard V1 (position-based) ---
   const [guardThresholds, setGuardThresholds] = useState<GuardThreshold[]>(() => loadThresholds());
   const [guardLockout, setGuardLockout] = useState<LockoutState | null>(() => loadLockout());
+  const [guardUserId, setGuardUserId] = useState<string | null>(null);
+
+  // On mount: if signed in, merge remote lockout (cross-browser) with local.
+  useEffect(() => {
+    if (!isSupabaseConfigured()) return;
+    (async () => {
+      try {
+        const supabase = createClient();
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!user) return;
+        setGuardUserId(user.id);
+        const remote = await loadLockoutRemote(supabase, user.id);
+        if (remote) {
+          const merged = mergeLockouts(loadLockout(), remote);
+          if (merged) {
+            saveLockout(merged); // sync local cache
+            setGuardLockout(merged);
+          }
+        }
+      } catch { /* offline — localStorage fallback stands */ }
+    })();
+  }, []);
   const [guardWarned, setGuardWarned] = useState(false);
   const guardBaseline = useRef<PositionBaseline | null>(null);
   const guardLastTrigger = useRef<number>(0); // highest threshold already acted on
@@ -298,6 +324,10 @@ function ReplayPageInner() {
       saveLockout(lock);
       setGuardLockout(lock);
       setGuardWarned(false);
+      // Sync to Supabase for cross-browser persistence (signed-in users).
+      if (guardUserId && isSupabaseConfigured()) {
+        saveLockoutRemote(createClient(), guardUserId, lock);
+      }
     } else {
       setGuardWarned(true);
     }
@@ -309,6 +339,9 @@ function ReplayPageInner() {
   if (guardLockout && !lockoutActive) {
     clearLockout();
     setGuardLockout(null);
+    if (guardUserId && isSupabaseConfigured()) {
+      clearLockoutRemote(createClient(), guardUserId);
+    }
   }
 
   // Install engine guard: blocks buys (market + limit) during lockout.

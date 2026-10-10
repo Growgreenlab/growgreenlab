@@ -86,3 +86,9 @@ create index if not exists replay_sessions_user_created
   on public.replay_sessions (user_id, created_at desc);
 create index if not exists session_trades_session
   on public.session_trades (session_id);
+
+-- Psychology Guard: cross-browser lockout persistence (signed-in users).
+alter table public.profiles
+  add column if not exists guard_lockout_expiry timestamptz,
+  add column if not exists guard_lockout_threshold numeric,
+  add column if not exists guard_lockout_started_at timestamptz;

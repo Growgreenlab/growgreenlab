@@ -112,3 +112,68 @@ export function formatCountdown(ms: number): string {
   const r = s % 60;
   return `${m}:${r.toString().padStart(2, "0")}`;
 }
+
+// --- Supabase sync (signed-in users): lockout follows across browsers/devices ---
+
+type AnyClient = any;
+
+/** Save lockout to Supabase for cross-browser persistence. Fire-and-forget. */
+export async function saveLockoutRemote(
+  supabase: AnyClient,
+  userId: string,
+  l: LockoutState
+): Promise<void> {
+  try {
+    await supabase.from("profiles").update({
+      guard_lockout_expiry: new Date(l.expiry).toISOString(),
+      guard_lockout_threshold: l.threshold,
+      guard_lockout_started_at: new Date(l.startedAt).toISOString(),
+    }).eq("id", userId);
+  } catch { /* offline or RLS — localStorage remains the fallback */ }
+}
+
+/** Load lockout from Supabase. Returns null if none or expired. */
+export async function loadLockoutRemote(
+  supabase: AnyClient,
+  userId: string
+): Promise<LockoutState | null> {
+  try {
+    const { data } = await supabase.from("profiles")
+      .select("guard_lockout_expiry, guard_lockout_threshold, guard_lockout_started_at")
+      .eq("id", userId).single();
+    if (!data?.guard_lockout_expiry) return null;
+    const expiry = new Date(data.guard_lockout_expiry as string).getTime();
+    if (expiry <= Date.now()) return null;
+    return {
+      expiry,
+      threshold: Number(data.guard_lockout_threshold ?? 0),
+      startedAt: new Date(data.guard_lockout_started_at as string).getTime() || Date.now(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Clear remote lockout (on expiry). */
+export async function clearLockoutRemote(
+  supabase: AnyClient,
+  userId: string
+): Promise<void> {
+  try {
+    await supabase.from("profiles").update({
+      guard_lockout_expiry: null,
+      guard_lockout_threshold: null,
+      guard_lockout_started_at: null,
+    }).eq("id", userId);
+  } catch { /* ignore */ }
+}
+
+/** Merge local and remote lockouts — the later expiry wins. */
+export function mergeLockouts(
+  local: LockoutState | null,
+  remote: LockoutState | null
+): LockoutState | null {
+  if (!local) return remote;
+  if (!remote) return local;
+  return remote.expiry > local.expiry ? remote : local;
+}
