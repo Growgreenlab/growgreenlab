@@ -105,20 +105,23 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
       const n = dataOf().length;
       if (n === 0) return;
       const v = viewRef.current;
-      // Anchor the viewport CENTER (not the cursor): zooming expands or
-      // contracts symmetrically around what you're looking at, so the view
-      // never slides sideways and the newest candles don't snap back to the
-      // right edge on zoom-out.
-      const centerX = plotW() / 2;
-      const idx = (centerX - v.scrollX) / v.slot; // candle at screen center
+      const w = plotW();
+      // Anchor the midpoint of the visible DATA (not the screen center, which
+      // includes empty margins). The candles you're looking at stay exactly
+      // where they are while the zoom expands/contracts around them — the
+      // view never slides sideways on its own.
+      const i0 = Math.max(0, -v.scrollX / v.slot);
+      const i1 = Math.min(n - 1, (w - v.scrollX) / v.slot);
+      const midIdx = (i0 + i1) / 2;
+      const midX = midIdx * v.slot + v.scrollX; // its current screen x
       // Never zoom out past "fit to width": at that point every candle is
       // visible, so horizontal panning would have nowhere to go (a dead end
       // that feels like broken dragging). The floor keeps pan always alive.
-      const fitSlot = Math.min(MAX_SLOT, plotW() / n);
+      const fitSlot = Math.min(MAX_SLOT, w / n);
       const slot = Math.min(MAX_SLOT, Math.max(Math.max(MIN_SLOT, fitSlot), v.slot * factor));
       if (slot === v.slot) return;
       v.slot = slot;
-      v.scrollX = clampScroll(centerX - idx * slot, slot, n); // keep center fixed
+      v.scrollX = clampScroll(midX - midIdx * slot, slot, n); // keep data midpoint fixed
       markZoomed();
       drawRef.current();
     };
