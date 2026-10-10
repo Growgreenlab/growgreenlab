@@ -8,9 +8,16 @@ import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
 function LoginInner() {
   const searchParams = useSearchParams();
   const next = searchParams.get("next") ?? "/replay";
+  const authError = searchParams.get("error");
   const [email, setEmail] = useState("");
   const [sent, setSent] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(
+    authError === "link_expired"
+      ? "That link expired or was already used. Enter your email below and we'll send a fresh one."
+      : authError === "missing_code"
+        ? "The sign-in link was incomplete. Enter your email below and we'll send a fresh one."
+        : null
+  );
   const [busy, setBusy] = useState(false);
   const configured = isSupabaseConfigured();
 
