@@ -14,15 +14,20 @@ const NAV_LINKS = [
 
 export default function Header() {
   const [email, setEmail] = useState<string | null>(null);
+  const [displayName, setDisplayName] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const configured = isSupabaseConfigured();
 
   useEffect(() => {
     if (!configured) return;
     const supabase = createClient();
-    supabase.auth.getUser().then(({ data }) => setEmail(data.user?.email ?? null));
+    const updateUser = (user: { email?: string; user_metadata?: { display_name?: string } } | null) => {
+      setEmail(user?.email ?? null);
+      setDisplayName(user?.user_metadata?.display_name ?? null);
+    };
+    supabase.auth.getUser().then(({ data }) => updateUser(data.user));
     const { data: sub } = supabase.auth.onAuthStateChange((_e, session) =>
-      setEmail(session?.user?.email ?? null)
+      updateUser(session?.user ?? null)
     );
     return () => sub.subscription.unsubscribe();
   }, [configured]);
@@ -51,7 +56,7 @@ export default function Header() {
         <div className="ggl-nav-actions">
           {email ? (
             <>
-              <span className="ggl-user-badge" title={email}>{email}</span>
+              <span className="ggl-user-badge" title={email}>{displayName || email}</span>
               <button className="ggl-btn ggl-btn-ghost" onClick={signOut}>
                 Sign out
               </button>
