@@ -30,6 +30,23 @@ function ReplayPageInner() {
   // Planned SL/TP (dashed, no engine effect) vs active brackets (engine).
   const [plannedSL, setPlannedSL] = useState<number | null>(null);
   const [plannedTP, setPlannedTP] = useState<number | null>(null);
+  // Planned entry: captured when levels are first set, fixed thereafter.
+  // Used for R:R calculations so they don't drift with live price.
+  const [plannedEntry, setPlannedEntry] = useState<number | null>(null);
+
+  const setPlannedLevels = (sl: number | null, tp: number | null) => {
+    if ((sl != null || tp != null) && plannedEntry == null) {
+      const eng = engineRef.current;
+      if (eng && eng.displayPrice > 0) {
+        setPlannedEntry(normalizePrice(eng.displayPrice));
+      }
+    }
+    if (sl == null && tp == null) {
+      setPlannedEntry(null);
+    }
+    setPlannedSL(sl);
+    setPlannedTP(tp);
+  };
   // Bumped to force the timer effect to re-run on restart even when
   // `playing` doesn't net-change (React batches setPlaying(false) +
   // setPlaying(true) into a no-op, which used to leave the replay frozen
@@ -210,8 +227,7 @@ function ReplayPageInner() {
       // Activate any planned SL/TP on the new position.
       if (plannedSL != null || plannedTP != null) {
         eng.setBrackets(plannedSL, plannedTP);
-        setPlannedSL(null);
-        setPlannedTP(null);
+        setPlannedLevels(null, null);
       }
     }
     bump();
@@ -403,7 +419,7 @@ function ReplayPageInner() {
                     countdown={playing ? countdownText(eng.formationProgress, speed) : null}
                     lastPrice={snap.price}
                     brackets={brackets}
-                    onPlannedDrag={(sl, tp) => { setPlannedSL(sl); setPlannedTP(tp); }}
+                    onPlannedDrag={(sl, tp) => { setPlannedLevels(sl, tp); }}
                     onActiveDrag={(sl, tp) => {
                       const e = engineRef.current;
                       if (e) { e.setBrackets(sl, tp); bump(); }
@@ -448,6 +464,7 @@ function ReplayPageInner() {
                 onQtyChange={setOrderQty}
                 plannedSL={plannedSL}
                 plannedTP={plannedTP}
+                plannedEntry={plannedEntry}
                 activeSL={brackets.activeSL}
                 activeTP={brackets.activeTP}
                 hasPosition={eng.positionQty > 0}
@@ -466,8 +483,7 @@ function ReplayPageInner() {
                     eng.setBrackets(nSL, nTP);
                   } else {
                     // Flat: planned levels only (dashed, no engine effect).
-                    setPlannedSL(nSL);
-                    setPlannedTP(nTP);
+                    setPlannedLevels(nSL, nTP);
                   }
                   bump();
                 }}
@@ -478,17 +494,17 @@ function ReplayPageInner() {
                 cash={snap.cash}
                 plannedSL={plannedSL}
                 plannedTP={plannedTP}
-                activeSL={eng.stopLoss}
-                activeTP={eng.takeProfit}
+                plannedEntry={plannedEntry}
+                activeSL={brackets.activeSL}
+                activeTP={brackets.activeTP}
                 hasPosition={eng.positionQty > 0}
-                onPlannedChange={(sl, tp) => { setPlannedSL(sl != null ? normalizePrice(sl) : null); setPlannedTP(tp != null ? normalizePrice(tp) : null); }}
+                onPlannedChange={(sl, tp) => { setPlannedLevels(sl != null ? normalizePrice(sl) : null, tp != null ? normalizePrice(tp) : null); }}
                 onActiveChange={(sl, tp) => {
                   const e = engineRef.current;
                   if (e) { e.setBrackets(sl != null ? normalizePrice(sl) : null, tp != null ? normalizePrice(tp) : null); bump(); }
                 }}
                 onApplyBrackets={(sl, tp) => {
-                  setPlannedSL(sl);
-                  setPlannedTP(tp);
+                  setPlannedLevels(sl, tp);
                   bump();
                 }}
                 onBuySized={(qty) => buyErr(qty)}

@@ -24,6 +24,7 @@ interface Props {
   onQtyChange: (qty: string) => void;
   plannedSL: number | null;
   plannedTP: number | null;
+  plannedEntry: number | null;
   activeSL: number | null;
   activeTP: number | null;
   hasPosition: boolean;
@@ -40,7 +41,7 @@ interface Props {
  * buy/sell, stop-loss / take-profit brackets, working limit orders, and
  * the fill ledger. Built for a narrow right-hand column.
  */
-export default function TradingPanel({ snap, qty, onQtyChange, plannedSL, plannedTP, activeSL, activeTP, hasPosition, onBuy, onSell, onPlaceLimit, onCancelOrder, onSetBrackets, disabled }: Props) {
+export default function TradingPanel({ snap, qty, onQtyChange, plannedSL, plannedTP, plannedEntry, activeSL, activeTP, hasPosition, onBuy, onSell, onPlaceLimit, onCancelOrder, onSetBrackets, disabled }: Props) {
   const [orderType, setOrderType] = useState<"market" | "limit">("market");
   const [limitPx, setLimitPx] = useState("");
   const [sl, setSl] = useState("");
@@ -166,8 +167,8 @@ export default function TradingPanel({ snap, qty, onQtyChange, plannedSL, planne
           {plannedTP != null ? ` TP ${formatMoney(plannedTP)}` : ""}
           {(() => {
             const q = Math.floor(Number(qty) || 0);
-            const entry = snap.price;
-            if (q > 0 && entry > 0 && plannedSL != null && plannedSL < entry && plannedTP != null && plannedTP > entry) {
+            const entry = plannedEntry;
+            if (q > 0 && entry != null && entry > 0 && plannedSL != null && plannedSL < entry && plannedTP != null && plannedTP > entry) {
               const risk = (entry - plannedSL) * q;
               const reward = (plannedTP - entry) * q;
               const rr = risk > 0 ? reward / risk : 0;

@@ -12,6 +12,7 @@ interface Props {
   cash: number;
   plannedSL: number | null;
   plannedTP: number | null;
+  plannedEntry: number | null;
   activeSL: number | null;
   activeTP: number | null;
   hasPosition: boolean;
@@ -31,6 +32,7 @@ export default function RiskCalculator({
   cash,
   plannedSL,
   plannedTP,
+  plannedEntry,
   activeSL,
   activeTP,
   hasPosition,
@@ -90,7 +92,8 @@ export default function RiskCalculator({
   };
 
   // Effective values for calculation (inputs are now the source).
-  const effEntry = entry !== "" ? Number(entry) : currentPrice;
+  // Effective values: typed input wins, else planned entry (fixed), else live price.
+  const effEntry = entry !== "" ? Number(entry) : (plannedEntry ?? currentPrice);
   const effSL = sl !== "" ? Number(sl) : null;
   const effTP = tp !== "" ? Number(tp) : null;
 
