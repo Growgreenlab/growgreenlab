@@ -12,6 +12,7 @@ import { ReplayEngine, formatMoney, formatSigned, countdownText, TICKS_PER_CANDL
 import type { Candle, SessionMeta } from "../../lib/types";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
 import { diag } from "../../lib/diag";
+import { DEFAULT_HOTKEYS, isTypingTarget } from "../../lib/hotkeys";
 
 const START_CASH = 100_000;
 
@@ -23,6 +24,7 @@ function ReplayPageInner() {
   const [candles, setCandles] = useState<Candle[] | null>(null);
   const [meta, setMeta] = useState<SessionMeta | null>(null);
   const [playing, setPlaying] = useState(false);
+  const [orderQty, setOrderQty] = useState("100");
   // Bumped to force the timer effect to re-run on restart even when
   // `playing` doesn't net-change (React batches setPlaying(false) +
   // setPlaying(true) into a no-op, which used to leave the replay frozen
@@ -193,6 +195,44 @@ function ReplayPageInner() {
     bump();
     return f ? null : "No open position to sell.";
   };
+
+  // Basic trading hotkeys (Phase A1). Disabled while typing in inputs.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (isTypingTarget(e)) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const eng = engineRef.current;
+      if (!eng) return;
+      const key = e.key;
+      const match = (binding: string) => key.toLowerCase() === binding.toLowerCase();
+
+      if (match(DEFAULT_HOTKEYS.buy)) {
+        e.preventDefault();
+        buyErr(Math.floor(Number(orderQty) || 0));
+      } else if (match(DEFAULT_HOTKEYS.exit)) {
+        e.preventDefault();
+        if (eng.positionQty > 0) sellErr(eng.positionQty);
+      } else if (match(DEFAULT_HOTKEYS.cancelOrders)) {
+        e.preventDefault();
+        eng.cancelAllOrders();
+        bump();
+      } else if (match(DEFAULT_HOTKEYS.playPause)) {
+        e.preventDefault();
+        if (playing) stopTimer();
+        else { setEnded(false); setPlayNonce((n) => n + 1); setPlaying(true); }
+      } else if (match(DEFAULT_HOTKEYS.stepForward)) {
+        e.preventDefault();
+        if (!playing) { eng.step(); setEnded(eng.atEnd); bump(); }
+      } else if (match(DEFAULT_HOTKEYS.speed05)) { setSpeed(0.5); }
+      else if (match(DEFAULT_HOTKEYS.speed1)) { setSpeed(1); }
+      else if (match(DEFAULT_HOTKEYS.speed2)) { setSpeed(2); }
+      else if (match(DEFAULT_HOTKEYS.speed4)) { setSpeed(4); }
+      else if (match(DEFAULT_HOTKEYS.speed8)) { setSpeed(8); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [playing, orderQty, buyErr, sellErr, stopTimer, bump]);
+
   const placeLimitErr = (side: "buy" | "sell", qty: number, price: number): string | null => {
     const eng = engineRef.current;
     if (!eng) return "Load a session first.";
@@ -369,6 +409,8 @@ function ReplayPageInner() {
             <aside className="ws-right">
               <TradingPanel
                 snap={snap}
+                qty={orderQty}
+                onQtyChange={setOrderQty}
                 onBuy={buyErr}
                 onSell={sellErr}
                 onPlaceLimit={placeLimitErr}

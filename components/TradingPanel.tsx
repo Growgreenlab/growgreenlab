@@ -20,6 +20,8 @@ export interface TradingSnapshot {
 
 interface Props {
   snap: TradingSnapshot;
+  qty: string;
+  onQtyChange: (qty: string) => void;
   onBuy: (qty: number) => string | null;
   onSell: (qty: number) => string | null;
   onPlaceLimit: (side: "buy" | "sell", qty: number, price: number) => string | null;
@@ -33,8 +35,7 @@ interface Props {
  * buy/sell, stop-loss / take-profit brackets, working limit orders, and
  * the fill ledger. Built for a narrow right-hand column.
  */
-export default function TradingPanel({ snap, onBuy, onSell, onPlaceLimit, onCancelOrder, onSetBrackets, disabled }: Props) {
-  const [qty, setQty] = useState("100");
+export default function TradingPanel({ snap, qty, onQtyChange, onBuy, onSell, onPlaceLimit, onCancelOrder, onSetBrackets, disabled }: Props) {
   const [orderType, setOrderType] = useState<"market" | "limit">("market");
   const [limitPx, setLimitPx] = useState("");
   const [sl, setSl] = useState("");
@@ -101,7 +102,7 @@ export default function TradingPanel({ snap, onBuy, onSell, onPlaceLimit, onCanc
         <div className="field">
           <label>Qty</label>
           <input className="input num" type="number" min="1" step="1" value={qty}
-            onChange={(e) => setQty(e.target.value)} disabled={disabled} />
+            onChange={(e) => onQtyChange(e.target.value)} disabled={disabled} />
         </div>
         {orderType === "limit" && (
           <div className="field">
