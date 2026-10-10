@@ -15,6 +15,7 @@ import {
   HistogramSeries,
   type IChartApi,
   type ISeriesApi,
+  type IPriceLine,
   type UTCTimestamp,
 } from "lightweight-charts";
 import type { Candle } from "../lib/types";
@@ -25,15 +26,25 @@ const DOWN = "#f6465d";
 const UP_VOL = "rgba(46,189,133,0.45)";
 const DOWN_VOL = "rgba(246,70,93,0.45)";
 
+interface BracketLevels {
+  plannedSL: number | null;
+  plannedTP: number | null;
+  activeSL: number | null;
+  activeTP: number | null;
+}
+
 interface Props {
   candles: Candle[];
   revealedCount: number;
   sessionKey: string;
   countdown: string | null;
   lastPrice: number;
+  brackets: BracketLevels;
+  onPlannedDrag: (sl: number | null, tp: number | null) => void;
+  onActiveDrag: (sl: number | null, tp: number | null) => void;
 }
 
-export default function LwcChart({ candles, revealedCount, sessionKey, countdown, lastPrice }: Props) {
+export default function LwcChart({ candles, revealedCount, sessionKey, countdown, lastPrice, brackets, onPlannedDrag, onActiveDrag }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const elRef = useRef<HTMLDivElement>(null);
   const countdownRef = useRef<HTMLDivElement>(null);
@@ -42,6 +53,16 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
   const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   // Tracks what we've pushed so we can use update() instead of setData().
   const pushedRef = useRef<{ key: string; n: number } | null>(null);
+  // Bracket price lines: planned (dashed) vs active (solid, engine-linked).
+  const plannedSLRef = useRef<IPriceLine | null>(null);
+  const plannedTPRef = useRef<IPriceLine | null>(null);
+  const activeSLRef = useRef<IPriceLine | null>(null);
+  const activeTPRef = useRef<IPriceLine | null>(null);
+  // Drag state: which line is being dragged.
+  const dragRef = useRef<{ kind: "plannedSL" | "plannedTP" | "activeSL" | "activeTP" } | null>(null);
+  // Latest brackets for use in pointer handlers (avoids stale closures).
+  const bracketsRef = useRef(brackets);
+  bracketsRef.current = brackets;
 
   // Create the chart once.
   useEffect(() => {
@@ -118,6 +139,47 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       volumeSeriesRef.current = null;
     };
   }, []);
+
+  // Sync bracket price lines (planned = dashed gray, active = solid red/green).
+  useEffect(() => {
+    const cs = candleSeriesRef.current;
+    if (!cs) return;
+
+    const syncLine = (
+      ref: React.MutableRefObject<IPriceLine | null>,
+      price: number | null,
+      color: string,
+      title: string,
+      dashed: boolean
+    ) => {
+      if (price == null) {
+        if (ref.current) {
+          cs.removePriceLine(ref.current);
+          ref.current = null;
+        }
+        return;
+      }
+      if (ref.current) {
+        ref.current.applyOptions({ price, title: `${title} ${price.toFixed(2)}` });
+      } else {
+        ref.current = cs.createPriceLine({
+          price,
+          color,
+          lineWidth: 1,
+          lineStyle: dashed ? 2 : 0, // 2 = dashed, 0 = solid
+          axisLabelVisible: true,
+          title: `${title} ${price.toFixed(2)}`,
+        });
+      }
+    };
+
+    // Don't fight an in-progress drag: skip the line being dragged.
+    const dragging = dragRef.current?.kind;
+    if (dragging !== "plannedSL") syncLine(plannedSLRef, brackets.plannedSL, "#9ca3af", "SL (planned)", true);
+    if (dragging !== "plannedTP") syncLine(plannedTPRef, brackets.plannedTP, "#9ca3af", "TP (planned)", true);
+    if (dragging !== "activeSL") syncLine(activeSLRef, brackets.activeSL, "#f6465d", "SL", false);
+    if (dragging !== "activeTP") syncLine(activeTPRef, brackets.activeTP, "#2ebd85", "TP", false);
+  }, [brackets]);
 
   // Push data: setData() only on dataset changes; update() per tick.
   useEffect(() => {
@@ -201,8 +263,103 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     }
   }, [candles, revealedCount, sessionKey, countdown, lastPrice]);
 
+  // Bracket line dragging: hit-test on pointerdown, drag the price line,
+  // commit on pointerup. Disables chart pan/zoom while a line is dragged.
+  const getLineY = (price: number | null): number | null => {
+    const cs = candleSeriesRef.current;
+    if (cs == null || price == null) return null;
+    return cs.priceToCoordinate(price);
+  };
+
+  const hitTestBracket = (y: number): "plannedSL" | "plannedTP" | "activeSL" | "activeTP" | null => {
+    const b = bracketsRef.current;
+    const TOL = 12; // px
+    const candidates: Array<[string, number | null]> = [
+      ["activeSL", b.activeSL],
+      ["activeTP", b.activeTP],
+      ["plannedSL", b.plannedSL],
+      ["plannedTP", b.plannedTP],
+    ];
+    for (const [kind, price] of candidates) {
+      const lineY = getLineY(price);
+      if (lineY != null && Math.abs(lineY - y) <= TOL) {
+        return kind as "plannedSL" | "plannedTP" | "activeSL" | "activeTP";
+      }
+    }
+    return null;
+  };
+
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    const chart = chartRef.current;
+    const el = elRef.current;
+    if (!chart || !el) return;
+    const rect = el.getBoundingClientRect();
+    const y = e.clientY - rect.top;
+    const hit = hitTestBracket(y);
+    if (hit) {
+      e.preventDefault();
+      e.stopPropagation();
+      dragRef.current = { kind: hit };
+      // Disable chart pan/zoom so dragging the line doesn't move the chart.
+      chart.applyOptions({ handleScroll: false, handleScale: false });
+      // Prevent browser touch gestures during line drag (re-enabled on release).
+      if (wrapRef.current) wrapRef.current.style.touchAction = "none";
+      (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    }
+  };
+
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    const cs = candleSeriesRef.current;
+    const el = elRef.current;
+    if (!drag || !cs || !el) return;
+    const rect = el.getBoundingClientRect();
+    const y = e.clientY - rect.top;
+    const price = cs.coordinateToPrice(y);
+    if (price == null || !isFinite(price) || price <= 0) return;
+    // Update the visual line live during drag.
+    const refMap = {
+      plannedSL: plannedSLRef,
+      plannedTP: plannedTPRef,
+      activeSL: activeSLRef,
+      activeTP: activeTPRef,
+    };
+    const line = refMap[drag.kind].current;
+    if (line) {
+      line.applyOptions({ price, title: `${drag.kind.includes("SL") ? "SL" : "TP"} ${price.toFixed(2)}` });
+    }
+    // Store the pending price for commit on pointerup.
+    (drag as { pendingPrice?: number }).pendingPrice = price;
+  };
+
+  const onPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    const chart = chartRef.current;
+    if (!drag) return;
+    const pendingPrice = (drag as { pendingPrice?: number }).pendingPrice;
+    dragRef.current = null;
+    if (chart) {
+      chart.applyOptions({ handleScroll: true, handleScale: true });
+    }
+    if (wrapRef.current) wrapRef.current.style.touchAction = "";
+    if (pendingPrice != null && isFinite(pendingPrice) && pendingPrice > 0) {
+      const b = bracketsRef.current;
+      if (drag.kind === "plannedSL") onPlannedDrag(pendingPrice, b.plannedTP);
+      else if (drag.kind === "plannedTP") onPlannedDrag(b.plannedSL, pendingPrice);
+      else if (drag.kind === "activeSL") onActiveDrag(pendingPrice, b.activeTP);
+      else if (drag.kind === "activeTP") onActiveDrag(b.activeSL, pendingPrice);
+    }
+  };
+
   return (
-    <div ref={wrapRef} style={{ position: "relative", width: "100%", height: "100%" }}>
+    <div
+      ref={wrapRef}
+      style={{ position: "relative", width: "100%", height: "100%" }}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerUp}
+    >
       <div ref={elRef} style={{ width: "100%", height: "100%" }} />
       <div
         ref={countdownRef}

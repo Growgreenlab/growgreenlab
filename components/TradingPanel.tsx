@@ -22,6 +22,8 @@ interface Props {
   snap: TradingSnapshot;
   qty: string;
   onQtyChange: (qty: string) => void;
+  plannedSL: number | null;
+  plannedTP: number | null;
   onBuy: (qty: number) => string | null;
   onSell: (qty: number) => string | null;
   onPlaceLimit: (side: "buy" | "sell", qty: number, price: number) => string | null;
@@ -35,7 +37,7 @@ interface Props {
  * buy/sell, stop-loss / take-profit brackets, working limit orders, and
  * the fill ledger. Built for a narrow right-hand column.
  */
-export default function TradingPanel({ snap, qty, onQtyChange, onBuy, onSell, onPlaceLimit, onCancelOrder, onSetBrackets, disabled }: Props) {
+export default function TradingPanel({ snap, qty, onQtyChange, plannedSL, plannedTP, onBuy, onSell, onPlaceLimit, onCancelOrder, onSetBrackets, disabled }: Props) {
   const [orderType, setOrderType] = useState<"market" | "limit">("market");
   const [limitPx, setLimitPx] = useState("");
   const [sl, setSl] = useState("");
@@ -139,6 +141,30 @@ export default function TradingPanel({ snap, qty, onQtyChange, onBuy, onSell, on
         <div className="hint" style={{ marginTop: 6 }}>
           Active: {snap.stopLoss != null ? `SL ${formatMoney(snap.stopLoss)}` : ""}
           {snap.takeProfit != null ? ` TP ${formatMoney(snap.takeProfit)}` : ""} — auto-triggers live.
+        </div>
+      )}
+      {(plannedSL != null || plannedTP != null) && (
+        <div className="hint" style={{ marginTop: 6, borderLeft: "2px dashed #9ca3af", paddingLeft: 8 }}>
+          Planned: {plannedSL != null ? `SL ${formatMoney(plannedSL)}` : ""}
+          {plannedTP != null ? ` TP ${formatMoney(plannedTP)}` : ""}
+          {(() => {
+            const q = Math.floor(Number(qty) || 0);
+            const entry = snap.price;
+            if (q > 0 && entry > 0 && plannedSL != null && plannedSL < entry && plannedTP != null && plannedTP > entry) {
+              const risk = (entry - plannedSL) * q;
+              const reward = (plannedTP - entry) * q;
+              const rr = risk > 0 ? reward / risk : 0;
+              return (
+                <span>
+                  <br />
+                  Risk {formatMoney(risk)} / Reward {formatMoney(reward)} / R:R {rr.toFixed(2)}
+                </span>
+              );
+            }
+            return null;
+          })()}
+          <br />
+          <span style={{ opacity: 0.7 }}>Drag the dashed lines on the chart to adjust.</span>
         </div>
       )}
 

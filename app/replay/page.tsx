@@ -25,6 +25,9 @@ function ReplayPageInner() {
   const [meta, setMeta] = useState<SessionMeta | null>(null);
   const [playing, setPlaying] = useState(false);
   const [orderQty, setOrderQty] = useState("100");
+  // Planned SL/TP (dashed, no engine effect) vs active brackets (engine).
+  const [plannedSL, setPlannedSL] = useState<number | null>(null);
+  const [plannedTP, setPlannedTP] = useState<number | null>(null);
   // Bumped to force the timer effect to re-run on restart even when
   // `playing` doesn't net-change (React batches setPlaying(false) +
   // setPlaying(true) into a no-op, which used to leave the replay frozen
@@ -185,6 +188,14 @@ function ReplayPageInner() {
     if (!eng) return "Load a session first.";
     if (!(qty > 0)) return "Enter a share quantity.";
     const f = eng.buy(Math.floor(qty));
+    if (f) {
+      // Activate any planned SL/TP on the new position.
+      if (plannedSL != null || plannedTP != null) {
+        eng.setBrackets(plannedSL, plannedTP);
+        setPlannedSL(null);
+        setPlannedTP(null);
+      }
+    }
     bump();
     return f ? null : "Not enough virtual cash for that size.";
   };
@@ -373,6 +384,17 @@ function ReplayPageInner() {
                     sessionKey={`${meta.ticker}|${meta.tradeDate}|${meta.source}|${candles.length}`}
                     countdown={playing ? countdownText(eng.formationProgress, speed) : null}
                     lastPrice={snap.price}
+                    brackets={{
+                      plannedSL,
+                      plannedTP,
+                      activeSL: eng.stopLoss,
+                      activeTP: eng.takeProfit,
+                    }}
+                    onPlannedDrag={(sl, tp) => { setPlannedSL(sl); setPlannedTP(tp); }}
+                    onActiveDrag={(sl, tp) => {
+                      const e = engineRef.current;
+                      if (e) { e.setBrackets(sl, tp); bump(); }
+                    }}
                   />
                 )}
               </div>
@@ -411,11 +433,25 @@ function ReplayPageInner() {
                 snap={snap}
                 qty={orderQty}
                 onQtyChange={setOrderQty}
+                plannedSL={plannedSL}
+                plannedTP={plannedTP}
                 onBuy={buyErr}
                 onSell={sellErr}
                 onPlaceLimit={placeLimitErr}
                 onCancelOrder={(id) => { eng.cancelOrder(id); bump(); }}
-                onSetBrackets={(sl, tp) => { eng.setBrackets(sl, tp); bump(); }}
+                onSetBrackets={(sl, tp) => {
+                  const eng = engineRef.current;
+                  if (!eng) return;
+                  if (eng.positionQty > 0) {
+                    // Position open: active brackets on the engine.
+                    eng.setBrackets(sl, tp);
+                  } else {
+                    // Flat: planned levels only (dashed, no engine effect).
+                    setPlannedSL(sl);
+                    setPlannedTP(tp);
+                  }
+                  bump();
+                }}
                 disabled={false}
               />
             </aside>
