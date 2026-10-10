@@ -315,7 +315,7 @@ function ReplayPageInner() {
                   <div className="tk">Cash</div>
                   <div className="tv num">{formatMoney(snap.cash)}</div>
                 </div>
-                <div className="pnl-cell hero">
+                <div className="pnl-cell equity">
                   <div className="tk">Equity</div>
                   <div className="tv num">{formatMoney(snap.equity)}</div>
                 </div>

@@ -522,7 +522,7 @@ body.ws-active .footer { display: none; }
 .pnl-cell { flex: 1 1 0; min-width: 0; }
 .pnl-cell .tk { font-size: 10.5px; font-weight: 600; letter-spacing: 0.6px; text-transform: uppercase; color: var(--muted-dim); margin-bottom: 3px; white-space: nowrap; }
 .pnl-cell .tv { font-family: var(--mono); font-size: 14px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.pnl-cell.hero .tv { color: var(--emerald-bright); }
+.pnl-cell.equity .tv { color: var(--emerald-bright); }
 
 /* right column */
 .ws-right { min-height: 0; min-width: 0; display: flex; flex-direction: column; }
