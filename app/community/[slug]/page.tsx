@@ -134,6 +134,12 @@ export default function CommunityRoomPage() {
       const supabase = createClient();
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Not signed in.");
+      // Sync display name from auth metadata to profiles so others see the right name
+      const displayName = user.user_metadata?.display_name as string | undefined;
+      if (displayName) {
+        await supabase.from("profiles")
+          .upsert({ id: user.id, email: user.email, display_name: displayName }, { onConflict: "id" });
+      }
       const { error } = await supabase.from("community_messages").insert({
         room_id: room.id,
         user_id: user.id,
