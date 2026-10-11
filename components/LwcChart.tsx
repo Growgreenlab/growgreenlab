@@ -365,13 +365,25 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     const el = elRef.current;
     if (!chart || !cs || !el) return null;
     const rect = el.getBoundingClientRect();
+    const candlesRef = useRef(candles);
+    candlesRef.current = candles;
     return {
       chart, cs, rect,
       toPrice: (y: number) => cs.coordinateToPrice(y),
       toTime: (x: number) => {
         const t = chart.timeScale().coordinateToTime(x);
-        // coordinateToTime returns UTCTimestamp (seconds) or null
-        return t == null ? null : Number(t) * 1000;
+        if (t == null) return null;
+        const timeMs = Number(t) * 1000;
+        // Snap to nearest candle timestamp for reliable timeToCoordinate
+        const cs_ = candlesRef.current;
+        if (cs_.length === 0) return timeMs;
+        let best = cs_[0].t;
+        let bestDiff = Math.abs(best - timeMs);
+        for (const c of cs_) {
+          const diff = Math.abs(c.t - timeMs);
+          if (diff < bestDiff) { bestDiff = diff; best = c.t; }
+        }
+        return best;
       },
       toY: (price: number) => cs.priceToCoordinate(price),
       toX: (timeMs: number) => chart.timeScale().timeToCoordinate(Math.floor(timeMs / 1000) as UTCTimestamp),
