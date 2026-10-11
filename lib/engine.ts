@@ -558,7 +558,12 @@ export function formatSigned(n: number): string {
  * progress is 0..1 of the current candle.
  */
 export function countdownText(progress: number, speed: number): string {
-  const ticksPerSec = (TICKS_PER_CANDLE / SECONDS_PER_CANDLE) * speed;
+  return countdownTextFor(progress, speed, SECONDS_PER_CANDLE);
+}
+
+/** Countdown for a candle of arbitrary duration (used by multi-timeframe charts). */
+export function countdownTextFor(progress: number, speed: number, secondsPerCandle: number): string {
+  const ticksPerSec = (TICKS_PER_CANDLE / secondsPerCandle) * speed;
   const ticksLeft = Math.max(0, TICKS_PER_CANDLE - Math.round(progress * TICKS_PER_CANDLE));
   const secs = Math.max(0, Math.ceil(ticksLeft / ticksPerSec));
   const mm = String(Math.floor(secs / 60)).padStart(2, "0");

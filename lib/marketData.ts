@@ -149,3 +149,106 @@ export function generateSampleSession(ticker: string, dateStr: string): Candle[]
 export function stripSynthetic(candles: Candle[]): Candle[] {
   return candles.filter((c) => !c.syn);
 }
+
+/* ------------------------------------------------------------------ */
+/* Multi-timeframe aggregation                                          */
+/* ------------------------------------------------------------------ */
+
+/** Supported chart timeframes (minutes per candle). Extensible. */
+export const TIMEFRAMES = [
+  { id: "1m", label: "1m", minutes: 1 },
+  { id: "5m", label: "5m", minutes: 5 },
+  { id: "15m", label: "15m", minutes: 15 },
+  { id: "30m", label: "30m", minutes: 30 },
+  { id: "1h", label: "1H", minutes: 60 },
+] as const;
+
+export type TimeframeId = (typeof TIMEFRAMES)[number]["id"];
+
+export function timeframeMinutes(id: TimeframeId): number {
+  return TIMEFRAMES.find((t) => t.id === id)?.minutes ?? 1;
+}
+
+/**
+ * Get the ET session-aligned period start for a candle timestamp.
+ * Periods align to market-session boundaries:
+ *   5m  → :00, :05, :10, … (aligned to hour)
+ *   15m → :00, :15, :30, :45
+ *   30m → :00, :30
+ *   1h  → :00
+ * Returns the period-start timestamp in ms.
+ */
+export function periodStartMs(t: number, minutes: number): number {
+  if (minutes <= 1) return t;
+  const et = new Date(new Date(t).toLocaleString("en-US", { timeZone: "America/New_York" }));
+  const mins = et.getHours() * 60 + et.getMinutes();
+  const periodStartMins = Math.floor(mins / minutes) * minutes;
+  const d = new Date(et);
+  d.setHours(0, 0, 0, 0);
+  d.setMinutes(periodStartMins);
+  // Convert the ET wall-clock back to a UTC instant. We do this by
+  // formatting the ET wall time and reinterpreting it via the same
+  // locale trick in reverse.
+  const etStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:00`;
+  return etToUtcMs(etStr.slice(0, 10), etStr.slice(11, 16));
+}
+
+/**
+ * Aggregate 1-minute candles into higher-timeframe candles.
+ *
+ * Rules:
+ * - Groups by session-aligned period (see periodStartMs).
+ * - OHLCV: O = first open, H = max high, L = min low, C = last close, V = sum.
+ * - The input's last candle may be partially formed (live); it aggregates
+ *   progressively — H/L/C/V reflect only revealed data.
+ * - Missing 1-min intervals are NOT fabricated: a period with fewer
+ *   constituent candles simply aggregates what's there.
+ * - `syn` flags propagate: a period is marked syn only if ALL its
+ *   constituent candles are syn.
+ *
+ * Input must be in chronological order. Output is chronological.
+ */
+export function aggregateCandles(candles: Candle[], minutes: number): Candle[] {
+  if (minutes <= 1 || candles.length === 0) return candles;
+  const out: Candle[] = [];
+  let cur: Candle | null = null;
+  let curPeriod = -1;
+  let curAllSyn = true;
+
+  for (const c of candles) {
+    const p = periodStartMs(c.t, minutes);
+    if (p !== curPeriod) {
+      if (cur) out.push(cur);
+      curPeriod = p;
+      cur = { t: p, o: c.o, h: c.h, l: c.l, c: c.c, v: c.v };
+      curAllSyn = !!c.syn;
+    } else if (cur) {
+      cur.h = Math.max(cur.h, c.h);
+      cur.l = Math.min(cur.l, c.l);
+      cur.c = c.c;
+      cur.v += c.v;
+      curAllSyn = curAllSyn && !!c.syn;
+    }
+  }
+  if (cur) {
+    if (curAllSyn) cur.syn = true;
+    out.push(cur);
+  }
+  return out;
+}
+
+/**
+ * Progress (0..1) of the currently forming higher-timeframe candle,
+ * given the engine's 1-minute formation progress and the timestamp of
+ * the 1-minute candle currently forming.
+ */
+export function higherTimeframeProgress(
+  oneMinProgress: number,
+  formingCandleTime: number,
+  minutes: number,
+): number {
+  if (minutes <= 1) return oneMinProgress;
+  const et = new Date(new Date(formingCandleTime).toLocaleString("en-US", { timeZone: "America/New_York" }));
+  const minsIntoPeriod = (et.getHours() * 60 + et.getMinutes()) % minutes;
+  return Math.min(1, (minsIntoPeriod + oneMinProgress) / minutes);
+}

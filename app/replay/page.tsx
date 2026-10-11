@@ -9,8 +9,9 @@ import DataSourcePanel from "../../components/DataSourcePanel";
 import ReplayControls from "../../components/ReplayControls";
 import TradingPanel from "../../components/TradingPanel";
 import RiskCalculator from "../../components/RiskCalculator";
-import { ReplayEngine, formatMoney, formatSigned, countdownText, TICKS_PER_CANDLE, SECONDS_PER_CANDLE } from "../../lib/engine";
+import { ReplayEngine, formatMoney, formatSigned, countdownText, countdownTextFor, TICKS_PER_CANDLE, SECONDS_PER_CANDLE } from "../../lib/engine";
 import type { Candle, SessionMeta } from "../../lib/types";
+import { TIMEFRAMES, aggregateCandles, higherTimeframeProgress, timeframeMinutes, type TimeframeId } from "../../lib/marketData";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
 import { diag } from "../../lib/diag";
 import { DEFAULT_HOTKEYS, isTypingTarget } from "../../lib/hotkeys";
@@ -184,6 +185,10 @@ function ReplayPageInner() {
   // with no timer running).
   const [playNonce, setPlayNonce] = useState(0);
   const [speed, setSpeed] = useState(1);
+  // Chart timeframe: display-layer aggregation only. The engine always runs
+  // on 1-minute candles; switching never touches replay state, positions,
+  // orders, or the clock.
+  const [timeframe, setTimeframe] = useState<TimeframeId>("1m");
   const [ended, setEnded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
@@ -346,6 +351,29 @@ function ReplayPageInner() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [version, candles]);
+
+  // Aggregated chart candles for the selected timeframe.
+  // displayCandles contains only revealed data (finalized + forming 1-min),
+  // so aggregation can never leak future candles.
+  const chartCandles = useMemo(() => {
+    const eng = engineRef.current;
+    if (!eng) return null;
+    return aggregateCandles(eng.displayCandles, timeframeMinutes(timeframe));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [version, timeframe, candles]);
+
+  // Timeframe-aware countdown: higher timeframes count down the full period.
+  const tfCountdown = useMemo(() => {
+    const eng = engineRef.current;
+    if (!eng || !playing) return null;
+    const mins = timeframeMinutes(timeframe);
+    if (mins <= 1) return countdownText(eng.formationProgress, speed);
+    const forming1m = eng.candles[eng.index + 1];
+    if (!forming1m) return null;
+    const prog = higherTimeframeProgress(eng.formationProgress, forming1m.t, mins);
+    return countdownTextFor(prog, speed, mins * 60);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [version, timeframe, playing, speed, candles]);
 
   // Auto-save: trigger when realized P&L changes (trade closed) for signed-in users.
   // Debounced by 2 seconds to avoid saving mid-fill-sequence.
@@ -838,6 +866,35 @@ function ReplayPageInner() {
                 progress={(eng.index + eng.formationProgress + 1) / Math.max(1, candles.length)}
               />
               <div className="ws-chart" style={{ position: "relative" }}>
+                {/* Timeframe selector — display only, never touches engine state */}
+                <div
+                  className="tf-selector"
+                  role="group"
+                  aria-label="Chart timeframe"
+                  style={{
+                    position: "absolute", top: 8, left: 8, zIndex: 5,
+                    display: "flex", gap: 2, padding: 2,
+                    background: "rgba(10,14,20,0.75)", borderRadius: 6,
+                    border: "1px solid rgba(255,255,255,0.08)",
+                  }}
+                >
+                  {TIMEFRAMES.map((tf) => (
+                    <button
+                      key={tf.id}
+                      onClick={() => setTimeframe(tf.id)}
+                      aria-pressed={timeframe === tf.id}
+                      title={`${tf.label} chart`}
+                      style={{
+                        padding: "3px 9px", fontSize: 11, fontWeight: 700,
+                        border: "none", borderRadius: 4, cursor: "pointer",
+                        background: timeframe === tf.id ? "var(--ggl-green, #42d879)" : "transparent",
+                        color: timeframe === tf.id ? "#0a0e14" : "#9aa4b2",
+                      }}
+                    >
+                      {tf.label}
+                    </button>
+                  ))}
+                </div>
                 {/* Honest premarket notice — shown only when verified premarket data is unavailable */}
                 {meta?.premarketUnavailable && !premarketNoticeDismissed && (
                   <div
@@ -887,10 +944,10 @@ function ReplayPageInner() {
                 )}
                 {searchParams.get("chart") === "canvas" ? (
                 <CandleChart
-                  candles={eng.displayCandles}
-                  revealedCount={eng.displayCandles.length}
+                  candles={chartCandles ?? eng.displayCandles}
+                  revealedCount={(chartCandles ?? eng.displayCandles).length}
                   historyCount={meta.startIndex}
-                  sessionKey={`${meta.ticker}|${meta.tradeDate}|${meta.source}|${candles.length}`}
+                  sessionKey={`${meta.ticker}|${meta.tradeDate}|${meta.source}|${candles.length}|${timeframe}`}
                   overlays={{
                     hod: eng.hod,
                     stopLoss: eng.stopLoss,
@@ -898,15 +955,15 @@ function ReplayPageInner() {
                     fills: eng.fills,
                     lastPrice: snap.price,
                     pendingOrders: eng.pendingOrders.map((o) => ({ side: o.side, price: o.limitPrice })),
-                    countdown: playing ? countdownText(eng.formationProgress, speed) : null,
+                    countdown: tfCountdown,
                   }}
                 />
                 ) : (
                   <LwcChart
-                    candles={eng.displayCandles}
-                    revealedCount={eng.displayCandles.length}
-                    sessionKey={`${meta.ticker}|${meta.tradeDate}|${meta.source}|${candles.length}`}
-                    countdown={playing ? countdownText(eng.formationProgress, speed) : null}
+                    candles={chartCandles ?? eng.displayCandles}
+                    revealedCount={(chartCandles ?? eng.displayCandles).length}
+                    sessionKey={`${meta.ticker}|${meta.tradeDate}|${meta.source}|${candles.length}|${timeframe}`}
+                    countdown={tfCountdown}
                     lastPrice={snap.price}
                     brackets={brackets}
                     onPlannedDrag={(sl, tp) => { setPlannedLevels(sl, tp); }}
