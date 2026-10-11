@@ -112,6 +112,13 @@ function ReplayPageInner() {
     if (!window.confirm("Reset account balance to $100,000? This cannot be undone.")) return;
     persistBalance(START_CASH);
   }, [persistBalance]);
+
+  // Auto-save state (signed-in users only)
+  const [autoSaveEnabled, setAutoSaveEnabled] = useState(true);
+  const savedSessionIdRef = useRef<string | null>(null);
+  const lastSavedPnlRef = useRef<number>(0);
+  const autoSaveEnabledRef = useRef(autoSaveEnabled);
+  autoSaveEnabledRef.current = autoSaveEnabled;
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [version, setVersion] = useState(0);
   const [candles, setCandles] = useState<Candle[] | null>(null);
@@ -255,6 +262,9 @@ function ReplayPageInner() {
   const handleLoad = useCallback((cs: Candle[], m: SessionMeta) => {
     stopTimer();
     setEnded(false);
+    // Reset auto-save tracking for the new session
+    savedSessionIdRef.current = null;
+    lastSavedPnlRef.current = 0;
     engineRef.current = new ReplayEngine(cs, balanceRef.current, m.startIndex);
     setCandles(cs);
     setMeta(m);
@@ -334,6 +344,36 @@ function ReplayPageInner() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [version, candles]);
+
+  // Auto-save: trigger when realized P&L changes (trade closed) for signed-in users.
+  // Debounced by 2 seconds to avoid saving mid-fill-sequence.
+  const lastRealizedRef = useRef<number>(0);
+  useEffect(() => {
+    const realized = snap?.realized ?? 0;
+    if (realized !== lastRealizedRef.current) {
+      lastRealizedRef.current = realized;
+      // Only auto-save if we have a session loaded and trades exist
+      if (meta && candles && candles.length > 0 && autoSaveEnabledRef.current) {
+        const t = setTimeout(() => saveSession(true), 2000);
+        return () => clearTimeout(t);
+      }
+    }
+  }, [snap?.realized, meta, candles?.length]);
+
+  // Periodic auto-save every 60 seconds if there are unsaved trades.
+  useEffect(() => {
+    if (!meta || !candles || candles.length === 0) return;
+    const id = setInterval(() => {
+      const eng = engineRef.current;
+      if (eng && eng.fills.length > 0 && autoSaveEnabledRef.current) {
+        // Only save if P&L changed since last save
+        if (eng.realizedPnl !== lastSavedPnlRef.current) {
+          saveSession(true);
+        }
+      }
+    }, 60000);
+    return () => clearInterval(id);
+  }, [meta, candles?.length]);
 
   // Memoized brackets: stable reference unless values actually change.
   // The key captures current values; useMemo returns the cached object
@@ -616,38 +656,60 @@ function ReplayPageInner() {
     return err;
   };
 
-  const saveSession = async () => {
+  const saveSession = async (isAutoSave = false) => {
     const eng = engineRef.current;
     if (!eng || !candles || !meta) return;
     if (!isSupabaseConfigured()) {
-      setSaveMsg("Supabase is not configured — sessions cannot be saved yet.");
+      if (!isAutoSave) setSaveMsg("Supabase is not configured — sessions cannot be saved yet.");
       return;
     }
-    setSaving(true);
+    // Auto-save only for signed-in users
+    if (isAutoSave && !autoSaveEnabled) return;
+    if (!isAutoSave) setSaving(true);
     setSaveMsg(null);
     try {
       const supabase = createClient();
       const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error("Please sign in to save sessions.");
-      const { data: s, error } = await supabase
-        .from("replay_sessions")
-        .insert({
-          user_id: user.id,
-          ticker: meta.ticker,
-          trade_date: meta.tradeDate,
-          source: meta.source,
-          candles,
-          start_index: meta.startIndex,
-          final_cash: eng.cash,
-          realized_pnl: eng.realizedPnl,
-        })
-        .select("id")
-        .single();
-      if (error || !s) throw new Error(error?.message ?? "Save failed.");
+      if (!user) {
+        if (!isAutoSave) throw new Error("Please sign in to save sessions.");
+        return;
+      }
+      const sessionData = {
+        user_id: user.id,
+        ticker: meta.ticker,
+        trade_date: meta.tradeDate,
+        source: meta.source,
+        candles,
+        start_index: meta.startIndex,
+        final_cash: eng.cash,
+        realized_pnl: eng.realizedPnl,
+      };
+      let sessionId: string;
+      // Upsert: update existing auto-saved session, or insert new one
+      if (savedSessionIdRef.current) {
+        const { error } = await supabase
+          .from("replay_sessions")
+          .update(sessionData)
+          .eq("id", savedSessionIdRef.current)
+          .eq("user_id", user.id);
+        if (error) throw new Error(error.message);
+        sessionId = savedSessionIdRef.current;
+        // Replace trades with current fills
+        await supabase.from("session_trades").delete().eq("session_id", sessionId);
+      } else {
+        const { data: s, error } = await supabase
+          .from("replay_sessions")
+          .insert(sessionData)
+          .select("id")
+          .single();
+        if (error || !s) throw new Error(error?.message ?? "Save failed.");
+        sessionId = s.id;
+        savedSessionIdRef.current = sessionId;
+      }
       if (eng.fills.length > 0) {
         const { error: tErr } = await supabase.from("session_trades").insert(
           eng.fills.map((f) => ({
-            session_id: s.id,
+            session_id: sessionId,
             user_id: user.id,
             side: f.side,
             qty: f.qty,
@@ -661,16 +723,25 @@ function ReplayPageInner() {
         if (tErr) throw new Error(tErr.message);
       }
       // Update persistent account balance with this session's realized P&L.
-      // Only realized P&L counts — open positions don't carry over.
+      // For auto-save, only apply the DELTA since last save to avoid double-counting.
       const pnl = eng.realizedPnl;
-      if (isFinite(pnl) && pnl !== 0) {
-        await persistBalance(balanceRef.current + pnl);
+      const lastPnl = lastSavedPnlRef.current;
+      const delta = pnl - lastPnl;
+      if (isFinite(delta) && delta !== 0) {
+        await persistBalance(balanceRef.current + delta);
+        lastSavedPnlRef.current = pnl;
       }
-      setSaveMsg("Session saved — find it under My Sessions.");
+      if (!isAutoSave) {
+        setSaveMsg("Session saved — find it under My Sessions.");
+      } else {
+        setSaveMsg("Auto-saved.");
+        // Clear the auto-save message after 3 seconds
+        setTimeout(() => setSaveMsg((m) => m === "Auto-saved." ? null : m), 3000);
+      }
     } catch (e) {
-      setSaveMsg(e instanceof Error ? e.message : "Save failed.");
+      if (!isAutoSave) setSaveMsg(e instanceof Error ? e.message : "Save failed.");
     } finally {
-      setSaving(false);
+      if (!isAutoSave) setSaving(false);
     }
   };
 
@@ -727,7 +798,19 @@ function ReplayPageInner() {
                 )
               )}
               <button className="btn" onClick={() => setDataOpen((v) => !v)}>Data</button>
-              <button className="btn primary" onClick={saveSession} disabled={saving}>
+              <label
+                title="Auto-save session for signed-in users (saves after each closed trade)"
+                style={{ fontSize: 12, color: "var(--muted)", display: "flex", alignItems: "center", gap: 4, cursor: "pointer", userSelect: "none" }}
+              >
+                <input
+                  type="checkbox"
+                  checked={autoSaveEnabled}
+                  onChange={(e) => setAutoSaveEnabled(e.target.checked)}
+                  style={{ accentColor: "var(--emerald)" }}
+                />
+                Auto-save
+              </label>
+              <button className="btn primary" onClick={() => saveSession(false)} disabled={saving}>
                 {saving ? "Saving…" : "Save"}
               </button>
             </div>
