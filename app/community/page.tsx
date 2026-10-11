@@ -9,19 +9,26 @@ export default function CommunityLanding() {
   const [rooms, setRooms] = useState<CommunityRoom[]>([]);
   const [loading, setLoading] = useState(true);
   const [signedIn, setSignedIn] = useState(false);
+  const [loadError, setLoadError] = useState(false);
 
   useEffect(() => {
     (async () => {
-      const supabase = createClient();
-      const { data: { user } } = await supabase.auth.getUser();
-      setSignedIn(!!user);
-      const { data } = await supabase
-        .from("community_rooms")
-        .select("*")
-        .neq("slug", "global") // hide internal admin-scope room
-        .order("created_at", { ascending: true });
-      setRooms(data ?? []);
-      setLoading(false);
+      try {
+        const supabase = createClient();
+        const { data: { user } } = await supabase.auth.getUser();
+        setSignedIn(!!user);
+        const { data, error } = await supabase
+          .from("community_rooms")
+          .select("*")
+          .neq("slug", "global")
+          .order("created_at", { ascending: true });
+        if (error) throw error;
+        setRooms(data ?? []);
+      } catch {
+        setLoadError(true);
+      } finally {
+        setLoading(false);
+      }
     })();
   }, []);
 
@@ -60,6 +67,10 @@ export default function CommunityLanding() {
       <h2 style={{ fontSize: 18, fontWeight: 700, margin: "0 0 16px" }}>Rooms</h2>
       {loading ? (
         <p style={{ color: "var(--ggl-muted)" }}>Loading rooms…</p>
+      ) : loadError ? (
+        <p style={{ color: "#f87171" }}>
+          Couldn't load rooms. Please check your connection and refresh.
+        </p>
       ) : rooms.length === 0 ? (
         <p style={{ color: "var(--ggl-muted)" }}>No rooms yet. Check back soon.</p>
       ) : (
