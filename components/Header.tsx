@@ -6,6 +6,7 @@ import { createClient, isSupabaseConfigured } from "../lib/supabaseClient";
 
 const NAV_LINKS = [
   { label: "Replay Lab", href: "/replay" },
+  { label: "Community", href: "/community" },
   { label: "Features", href: "/#features" },
   { label: "How It Works", href: "/#how-it-works" },
   { label: "Pricing", href: "/#pricing" },
