@@ -236,3 +236,59 @@ create policy "own manual trades" on public.journal_manual_trades
 create index if not exists journal_meta_user_key on public.journal_trade_meta (user_id, trade_key);
 create index if not exists journal_meta_session on public.journal_trade_meta (session_id);
 create index if not exists journal_manual_user_date on public.journal_manual_trades (user_id, trade_date desc);
+
+-- Trade Journal: real-market trades (external brokers).
+-- Fills-based design: one trade has many fills (multiple entries, partial exits).
+-- Never written by the simulator pipeline; completely separate from session_trades.
+
+create table if not exists public.journal_real_trades (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  ticker text not null,
+  company_name text,
+  broker text,
+  trade_date date not null,
+  direction text not null check (direction in ('long', 'short')),
+  strategy text,
+  status text not null default 'open' check (status in ('open', 'closed')),
+  stop_loss numeric,
+  target numeric,
+  float_shares numeric,
+  relative_volume numeric,
+  market_conditions text,
+  level2_tas_notes text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.journal_real_fills (
+  id uuid primary key default gen_random_uuid(),
+  trade_id uuid not null references public.journal_real_trades(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  side text not null check (side in ('buy', 'sell')),
+  qty numeric not null check (qty > 0),
+  price numeric not null check (price > 0),
+  fill_time timestamptz,
+  fees numeric not null default 0 check (fees >= 0),
+  note text,
+  created_at timestamptz not null default now()
+);
+
+alter table public.journal_real_trades enable row level security;
+alter table public.journal_real_fills enable row level security;
+
+drop policy if exists "own real trades" on public.journal_real_trades;
+create policy "own real trades" on public.journal_real_trades
+  for all to authenticated
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+drop policy if exists "own real fills" on public.journal_real_fills;
+create policy "own real fills" on public.journal_real_fills
+  for all to authenticated
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+create index if not exists journal_real_trades_user_date on public.journal_real_trades (user_id, trade_date desc);
+create index if not exists journal_real_fills_trade on public.journal_real_fills (trade_id);
+create index if not exists journal_real_fills_user on public.journal_real_fills (user_id);
