@@ -44,10 +44,74 @@ import {
 } from "../../lib/guestTrades";
 
 const START_CASH = 100_000;
+const BALANCE_KEY = "ggl-account-balance";
 
 function ReplayPageInner() {
   const searchParams = useSearchParams();
   const engineRef = useRef<ReplayEngine | null>(null);
+  // Persistent account balance — carries P&L across sessions.
+  const [accountBalance, setAccountBalance] = useState<number>(START_CASH);
+  const balanceRef = useRef(accountBalance);
+  balanceRef.current = accountBalance;
+
+  // Load balance: Supabase for signed-in users, localStorage for guests.
+  useEffect(() => {
+    (async () => {
+      try {
+        if (isSupabaseConfigured()) {
+          const supabase = createClient();
+          const { data: { user } } = await supabase.auth.getUser();
+          if (user) {
+            const { data } = await supabase
+              .from("profiles")
+              .select("account_balance")
+              .eq("id", user.id)
+              .single();
+            if (data && data.account_balance != null) {
+              const b = Number(data.account_balance);
+              if (isFinite(b) && b > 0) {
+                setAccountBalance(b);
+                balanceRef.current = b;
+                return;
+              }
+            }
+          }
+        }
+      } catch { /* fall through to localStorage */ }
+      try {
+        const stored = localStorage.getItem(BALANCE_KEY);
+        if (stored) {
+          const b = Number(stored);
+          if (isFinite(b) && b > 0) {
+            setAccountBalance(b);
+            balanceRef.current = b;
+          }
+        }
+      } catch { /* ignore */ }
+    })();
+  }, []);
+
+  // Persist balance: Supabase for signed-in, localStorage for guests.
+  const persistBalance = useCallback(async (b: number) => {
+    setAccountBalance(b);
+    balanceRef.current = b;
+    try { localStorage.setItem(BALANCE_KEY, String(b)); } catch { /* ignore */ }
+    try {
+      if (isSupabaseConfigured()) {
+        const supabase = createClient();
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) {
+          await supabase.from("profiles").update({ account_balance: b }).eq("id", user.id);
+        }
+      }
+    } catch { /* non-fatal */ }
+  }, []);
+
+  // Reset balance to $100k with confirmation.
+  const resetBalance = useCallback(() => {
+    if (!window.confirm("Reset account balance to $100,000? This cannot be undone.")) return;
+    persistBalance(START_CASH);
+  }, [persistBalance]);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [version, setVersion] = useState(0);
   const [candles, setCandles] = useState<Candle[] | null>(null);
@@ -191,7 +255,7 @@ function ReplayPageInner() {
   const handleLoad = useCallback((cs: Candle[], m: SessionMeta) => {
     stopTimer();
     setEnded(false);
-    engineRef.current = new ReplayEngine(cs, START_CASH, m.startIndex);
+    engineRef.current = new ReplayEngine(cs, balanceRef.current, m.startIndex);
     setCandles(cs);
     setMeta(m);
     setSaveMsg(null);
@@ -221,10 +285,19 @@ function ReplayPageInner() {
           .order("created_at", { ascending: true });
         stopTimer();
         setEnded(false);
-        const eng = new ReplayEngine(cs, START_CASH, s.start_index ?? 0);
+        // When loading a saved session, subtract its realized P&L from the
+        // current balance before replaying fills — so the final balance
+        // matches the persistent account balance (no double-counting).
+        const fills = (trades ?? []).slice().sort((a, b) => a.candle_index - b.candle_index);
+        let sessionPnl = 0;
+        for (const t of fills) {
+          if (t.realized_pnl != null && isFinite(Number(t.realized_pnl))) {
+            sessionPnl += Number(t.realized_pnl);
+          }
+        }
+        const eng = new ReplayEngine(cs, balanceRef.current - sessionPnl, s.start_index ?? 0);
         // fast-forward through the recorded fills to rebuild state,
         // replaying each at its exact recorded price for P/L fidelity
-        const fills = (trades ?? []).slice().sort((a, b) => a.candle_index - b.candle_index);
         for (const t of fills) {
           while (eng.index < t.candle_index) eng.step();
           if (t.side === "buy") eng.buyAt(Number(t.qty), Number(t.price), t.candle_index, new Date(t.candle_time).getTime());
@@ -587,6 +660,12 @@ function ReplayPageInner() {
         );
         if (tErr) throw new Error(tErr.message);
       }
+      // Update persistent account balance with this session's realized P&L.
+      // Only realized P&L counts — open positions don't carry over.
+      const pnl = eng.realizedPnl;
+      if (isFinite(pnl) && pnl !== 0) {
+        await persistBalance(balanceRef.current + pnl);
+      }
       setSaveMsg("Session saved — find it under My Sessions.");
     } catch (e) {
       setSaveMsg(e instanceof Error ? e.message : "Save failed.");
@@ -624,6 +703,20 @@ function ReplayPageInner() {
               <span className="hod-line">HOD <b className="num">{formatMoney(eng.hod)}</b></span>
             </div>
             <div className="ws-top-actions">
+              {/* Persistent account balance */}
+              <span
+                title="Account balance — carries P&L across sessions. Click ↺ to reset to $100,000."
+                style={{ fontSize: 12, color: "var(--muted)", display: "flex", alignItems: "center", gap: 6 }}
+              >
+                Balance <b className="num" style={{ color: "var(--emerald-bright)" }}>${accountBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</b>
+                <button
+                  onClick={resetBalance}
+                  title="Reset balance to $100,000"
+                  style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 14, padding: "2px 4px" }}
+                >
+                  ↺
+                </button>
+              </span>
               {saveMsg && (
                 saveMsg.startsWith("Session saved") ? (
                   <a href="/sessions" className="ok" style={{ fontSize: 12, textDecoration: "underline", cursor: "pointer" }}>
@@ -849,7 +942,7 @@ function ReplayPageInner() {
               </div>
               <div className="ws-tabpanel-guard" style={{ display: rightTab === "guard" ? "block" : "none" }}>
               <PsychologyGuardPanel
-                accountBalance={START_CASH}
+                accountBalance={accountBalance}
                 baseline={guardBaseline.current}
                 positionQty={eng.positionQty}
                 positionAvg={eng.positionAvg}

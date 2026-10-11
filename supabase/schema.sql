@@ -154,3 +154,6 @@ begin
   return true;
 end;
 $$ language plpgsql security definer;
+
+-- Persistent account balance (carries P&L across sessions)
+alter table public.profiles add column if not exists account_balance numeric not null default 100000;
