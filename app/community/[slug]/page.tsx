@@ -664,11 +664,20 @@ export default function CommunityRoomPage() {
             maxLength={2000}
             rows={1}
             aria-label="Message input"
+            className="ggl-chat-input"
             style={{
-              flex: 1, padding: "10px 14px", borderRadius: 20,
-              border: "1px solid rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.04)",
-              color: "var(--ggl-text)", fontSize: 15, resize: "none",
+              flex: 1, minWidth: 0, padding: "10px 16px", borderRadius: 22,
+              border: "1px solid rgba(255,255,255,0.1)", background: "#1a2129",
+              color: "#fff", fontSize: 16, resize: "none",
               maxHeight: 120, lineHeight: 1.4, fontFamily: "inherit",
+              outline: "none", boxSizing: "border-box",
+            }}
+            onFocusCapture={(e) => {
+              if (!signedIn) requireAuth();
+              (e.target as HTMLTextAreaElement).style.borderColor = "rgba(66,216,121,0.4)";
+            }}
+            onBlurCapture={(e) => {
+              (e.target as HTMLTextAreaElement).style.borderColor = "rgba(255,255,255,0.1)";
             }}
           />
           <button onClick={() => sendMessage()} disabled={sending || !draft.trim()}

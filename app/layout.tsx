@@ -1,8 +1,8 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
 import Script from "next/script";
 import "./globals.css";
-import Header from "../components/Header";
+import SiteChrome from "../components/SiteChrome";
 
 const inter = Inter({ subsets: ["latin"], display: "swap" });
 
@@ -65,6 +65,16 @@ export const metadata: Metadata = {
   },
 };
 
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 1,
+  viewportFit: "cover",
+  // Makes iOS resize the layout when the keyboard opens
+  // instead of overlaying it (supported in iOS 16+ via meta name)
+  interactiveWidget: "resizes-content",
+};
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   const jsonLd = {
     "@context": "https://schema.org",
@@ -106,12 +116,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         </Script>
       </head>
       <body>
-        <Header />
-        <main className="wrap">{children}</main>
-        <footer className="wrap footer">
-          <strong style={{ color: "var(--emerald-bright)" }}>Grow Green Lab</strong>
-          {" · "}Trade Replay Lab — simulated trading only. Not real orders, not financial advice.
-        </footer>
+        <SiteChrome>{children}</SiteChrome>
       </body>
     </html>
   );
