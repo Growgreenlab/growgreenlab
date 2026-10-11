@@ -197,13 +197,13 @@ button { font-family: inherit; }
   box-shadow: none; transform: none;
 }
 .btn.sell {
-  background: rgba(239, 68, 68, 0.12);
-  border-color: rgba(248, 113, 113, 0.4); color: #fca5a5; font-weight: 700;
+  background: #dc2626;
+  border-color: #dc2626; color: #fff; font-weight: 700;
   box-shadow: none;
   text-transform: uppercase; letter-spacing: 0.8px;
 }
 .btn.sell:hover:not(:disabled) {
-  background: rgba(239, 68, 68, 0.2); border-color: rgba(248, 113, 113, 0.6);
+  background: #ef4444; border-color: #ef4444;
   box-shadow: none; transform: none;
 }
 .btn.big { width: 100%; padding: 13px; font-size: 15px; border-radius: 10px; min-height: 48px; }
@@ -932,8 +932,9 @@ body.ws-active .footer { display: none; }
     height: auto;
     min-height: calc(100dvh - 54px);
     gap: 8px;
-    padding: 8px 8px 12px;
-    padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+    padding: 8px 8px 0;
+    /* Bottom padding accounts for iOS Safari toolbar + home indicator */
+    padding-bottom: calc(90px + env(safe-area-inset-bottom, 0px));
     overflow: visible;
     width: 100%;
     margin-left: 0;
