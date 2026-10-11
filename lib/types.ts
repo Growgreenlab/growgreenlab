@@ -39,4 +39,6 @@ export interface SessionMeta {
   tradeDate: string; // YYYY-MM-DD
   source: DataSource;
   startIndex: number;
+  /** True when verified premarket candles are unavailable for this session. */
+  premarketUnavailable?: boolean;
 }

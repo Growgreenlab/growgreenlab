@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 import type { Candle, DataSource, SessionMeta } from "../lib/types";
-import { generateSampleSession, generatePremarketBridge, stripSynthetic } from "../lib/marketData";
+import { generateSampleSession, stripSynthetic } from "../lib/marketData";
 import { fetchTwelveData } from "../lib/marketData.twelve";
 import { parseCsv, candlesToCsv } from "../lib/marketData.csv";
 
@@ -56,18 +56,21 @@ export default function DataSourcePanel({ candles, meta, defaultTicker, defaultD
     setError(null); setLoading(true);
     try {
       const real = await fetchTwelveData(ticker, date, apiKey);
-      // Twelve Data's free tier serves regular-session candles only — prepend a
-      // clearly-marked simulated premarket bridge so the chart has context.
-      let cs = real;
+      // No synthetic premarket: use verified historical candles only.
+      // If the first candle is at/after 9:29 AM ET, premarket data is
+      // unavailable — the UI will show an honest notice.
+      const cs = real;
       const firstEt = new Date(real[0].t).toLocaleString("en-US", { timeZone: "America/New_York" });
       const firstMins = (() => { const d = new Date(firstEt); return d.getHours() * 60 + d.getMinutes(); })();
-      if (firstMins >= 9 * 60 + 29) {
-        cs = [...generatePremarketBridge(ticker, date, real[0].o, real[0].t), ...real];
-      }
-      // Never start the replay inside synthetic context: first real candle at the earliest.
-      const firstReal = cs.findIndex((c) => !c.syn);
-      const si = Math.max(timeToIndex(cs, startTime), firstReal === -1 ? 0 : firstReal);
-      onLoad(cs, { ticker: ticker.toUpperCase().trim(), tradeDate: date, source: "twelvedata", startIndex: si });
+      const hasPremarket = firstMins < 9 * 60 + 29;
+      const si = Math.max(timeToIndex(cs, startTime), 0);
+      onLoad(cs, {
+        ticker: ticker.toUpperCase().trim(),
+        tradeDate: date,
+        source: "twelvedata",
+        startIndex: si,
+        premarketUnavailable: !hasPremarket,
+      });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Twelve Data request failed.");
     } finally {
