@@ -105,7 +105,7 @@ export default function DataSourcePanel({ candles, meta, defaultTicker, defaultD
       <h3>Data source</h3>
       <div className="tabs">
         <button className={`tab ${tab === "sample" ? "active" : ""}`} onClick={() => setTab("sample")}>Sample data</button>
-        <button className={`tab ${tab === "twelvedata" ? "active" : ""}`} onClick={() => setTab("twelvedata")}>Twelve Data</button>
+        <button className={`tab ${tab === "twelvedata" ? "active" : ""}`} onClick={() => setTab("twelvedata")}>Real Market Data</button>
         <button className={`tab ${tab === "csv" ? "active" : ""}`} onClick={() => setTab("csv")}>CSV upload</button>
         <button className="tab" onClick={downloadCsv} disabled={!candles} title={candles ? "Download the loaded session as CSV" : "Load a session first"}>Download CSV</button>
       </div>
@@ -141,18 +141,59 @@ export default function DataSourcePanel({ candles, meta, defaultTicker, defaultD
 
       {tab === "twelvedata" && (
         <div style={{ marginTop: 12 }}>
+          {/* Beginner-friendly help section */}
+          <div
+            style={{
+              background: "rgba(16,185,129,0.06)",
+              border: "1px solid rgba(16,185,129,0.2)",
+              borderRadius: 10,
+              padding: "12px 14px",
+              marginBottom: 12,
+            }}
+          >
+            <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 4, color: "var(--text)" }}>
+              Load Historical Stock Data
+            </div>
+            <p style={{ fontSize: 13, color: "var(--muted)", margin: "0 0 10px 0", lineHeight: 1.5 }}>
+              Use historical market data to practice trading with real price
+              movements instead of sample data.
+            </p>
+            <a
+              href="https://twelvedata.com/register"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn primary"
+              style={{ display: "inline-flex", alignItems: "center", gap: 6, textDecoration: "none", marginBottom: 10 }}
+            >
+              Get Your Free API Key ↗
+            </a>
+            <div style={{ fontSize: 13, marginBottom: 6 }}>
+              <div style={{ fontWeight: 600, marginBottom: 6, color: "var(--text)" }}>
+                How to get your API key
+              </div>
+              <ol style={{ margin: "0 0 8px 0", paddingLeft: 20, color: "var(--muted)", lineHeight: 1.7 }}>
+                <li>Create an account with Twelve Data.</li>
+                <li>Open your API dashboard.</li>
+                <li>Copy your API key.</li>
+                <li>Paste the key into the field below.</li>
+              </ol>
+              <p style={{ fontSize: 12, color: "var(--muted)", margin: 0, fontStyle: "italic" }}>
+                🔒 Your API key is used to request market data. Never share it publicly.
+              </p>
+            </div>
+          </div>
           <div className="field">
-            <label>Twelve Data API key (yours — stays in your browser)</label>
+            <label>API key (yours — stays in your browser)</label>
             <input className="input mono" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)}
-              placeholder="Paste key or full request URL" autoComplete="off" />
+              placeholder="Paste your Twelve Data API key" autoComplete="off" />
           </div>
           <p className="hint">
             Your key is sent only to Twelve Data when you load a session and is kept only
             in this page until you close it — never baked into the site or saved.
-            A free key allows about 800 calls per day. Get one free at twelvedata.com.
+            A free key allows about 800 calls per day.
           </p>
           <button className="btn primary big" onClick={loadTwelve} disabled={loading}>
-            {loading ? "Loading…" : "Load real data"}
+            {loading ? "Loading…" : "Load Real Data"}
           </button>
         </div>
       )}
