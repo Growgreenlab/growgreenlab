@@ -40,7 +40,6 @@ export default function PsychologyGuardPanel({
   onThresholdsChange,
 }: Props) {
   const [showConfig, setShowConfig] = useState(false);
-  const [editing, setEditing] = useState<GuardThreshold[] | null>(null);
 
   const now = Date.now();
   const locked = lockout != null && lockout.expiry > now;
@@ -54,16 +53,6 @@ export default function PsychologyGuardPanel({
       : baseline
         ? "Monitoring"
         : "No open position";
-
-  const startEdit = () => setEditing(thresholds.map((t) => ({ ...t })));
-  const saveEdit = () => {
-    if (!editing) return;
-    const clean = editing
-      .filter((t) => t.lossPct > 0)
-      .sort((a, b) => a.lossPct - b.lossPct);
-    if (clean.length > 0) onThresholdsChange(clean);
-    setEditing(null);
-  };
 
   return (
     <div className="panel" style={{ marginTop: 12 }}>
@@ -124,50 +113,12 @@ export default function PsychologyGuardPanel({
 
       {showConfig && (
         <div style={{ marginTop: 8, fontSize: 13 }}>
-          {(editing ?? thresholds).map((t, i) => (
+          {thresholds.map((t, i) => (
             <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
               <span className="dim" style={{ width: 60 }}>Loss ≥</span>
-              {editing ? (
-                <>
-                  <input
-                    type="number" min={0.5} step={0.5}
-                    value={t.lossPct}
-                    onChange={(e) => {
-                      const next = [...editing];
-                      next[i] = { ...next[i], lossPct: Number(e.target.value) || 0 };
-                      setEditing(next);
-                    }}
-                    style={{ width: 60 }}
-                  />
-                  <span>% →</span>
-                  <input
-                    type="number" min={0} step={5}
-                    value={t.lockMinutes}
-                    onChange={(e) => {
-                      const next = [...editing];
-                      next[i] = { ...next[i], lockMinutes: Number(e.target.value) || 0 };
-                      setEditing(next);
-                    }}
-                    style={{ width: 60 }}
-                  />
-                  <span>min lock (0 = warn)</span>
-                </>
-              ) : (
-                <span>{t.lossPct}% → {t.lockMinutes === 0 ? "warning" : `${t.lockMinutes} min lock`}</span>
-              )}
+              <span>{t.lossPct}% → {t.lockMinutes === 0 ? "warning" : `${t.lockMinutes} min lock`}</span>
             </div>
           ))}
-          {editing ? (
-            <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
-              <button onClick={saveEdit} style={{ fontSize: 12 }}>Save</button>
-              <button onClick={() => { setEditing(null); onThresholdsChange(DEFAULT_THRESHOLDS); }} style={{ fontSize: 12 }}>
-                Reset defaults
-              </button>
-              <button onClick={() => setEditing(null)} style={{ fontSize: 12 }}>Cancel</button>
-            </div>
-          ) : (
-            <button onClick={startEdit} style={{ fontSize: 12, marginTop: 4 }}>Edit</button>
-          )}
           <div className="hint" style={{ marginTop: 6, fontSize: 11 }}>
             Highest applicable threshold wins. Cooldowns use real time and survive refresh.
           </div>
