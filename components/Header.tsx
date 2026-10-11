@@ -6,6 +6,7 @@ import { createClient, isSupabaseConfigured } from "../lib/supabaseClient";
 
 const NAV_LINKS = [
   { label: "Replay Lab", href: "/replay" },
+  { label: "Trade Journal", href: "/journal" },
   { label: "Community", href: "/community" },
   { label: "Features", href: "/#features" },
   { label: "How It Works", href: "/#how-it-works" },
@@ -53,14 +54,9 @@ export default function Header() {
             </Link>
           ))}
           {email && (
-            <>
-              <Link href="/sessions">
-                My Sessions
-              </Link>
-              <Link href="/journal">
-                Trade Journal
-              </Link>
-            </>
+            <Link href="/sessions">
+              My Sessions
+            </Link>
           )}
         </nav>
 
