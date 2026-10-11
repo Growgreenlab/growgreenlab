@@ -548,7 +548,7 @@ export default function CommunityRoomPage() {
   });
 
   return (
-    <div style={{
+    <div className="community-room-container" style={{
       maxWidth: 760, margin: "0 auto",
       height: "100dvh", display: "flex", flexDirection: "column",
       background: "#0a0e11", overflow: "hidden",

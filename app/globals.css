@@ -1146,3 +1146,12 @@ body.ws-active .footer { display: none; }
   .ws-pnl { grid-template-columns: repeat(3, 1fr); }
   .ws-controls .seg { display: none; } /* hide speed selector in landscape */
 }
+
+/* Community room: wider chat column on desktop, full-screen on mobile */
+@media (min-width: 1024px) {
+  .community-room-container {
+    max-width: 900px !important;
+    border-left: 1px solid rgba(255,255,255,0.07);
+    border-right: 1px solid rgba(255,255,255,0.07);
+  }
+}
