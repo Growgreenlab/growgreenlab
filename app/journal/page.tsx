@@ -65,15 +65,16 @@ const GRADES = ["A", "B", "C", "D"];
 const EMOTIONS = ["FOMO", "Revenge trading", "Hesitation", "Overconfidence", "Impatience", "Fear of losing", "Calm and disciplined"];
 const MISTAKES = ["Entered too early", "Chased price", "Moved stop loss", "Exited too early", "Held loser too long", "Broke trading rules", "Overtraded"];
 
-function periodStart(p: Period): Date | null {
+function periodStartStr(p: Period): string | null {
   const now = new Date();
+  const fmt = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   switch (p) {
-    case "today": return new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    case "week": { const d = new Date(now); d.setDate(d.getDate() - d.getDay()); d.setHours(0, 0, 0, 0); return d; }
-    case "month": return new Date(now.getFullYear(), now.getMonth(), 1);
-    case "30d": { const d = new Date(now); d.setDate(d.getDate() - 30); return d; }
-    case "90d": { const d = new Date(now); d.setDate(d.getDate() - 90); return d; }
-    case "ytd": return new Date(now.getFullYear(), 0, 1);
+    case "today": return fmt(now);
+    case "week": { const d = new Date(now); d.setDate(d.getDate() - d.getDay()); return fmt(d); }
+    case "month": return fmt(new Date(now.getFullYear(), now.getMonth(), 1));
+    case "30d": { const d = new Date(now); d.setDate(d.getDate() - 30); return fmt(d); }
+    case "90d": { const d = new Date(now); d.setDate(d.getDate() - 90); return fmt(d); }
+    case "ytd": return fmt(new Date(now.getFullYear(), 0, 1));
     case "all": return null;
   }
 }
@@ -198,12 +199,12 @@ export default function JournalPage() {
     return [...sim, ...rl].sort((a, b) => b.tradeDate.localeCompare(a.tradeDate));
   }, [trades, realTrades]);
 
-  // Filter by source + period + search
+  // Filter by source + period + search (date-string comparison avoids TZ bugs)
   const filtered = useMemo(() => {
-    const start = periodStart(period);
+    const startStr = periodStartStr(period);
     return unified.filter((t) => {
       if (sourceFilter !== "all" && t.source !== sourceFilter) return false;
-      if (start && new Date(t.tradeDate) < start) return false;
+      if (startStr && t.tradeDate < startStr) return false;
       if (fTicker && !t.ticker.toLowerCase().includes(fTicker.toLowerCase())) return false;
       if (fSetup && metas[t.key]?.setup_tag !== fSetup) return false;
       if (fWinLoss === "win" && t.realizedPnl <= 0) return false;
@@ -265,7 +266,7 @@ export default function JournalPage() {
         ))}
       </div>
 
-      {tab === "overview" && <OverviewTab metrics={metrics} simMetrics={simMetrics} realMetrics={realMetrics} cumPnl={cumPnl} trades={filtered} period={period} setPeriod={setPeriod} sourceFilter={sourceFilter} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} />}
+      {tab === "overview" && <OverviewTab metrics={metrics} simMetrics={simMetrics} realMetrics={realMetrics} cumPnl={cumPnl} trades={filtered} totalCount={unified.length} period={period} setPeriod={setPeriod} sourceFilter={sourceFilter} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} />}
       {tab === "trades" && <TradesTab trades={filtered} metas={metas} fTicker={fTicker} setFTicker={setFTicker} fSetup={fSetup} setFSetup={setFSetup} fWinLoss={fWinLoss} setFWinLoss={setFWinLoss} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} onRealTradeSaved={load} />}
       {tab === "review" && <ReviewTab tradeKey={selectedKey} simTrade={!isRealSelected ? (selected as GroupedTrade | null) : null} realTrade={isRealSelected ? (selected as RealTrade | null) : null} meta={selectedMeta} onSaved={load} />}
       {tab === "calendar" && <CalendarTab trades={closedFiltered} onSelectDay={() => {}} />}
@@ -286,12 +287,13 @@ function SourceBadge({ source }: { source: "simulator" | "real" }) {
   );
 }
 
-function OverviewTab({ metrics, simMetrics, realMetrics, cumPnl, trades, period, setPeriod, sourceFilter, onSelect }: {
+function OverviewTab({ metrics, simMetrics, realMetrics, cumPnl, trades, totalCount, period, setPeriod, sourceFilter, onSelect }: {
   metrics: ReturnType<typeof calcMetrics>;
   simMetrics: ReturnType<typeof calcMetrics>;
   realMetrics: ReturnType<typeof calcMetrics>;
   cumPnl: number[];
   trades: UnifiedTrade[];
+  totalCount: number;
   period: Period;
   setPeriod: (p: Period) => void;
   sourceFilter: SourceFilter;
@@ -328,11 +330,24 @@ function OverviewTab({ metrics, simMetrics, realMetrics, cumPnl, trades, period,
       </div>
 
       {m.totalTrades === 0 ? (
-        <div className="card" style={{ padding: 32, textAlign: "center" }}>
-          <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>No trades yet</div>
-          <p className="hint">Trade in the simulator, then your closed positions will appear here automatically.</p>
-          <Link href="/replay" className="btn primary" style={{ marginTop: 8, display: "inline-block", textDecoration: "none" }}>Open Simulator</Link>
-        </div>
+        totalCount === 0 ? (
+          <div className="card" style={{ padding: 32, textAlign: "center" }}>
+            <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>No trades yet</div>
+            <p className="hint">Trade in the simulator, then your closed positions will appear here automatically.</p>
+            <Link href="/replay" className="btn primary" style={{ marginTop: 8, display: "inline-block", textDecoration: "none" }}>Open Simulator</Link>
+          </div>
+        ) : (
+          <div className="card" style={{ padding: 32, textAlign: "center" }}>
+            <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>No trades in this period</div>
+            <p className="hint">Try a wider date range or a different source filter.</p>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginTop: 16, textAlign: "left" }}>
+              {stat("Net P&L", fmtPnl(0), 0)}
+              {stat("Win Rate", "—")}
+              {stat("Total Trades", "0")}
+              {stat("Profit Factor", "—")}
+            </div>
+          </div>
+        )
       ) : (
         <>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 16 }}>
