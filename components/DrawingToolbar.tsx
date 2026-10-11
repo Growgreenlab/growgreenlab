@@ -41,12 +41,13 @@ export default function DrawingToolbar({ tool, onToolChange, onDeleteSelected, h
           onClick={() => onToolChange(t.id)}
           title={t.title}
           style={{
-            background: tool === t.id ? "#1e40af" : "transparent",
-            color: tool === t.id ? "#fff" : "#94a3b8",
-            border: "1px solid transparent",
+            background: tool === t.id ? "rgba(16,185,129,0.18)" : "transparent",
+            color: tool === t.id ? "#34d399" : "#8fa3ad",
+            border: tool === t.id ? "1px solid rgba(16,185,129,0.4)" : "1px solid transparent",
             borderRadius: 6,
             padding: "4px 8px",
             fontSize: 12,
+            fontWeight: tool === t.id ? 600 : 400,
             cursor: "pointer",
             display: "flex",
             alignItems: "center",
