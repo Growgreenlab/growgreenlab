@@ -866,13 +866,14 @@ function ReplayPageInner() {
                 progress={(eng.index + eng.formationProgress + 1) / Math.max(1, candles.length)}
               />
               <div className="ws-chart" style={{ position: "relative" }}>
-                {/* Timeframe selector — display only, never touches engine state */}
+                {/* Timeframe selector — display only, never touches engine state.
+                    Positioned top-right to avoid the drawing toolbar (top-left). */}
                 <div
                   className="tf-selector"
                   role="group"
                   aria-label="Chart timeframe"
                   style={{
-                    position: "absolute", top: 8, left: 8, zIndex: 5,
+                    position: "absolute", top: 8, right: 8, zIndex: 5,
                     display: "flex", gap: 2, padding: 2,
                     background: "rgba(10,14,20,0.75)", borderRadius: 6,
                     border: "1px solid rgba(255,255,255,0.08)",
