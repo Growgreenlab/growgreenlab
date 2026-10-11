@@ -156,6 +156,280 @@ export function calcMetrics(trades: { realizedPnl: number }[]): JournalMetrics {
   };
 }
 
+/* ================= Broker CSV import ================= */
+
+export interface ParsedBrokerFill {
+  symbol: string;
+  side: "buy" | "sell";
+  qty: number;
+  price: number;
+  fillTime: string | null; // ISO string
+  fees: number;
+  /** Deterministic dedup hash */
+  hash: string;
+  raw: Record<string, string>;
+}
+
+export interface BrokerParseResult {
+  broker: string;
+  fills: ParsedBrokerFill[];
+  rejected: { row: number; reason: string }[];
+  totalRows: number;
+  /** Raw headers for manual mapping fallback */
+  headers: string[];
+  /** Auto-detected column mapping */
+  detectedMap: Record<string, string>;
+}
+
+/** Fields the user can map */
+export const MAPPABLE_FIELDS = [
+  { key: "symbol", label: "Symbol *", aliases: ["symbol", "ticker", "instrument"] },
+  { key: "side", label: "Side (Buy/Sell) *", aliases: ["side", "action", "buy/sell", "direction"] },
+  { key: "qty", label: "Quantity *", aliases: ["filled", "quantity", "qty", "filled qty", "shares", "volume"] },
+  { key: "price", label: "Price *", aliases: ["avg price", "average filled price", "price", "fill price", "average price", "execution price"] },
+  { key: "time", label: "Fill Time", aliases: ["filled time", "fill time", "exec time", "execution time", "time", "date", "timestamp", "date/time", "datetime"] },
+  { key: "fees", label: "Fees/Commission", aliases: ["commission", "comm", "fees", "fee"] },
+  { key: "status", label: "Order Status", aliases: ["status", "order status", "state"] },
+];
+
+/** Try to auto-map headers to fields */
+export function autoMapColumns(headers: string[]): Record<string, string> {
+  const map: Record<string, string> = {};
+  const lower = headers.map((h) => h.toLowerCase());
+  for (const field of MAPPABLE_FIELDS) {
+    for (const alias of field.aliases) {
+      const idx = lower.indexOf(alias);
+      if (idx >= 0) { map[field.key] = headers[idx]; break; }
+    }
+  }
+  return map;
+}
+
+/**
+ * Parse CSV using an explicit column mapping (for non-Webull brokers).
+ * mapping: { symbol: "Symbol", side: "Action", ... } — values are CSV header names.
+ * statusFilter: only import rows where status column matches (e.g. "Filled"), or null for all.
+ */
+export function parseWithMapping(
+  text: string,
+  mapping: Record<string, string>,
+  statusFilter: string | null,
+  brokerName: string,
+): BrokerParseResult {
+  const rows = parseCsvRows(text);
+  const headers = rows.length > 0 ? Object.keys(rows[0]).map((k) => {
+    // Recover original-case header
+    const line = text.trim().split(/\r?\n/)[0];
+    return k;
+  }) : [];
+  const rejected: { row: number; reason: string }[] = [];
+  const fills: ParsedBrokerFill[] = [];
+  // Build lowercase lookup: header-lower -> actual key in row
+  const headerLookup: Record<string, string> = {};
+  if (rows.length > 0) {
+    for (const k of Object.keys(rows[0])) headerLookup[k.toLowerCase()] = k;
+  }
+  const get = (row: Record<string, string>, fieldKey: string): string => {
+    const headerName = mapping[fieldKey];
+    if (!headerName) return "";
+    const actualKey = headerLookup[headerName.toLowerCase()];
+    return actualKey ? row[actualKey] : "";
+  };
+
+  rows.forEach((row, idx) => {
+    const rowNum = idx + 2;
+    try {
+      if (statusFilter && mapping.status) {
+        const st = get(row, "status").toLowerCase();
+        if (st !== statusFilter.toLowerCase()) return;
+      }
+      const symbol = get(row, "symbol").toUpperCase().replace(/[^A-Z0-9.\-]/g, "");
+      const sideRaw = get(row, "side").toLowerCase();
+      const side = sideRaw.startsWith("buy") ? "buy" : sideRaw.startsWith("sell") ? "sell" : null;
+      const qty = parseFloat(get(row, "qty").replace(/,/g, ""));
+      const price = parseFloat(get(row, "price").replace(/,/g, ""));
+      const fees = parseFloat(get(row, "fees").replace(/,/g, "")) || 0;
+      const fillTime = parseBrokerTime(get(row, "time"));
+
+      if (!symbol) { rejected.push({ row: rowNum, reason: "Missing symbol" }); return; }
+      if (!side) { rejected.push({ row: rowNum, reason: `Unknown side: "${get(row, "side")}"` }); return; }
+      if (!isFinite(qty) || qty <= 0) { rejected.push({ row: rowNum, reason: "Invalid quantity" }); return; }
+      if (!isFinite(price) || price <= 0) { rejected.push({ row: rowNum, reason: "Invalid price" }); return; }
+
+      fills.push({
+        symbol, side, qty, price, fillTime, fees,
+        hash: fillHash(symbol, side, qty, price, fillTime),
+        raw: row,
+      });
+    } catch {
+      rejected.push({ row: rowNum, reason: "Parse error" });
+    }
+  });
+
+  return { broker: brokerName, fills, rejected, totalRows: rows.length, headers: Object.keys(headerLookup).map((k) => headerLookup[k]), detectedMap: mapping };
+}
+
+/** Simple deterministic hash (djb2) for dedup */
+export function fillHash(symbol: string, side: string, qty: number, price: number, fillTime: string | null): string {
+  const s = `${symbol}|${side}|${qty}|${price}|${fillTime ?? ""}`;
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+
+function parseCsvRows(text: string): Record<string, string>[] {
+  const lines = text.trim().split(/\r?\n/);
+  if (lines.length < 2) return [];
+  // Handle quoted fields with commas
+  const splitLine = (line: string): string[] => {
+    const out: string[] = [];
+    let cur = "", inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (c === '"') {
+        if (inQ && line[i + 1] === '"') { cur += '"'; i++; }
+        else inQ = !inQ;
+      } else if (c === "," && !inQ) { out.push(cur.trim()); cur = ""; }
+      else cur += c;
+    }
+    out.push(cur.trim());
+    return out;
+  };
+  const headers = splitLine(lines[0]).map((h) => h.toLowerCase());
+  return lines.slice(1).filter((l) => l.trim()).map((line) => {
+    const vals = splitLine(line);
+    const row: Record<string, string> = {};
+    headers.forEach((h, i) => { row[h] = vals[i] ?? ""; });
+    return row;
+  });
+}
+
+/** Parse "11/14/2025 11:31:56 EST" → ISO string */
+function parseBrokerTime(s: string): string | null {
+  if (!s) return null;
+  // Try native parse first
+  const d = new Date(s);
+  if (!isNaN(d.getTime())) return d.toISOString();
+  // Try MM/DD/YYYY HH:MM:SS TZ
+  const m = s.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(\w+)?/);
+  if (m) {
+    const [, mo, da, yr, hh, mm, ss] = m;
+    const iso = `${yr}-${mo.padStart(2, "0")}-${da.padStart(2, "0")}T${hh.padStart(2, "0")}:${mm}:${ss ?? "00"}`;
+    const d2 = new Date(iso);
+    if (!isNaN(d2.getTime())) return d2.toISOString();
+  }
+  return null;
+}
+
+/**
+ * Parse a broker CSV export. Auto-detects Webull format;
+ * falls back to generic column matching.
+ */
+export function parseBrokerCsv(text: string): BrokerParseResult {
+  const rows = parseCsvRows(text);
+  const rejected: { row: number; reason: string }[] = [];
+  const fills: ParsedBrokerFill[] = [];
+
+  // Detect Webull: has "filled time" + "avg price" + "filled" columns
+  const sampleKeys = rows.length > 0 ? Object.keys(rows[0]) : [];
+  const isWebull = sampleKeys.includes("filled time") && sampleKeys.includes("avg price");
+  const broker = isWebull ? "Webull" : "Generic";
+
+  // Column aliases
+  const col = (row: Record<string, string>, ...names: string[]): string => {
+    for (const n of names) {
+      const v = row[n.toLowerCase()];
+      if (v) return v;
+    }
+    return "";
+  };
+
+  rows.forEach((row, idx) => {
+    const rowNum = idx + 2; // 1-based + header
+    try {
+      // Webull: only process Filled orders
+      if (isWebull) {
+        const status = col(row, "status").toLowerCase();
+        if (status !== "filled") return; // skip pending/cancelled silently
+      }
+      const symbol = col(row, "symbol", "ticker").toUpperCase().replace(/[^A-Z0-9.\-]/g, "");
+      const sideRaw = col(row, "side", "action").toLowerCase();
+      const side = sideRaw.startsWith("buy") ? "buy" : sideRaw.startsWith("sell") ? "sell" : null;
+      const qty = parseFloat(col(row, "filled", "quantity", "qty", "filled qty"));
+      const price = parseFloat(col(row, "avg price", "average filled price", "price", "fill price", "average price"));
+      const fillTimeRaw = col(row, "filled time", "fill time", "exec time", "execution time", "time", "date");
+      const fees = parseFloat(col(row, "commission", "comm", "fees", "fee")) || 0;
+
+      if (!symbol) { rejected.push({ row: rowNum, reason: "Missing symbol" }); return; }
+      if (!side) { rejected.push({ row: rowNum, reason: `Unknown side: "${sideRaw}"` }); return; }
+      if (!isFinite(qty) || qty <= 0) { rejected.push({ row: rowNum, reason: "Invalid quantity" }); return; }
+      if (!isFinite(price) || price <= 0) { rejected.push({ row: rowNum, reason: "Invalid price" }); return; }
+
+      const fillTime = parseBrokerTime(fillTimeRaw);
+      fills.push({
+        symbol, side, qty, price, fillTime, fees,
+        hash: fillHash(symbol, side, qty, price, fillTime),
+        raw: row,
+      });
+    } catch {
+      rejected.push({ row: rowNum, reason: "Parse error" });
+    }
+  });
+
+  return { broker, fills, rejected, totalRows: rows.length, headers: sampleKeys, detectedMap: autoMapColumns(sampleKeys) };
+}
+
+/**
+ * Group imported fills into trades by symbol + position cycles.
+ * Returns trades ready for DB insert.
+ */
+export interface ImportedTrade {
+  ticker: string;
+  tradeDate: string;
+  direction: "long" | "short";
+  fills: ParsedBrokerFill[];
+}
+
+export function groupImportedFills(fills: ParsedBrokerFill[]): ImportedTrade[] {
+  // Group by symbol first
+  const bySymbol = new Map<string, ParsedBrokerFill[]>();
+  for (const f of fills) {
+    if (!bySymbol.has(f.symbol)) bySymbol.set(f.symbol, []);
+    bySymbol.get(f.symbol)!.push(f);
+  }
+  const trades: ImportedTrade[] = [];
+  for (const [symbol, symFills] of bySymbol) {
+    const sorted = [...symFills].sort((a, b) =>
+      new Date(a.fillTime ?? 0).getTime() - new Date(b.fillTime ?? 0).getTime()
+    );
+    let position = 0;
+    let current: ParsedBrokerFill[] = [];
+    let firstSide: "buy" | "sell" | null = null;
+    const flush = () => {
+      if (current.length === 0) return;
+      const direction: "long" | "short" = firstSide === "sell" ? "short" : "long";
+      const dateStr = current[0].fillTime ? current[0].fillTime.slice(0, 10) : new Date().toISOString().slice(0, 10);
+      trades.push({ ticker: symbol, tradeDate: dateStr, direction, fills: [...current] });
+      current = []; position = 0; firstSide = null;
+    };
+    for (const f of sorted) {
+      if (firstSide == null) firstSide = f.side;
+      position += f.side === "buy" ? f.qty : -f.qty;
+      // For shorts, position goes negative; normalize
+      const normPos = firstSide === "sell" ? -position : position;
+      current.push(f);
+      if (Math.abs(normPos) < 1e-9 && current.length > 0) flush();
+    }
+    if (current.length > 0) {
+      // Open position — still import as open trade
+      const direction: "long" | "short" = firstSide === "sell" ? "short" : "long";
+      const dateStr = current[0].fillTime ? current[0].fillTime.slice(0, 10) : new Date().toISOString().slice(0, 10);
+      trades.push({ ticker: symbol, tradeDate: dateStr, direction, fills: [...current] });
+    }
+  }
+  return trades.sort((a, b) => b.tradeDate.localeCompare(a.tradeDate));
+}
+
 /** Format money with sign and 2 decimals */
 export function fmtPnl(n: number | null): string {
   if (n == null || !isFinite(n)) return "—";

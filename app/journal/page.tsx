@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
-import { groupFillsIntoTrades, calcMetrics, calcRealTrade, fmtPnl, fmtPct, type GroupedTrade, type RawFill, type RealFill, type RealTradeCalc } from "../../lib/journal";
+import { groupFillsIntoTrades, calcMetrics, calcRealTrade, parseBrokerCsv, parseWithMapping, autoMapColumns, MAPPABLE_FIELDS, groupImportedFills, fmtPnl, fmtPct, type GroupedTrade, type RawFill, type RealFill, type RealTradeCalc, type BrokerParseResult, type ImportedTrade } from "../../lib/journal";
 
 type Tab = "overview" | "trades" | "review" | "calendar";
 type Period = "today" | "week" | "month" | "30d" | "90d" | "ytd" | "all";
@@ -408,6 +408,7 @@ function TradesTab({ trades, metas, fTicker, setFTicker, fSetup, setFSetup, fWin
   onRealTradeSaved: () => void;
 }) {
   const [showRealForm, setShowRealForm] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   return (
     <div>
       <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
@@ -424,8 +425,12 @@ function TradesTab({ trades, metas, fTicker, setFTicker, fSetup, setFSetup, fWin
         <button className="btn primary" onClick={() => setShowRealForm((v) => !v)} style={{ marginLeft: "auto" }}>
           {showRealForm ? "Cancel" : "+ Add Real Trade"}
         </button>
+        <button className="btn" onClick={() => setShowImport((v) => !v)}>
+          {showImport ? "Cancel" : "⭳ Import from Broker"}
+        </button>
       </div>
       {showRealForm && <RealTradeForm onSaved={() => { setShowRealForm(false); onRealTradeSaved(); }} />}
+      {showImport && <BrokerImportForm onSaved={() => { setShowImport(false); onRealTradeSaved(); }} />}
       <div className="card" style={{ padding: 0, overflowX: "auto" }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
           <thead>
@@ -670,6 +675,230 @@ function ReviewTab({ tradeKey, simTrade, realTrade, meta, onSaved }: {
         <button className="btn primary big" onClick={save} disabled={saving}>{saving ? "Saving…" : "Save Review"}</button>
         {msg && <span style={{ marginLeft: 12, fontSize: 13, color: msg === "Saved." ? "var(--emerald-bright)" : "#f6465d" }}>{msg}</span>}
       </div>
+    </div>
+  );
+}
+
+/* ---------------- Broker CSV Import ---------------- */
+function BrokerImportForm({ onSaved }: { onSaved: () => void }) {
+  const [parseResult, setParseResult] = useState<BrokerParseResult | null>(null);
+  const [previewTrades, setPreviewTrades] = useState<ImportedTrade[]>([]);
+  const [duplicates, setDuplicates] = useState<number>(0);
+  const [importing, setImporting] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [fileName, setFileName] = useState("");
+  const [rawText, setRawText] = useState("");
+  const [showMapping, setShowMapping] = useState(false);
+  const [mapping, setMapping] = useState<Record<string, string>>({});
+  const [brokerName, setBrokerName] = useState("My Broker");
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const requiredMapped = ["symbol", "side", "qty", "price"].every((k) => mapping[k]);
+
+  const checkDuplicates = async (fills: { hash: string }[]) => {
+    if (fills.length === 0) { setDuplicates(0); return; }
+    const supabase = createClient();
+    const hashes = fills.map((x) => x.hash);
+    let dupCount = 0;
+    for (let i = 0; i < hashes.length; i += 100) {
+      const chunk = hashes.slice(i, i + 100);
+      const { data } = await supabase.from("journal_real_fills").select("import_hash").in("import_hash", chunk);
+      dupCount += data?.length ?? 0;
+    }
+    setDuplicates(dupCount);
+  };
+
+  const handleFile = async (f: File) => {
+    setMsg(null); setShowMapping(false);
+    try {
+      const text = await f.text();
+      setRawText(text);
+      const result = parseBrokerCsv(text);
+      setFileName(f.name);
+
+      // If Webull auto-detect worked with fills, use it directly
+      if (result.broker === "Webull" && result.fills.length > 0) {
+        setParseResult(result);
+        setPreviewTrades(groupImportedFills(result.fills));
+        checkDuplicates(result.fills);
+      } else {
+        // Unknown format → show column mapping
+        const autoMap = autoMapColumns(result.headers);
+        setMapping(autoMap);
+        setParseResult(result);
+        setShowMapping(true);
+        // Preview with auto-map if all required fields found
+        if (["symbol", "side", "qty", "price"].every((k) => autoMap[k])) {
+          applyMapping(text, autoMap, result.headers);
+        }
+      }
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "Could not parse CSV.");
+    }
+  };
+
+  const applyMapping = (text: string, map: Record<string, string>, headers: string[]) => {
+    const result = parseWithMapping(text, map, null, brokerName || "My Broker");
+    // Keep original headers for the mapping UI
+    setParseResult({ ...result, headers });
+    setPreviewTrades(groupImportedFills(result.fills));
+    checkDuplicates(result.fills);
+  };
+
+  const onMappingChange = (field: string, header: string) => {
+    const newMap = { ...mapping, [field]: header };
+    setMapping(newMap);
+    if (["symbol", "side", "qty", "price"].every((k) => newMap[k])) {
+      applyMapping(rawText, newMap, parseResult?.headers ?? []);
+    }
+  };
+
+  const doImport = async () => {
+    if (!parseResult || previewTrades.length === 0) return;
+    setImporting(true); setMsg(null);
+    try {
+      const supabase = createClient();
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error("Not signed in.");
+
+      let imported = 0, skipped = 0;
+      for (const t of previewTrades) {
+        // Skip trades where all fills are duplicates
+        const newFills = t.fills.filter((f) => f.hash);
+        if (newFills.length === 0) { skipped++; continue; }
+
+        const { data: trade, error: tErr } = await supabase.from("journal_real_trades").insert({
+          user_id: user.id,
+          ticker: t.ticker,
+          broker: parseResult.broker,
+          trade_date: t.tradeDate,
+          direction: t.direction,
+          strategy: "Imported",
+        }).select("id").single();
+        if (tErr) throw new Error(tErr.message);
+
+        const fillRows = newFills.map((f) => ({
+          trade_id: trade.id,
+          user_id: user.id,
+          side: f.side,
+          qty: f.qty,
+          price: f.price,
+          fees: f.fees,
+          fill_time: f.fillTime,
+          import_hash: f.hash,
+        }));
+        const { error: fErr } = await supabase.from("journal_real_fills").insert(fillRows);
+        if (fErr) {
+          // If unique violation on import_hash, count as skipped
+          if (fErr.message.includes("duplicate") || fErr.code === "23505") {
+            await supabase.from("journal_real_trades").delete().eq("id", trade.id);
+            skipped++;
+            continue;
+          }
+          throw new Error(fErr.message);
+        }
+        imported++;
+      }
+      setMsg(`Imported ${imported} trades. ${skipped} skipped as duplicates.`);
+      onSaved();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "Import failed.");
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  return (
+    <div className="card" style={{ padding: 16, marginBottom: 16 }}>
+      <h4 style={{ margin: "0 0 4px" }}>Import from Broker</h4>
+      <p className="hint" style={{ margin: "0 0 12px" }}>
+        Export your order history from your broker and upload the CSV.
+        Webull is auto-detected — other brokers get a column mapping step.
+        Only filled orders are imported. Duplicates are automatically skipped.
+      </p>
+      <input ref={fileRef} type="file" accept=".csv,text/csv" style={{ display: "none" }}
+        onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); e.target.value = ""; }} />
+      <button className="btn" onClick={() => fileRef.current?.click()}>Choose CSV file</button>
+      {fileName && <span className="hint" style={{ marginLeft: 12 }}>{fileName}</span>}
+
+      {showMapping && parseResult && (
+        <div className="card" style={{ padding: 12, marginTop: 16, marginBottom: 16, background: "rgba(96,165,250,0.04)" }}>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>Map your broker's columns</div>
+          <p className="hint" style={{ margin: "0 0 12px" }}>Match each field to the correct column in your CSV.</p>
+          <div className="field" style={{ marginBottom: 12, maxWidth: 280 }}>
+            <label>Broker name</label>
+            <input className="input" value={brokerName} onChange={(e) => { setBrokerName(e.target.value); if (requiredMapped) applyMapping(rawText, mapping, parseResult.headers); }} placeholder="e.g. Interactive Brokers" />
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 10 }}>
+            {MAPPABLE_FIELDS.map((field) => (
+              <div className="field" key={field.key} style={{ marginBottom: 0 }}>
+                <label>{field.label}</label>
+                <select className="input" value={mapping[field.key] ?? ""} onChange={(e) => onMappingChange(field.key, e.target.value)}>
+                  <option value="">— Select column —</option>
+                  {parseResult.headers.map((h) => (
+                    <option key={h} value={h}>{h}</option>
+                  ))}
+                </select>
+              </div>
+            ))}
+          </div>
+          {!requiredMapped && (
+            <p className="hint" style={{ marginTop: 10, color: "#fbbf24" }}>Map at least Symbol, Side, Quantity, and Price to continue.</p>
+          )}
+        </div>
+      )}
+
+      {parseResult && (previewTrades.length > 0 || !showMapping) && (
+        <div style={{ marginTop: 16 }}>
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 13, marginBottom: 12 }}>
+            <span>Detected: <b>{parseResult.broker}</b></span>
+            <span>Fills: <b className="num">{parseResult.fills.length}</b></span>
+            <span>Trades: <b className="num">{previewTrades.length}</b></span>
+            {duplicates > 0 && <span style={{ color: "#fbbf24" }}>{duplicates} duplicate fills will be skipped</span>}
+            {parseResult.rejected.length > 0 && <span style={{ color: "#f6465d" }}>{parseResult.rejected.length} rows rejected</span>}
+          </div>
+
+          {previewTrades.length > 0 && (
+            <div style={{ maxHeight: 240, overflowY: "auto", marginBottom: 12, border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8 }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead>
+                  <tr style={{ textAlign: "left", borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
+                    <th style={{ padding: "8px 10px", color: "var(--muted)" }}>Ticker</th>
+                    <th style={{ padding: "8px 10px", color: "var(--muted)" }}>Date</th>
+                    <th style={{ padding: "8px 10px", color: "var(--muted)" }}>Dir</th>
+                    <th style={{ padding: "8px 10px", color: "var(--muted)" }}>Fills</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {previewTrades.slice(0, 50).map((t, i) => (
+                    <tr key={i} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+                      <td style={{ padding: "6px 10px", fontWeight: 600 }}>{t.ticker}</td>
+                      <td style={{ padding: "6px 10px" }}>{t.tradeDate}</td>
+                      <td style={{ padding: "6px 10px" }}>{t.direction}</td>
+                      <td style={{ padding: "6px 10px" }} className="num">{t.fills.length}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {previewTrades.length > 50 && <p className="hint" style={{ padding: 8 }}>…and {previewTrades.length - 50} more</p>}
+            </div>
+          )}
+
+          {parseResult.rejected.length > 0 && (
+            <details style={{ marginBottom: 12, fontSize: 12 }}>
+              <summary style={{ cursor: "pointer", color: "var(--muted)" }}>Rejected rows ({parseResult.rejected.length})</summary>
+              {parseResult.rejected.slice(0, 20).map((r, i) => (
+                <div key={i} className="hint">Row {r.row}: {r.reason}</div>
+              ))}
+            </details>
+          )}
+
+          <button className="btn primary big" onClick={doImport} disabled={importing || previewTrades.length === 0}>
+            {importing ? "Importing…" : `Import ${previewTrades.length} trades`}
+          </button>
+        </div>
+      )}
+      {msg && <p style={{ marginTop: 12, fontSize: 13 }}>{msg}</p>}
     </div>
   );
 }

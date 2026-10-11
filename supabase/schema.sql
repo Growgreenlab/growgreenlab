@@ -292,3 +292,10 @@ create policy "own real fills" on public.journal_real_fills
 create index if not exists journal_real_trades_user_date on public.journal_real_trades (user_id, trade_date desc);
 create index if not exists journal_real_fills_trade on public.journal_real_fills (trade_id);
 create index if not exists journal_real_fills_user on public.journal_real_fills (user_id);
+
+-- Broker CSV import: duplicate prevention via deterministic fill hash.
+alter table public.journal_real_fills
+  add column if not exists import_hash text;
+create unique index if not exists journal_real_fills_import_hash
+  on public.journal_real_fills (user_id, import_hash)
+  where import_hash is not null;
