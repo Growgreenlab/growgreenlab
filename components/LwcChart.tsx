@@ -21,7 +21,7 @@ import {
 import type { Candle } from "../lib/types";
 import { diag } from "../lib/diag";
 import { normalizePrice, formatPrice } from "../lib/price";
-import type { Drawing, DrawingTool, DrawingType } from "../lib/drawings";
+import type { Drawing, DrawingTool, DrawingType, DrawingInteractionState } from "../lib/drawings";
 import { createDrawing } from "../lib/drawings";
 import DrawingToolbar from "./DrawingToolbar";
 import DrawingLayer, { hitTestAll, hitTolerance } from "./DrawingLayer";
@@ -81,9 +81,43 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
   // Pending first point for two-click tools; drag state for drawings.
   const pendingTrendRef = useRef<{ time: number; price: number; tool: DrawingTool } | null>(null);
   const [pendingPoint, setPendingPoint] = useState<{ time: number; price: number; tool: DrawingTool } | null>(null);
+  // Live preview endpoint for two-click tools (updates on pointermove).
+  const [previewPoint, setPreviewPoint] = useState<{ time: number; price: number } | null>(null);
   // Candles ref for time-snapping in drawingCoords (avoids stale closures).
   const candlesRef = useRef(candles);
   candlesRef.current = candles;
+  // AUTHORITATIVE INTERACTION STATE MACHINE (Phase 2).
+  // Only one state is active at any moment. All drawing interactions
+  // must check and update this state — no scattered independent flags.
+  const interactionRef = useRef<DrawingInteractionState>("IDLE");
+  const setInteraction = (s: DrawingInteractionState) => {
+    interactionRef.current = s;
+  };
+
+  // Wrapped tool change: cancels any in-progress drawing (Phase 2 + Phase 5).
+  // When user selects another tool mid-drawing: cancel unfinished drawing,
+  // clear pending anchor and preview, activate new tool. Never create
+  // a drawing from the tool-selection interaction itself.
+  const handleToolChange = (tool: DrawingTool) => {
+    // Cancel any in-progress two-click drawing
+    if (pendingTrendRef.current) {
+      pendingTrendRef.current = null;
+      setPendingPoint(null);
+      setPreviewPoint(null);
+    }
+    // Cancel any drag in progress
+    if (drawingDragRef.current) {
+      drawingDragRef.current = null;
+      enableChartNav();
+    }
+    // Update interaction state
+    if (tool === "select") {
+      setInteraction(selectedDrawingId ? "OBJECT_SELECTED" : "IDLE");
+    } else {
+      setInteraction("TOOL_SELECTED");
+    }
+    onDrawingToolChange(tool);
+  };
   const drawingDragRef = useRef<{
     id: string;
     mode: "move" | "p1" | "p2";
@@ -427,9 +461,12 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       const price = dc.toPrice(y);
       if (price != null && isFinite(price) && price > 0) {
         const d = createDrawing("hline", { price: normalizePrice(price) });
-        onDrawingsChange([...drawingsRef.current, d]);
+        const next = [...drawingsRef.current, d];
+        onDrawingsChange(next);
         setSelectedDrawingId(d.id);
-        pushHistory([...drawingsRef.current, d]);
+        pushHistory(next);
+        setInteraction("OBJECT_SELECTED");
+        handleToolChange("select");
       }
       return;
     }
@@ -438,9 +475,12 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       const c = getCoords();
       if (!c) return;
       const d = createDrawing("vline", { time: c.time, p1: { time: c.time, price: c.price } });
-      onDrawingsChange([...drawingsRef.current, d]);
+      const next = [...drawingsRef.current, d];
+      onDrawingsChange(next);
       setSelectedDrawingId(d.id);
-      pushHistory([...drawingsRef.current, d]);
+      pushHistory(next);
+      setInteraction("OBJECT_SELECTED");
+      handleToolChange("select");
       return;
     }
     if (tool === "hray") {
@@ -448,9 +488,12 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       const c = getCoords();
       if (!c) return;
       const d = createDrawing("hray", { p1: { time: c.time, price: c.price } });
-      onDrawingsChange([...drawingsRef.current, d]);
+      const next = [...drawingsRef.current, d];
+      onDrawingsChange(next);
       setSelectedDrawingId(d.id);
-      pushHistory([...drawingsRef.current, d]);
+      pushHistory(next);
+      setInteraction("OBJECT_SELECTED");
+      handleToolChange("select");
       return;
     }
     if (tool === "text") {
@@ -463,9 +506,12 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
         p1: { time: c.time, price: c.price },
         text: text.trim(),
       });
-      onDrawingsChange([...drawingsRef.current, d]);
+      const next = [...drawingsRef.current, d];
+      onDrawingsChange(next);
       setSelectedDrawingId(d.id);
-      pushHistory([...drawingsRef.current, d]);
+      pushHistory(next);
+      setInteraction("OBJECT_SELECTED");
+      handleToolChange("select");
       return;
     }
     // Two-click tools: trendline, extended, arrow, rect
@@ -474,20 +520,28 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       const c = getCoords();
       if (!c) return;
       if (!pendingTrendRef.current) {
+        // STATE: TOOL_SELECTED -> DRAWING_FIRST_ANCHOR
         pendingTrendRef.current = { time: c.time, price: c.price, tool };
         setPendingPoint({ time: c.time, price: c.price, tool });
+        setInteraction("DRAWING_FIRST_ANCHOR");
       } else {
+        // STATE: DRAWING_FIRST_ANCHOR -> complete -> return to Select (Phase 4)
         const p1 = pendingTrendRef.current;
         pendingTrendRef.current = null;
         setPendingPoint(null);
+        setPreviewPoint(null);
         const type = p1.tool as DrawingType;
         const d = createDrawing(type, {
           p1: { time: p1.time, price: p1.price },
           p2: { time: c.time, price: c.price },
         });
-        onDrawingsChange([...drawingsRef.current, d]);
+        const next = [...drawingsRef.current, d];
+        onDrawingsChange(next);
         setSelectedDrawingId(d.id);
-        pushHistory([...drawingsRef.current, d]);
+        pushHistory(next);
+        setInteraction("OBJECT_SELECTED");
+        // Return to Select mode after completing a drawing (Phase 4 spec)
+        handleToolChange("select");
       }
       return;
     }
@@ -508,6 +562,7 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
           d = hits[0];
         }
         setSelectedDrawingId(d.id);
+        setInteraction("OBJECT_SELECTED");
         // Check if hitting an endpoint (for line-type drawings).
         let mode: "move" | "p1" | "p2" = "move";
         const tol = hitTolerance();
@@ -518,12 +573,16 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
           else if (x2 != null && y2 != null && Math.hypot(x - x2, y - y2) < tol) mode = "p2";
         }
         drawingDragRef.current = { id: d.id, mode, startX: x, startY: y };
+        // STATE: OBJECT_SELECTED -> OBJECT_DRAGGING or ANCHOR_DRAGGING (on move)
         disableChartNav();
         (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
         return;
       }
       // Clicked empty space: deselect.
-      if (selectedDrawingId) setSelectedDrawingId(null);
+      if (selectedDrawingId) {
+        setSelectedDrawingId(null);
+        setInteraction("IDLE");
+      }
     }
 
     // SL/TP line drag (existing behavior).
@@ -542,6 +601,24 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     const dDrag = drawingDragRef.current;
     const cs = candleSeriesRef.current;
     const el = elRef.current;
+
+    // Phase 4: Live preview for two-click tools (DRAWING_FIRST_ANCHOR state).
+    // Update preview endpoint as cursor moves, so user sees exactly where
+    // the second click will place the line.
+    if (interactionRef.current === "DRAWING_FIRST_ANCHOR" && pendingTrendRef.current && cs && el) {
+      const dc = drawingCoords();
+      if (dc) {
+        const rect = dc.rect;
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        const price = dc.toPrice(y);
+        const time = dc.toTime(x);
+        if (price != null && isFinite(price) && price > 0 && time != null) {
+          setPreviewPoint({ time, price: normalizePrice(price) });
+        }
+      }
+      return;
+    }
 
     // Drawing drag in progress.
     if (dDrag && cs && el) {
@@ -664,14 +741,22 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
         redo();
       }
       if (e.key === "Escape") {
+        // STATE: any -> IDLE (cancel drawing, clear selection)
         pendingTrendRef.current = null;
         setPendingPoint(null);
-        if (toolRef.current !== "select") onDrawingToolChange("select");
+        setPreviewPoint(null);
+        if (drawingDragRef.current) {
+          drawingDragRef.current = null;
+          enableChartNav();
+        }
         setSelectedDrawingId(null);
+        setInteraction("IDLE");
+        if (toolRef.current !== "select") handleToolChange("select");
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+    // handleToolChange is stable (uses refs + stable setState from parent)
   }, [selectedDrawingId, onDrawingsChange, onDrawingToolChange]);
 
   return (
@@ -692,10 +777,11 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
         width={chartSize.w}
         height={chartSize.h}
         pendingPoint={pendingPoint}
+        previewPoint={previewPoint}
       />
       <DrawingToolbar
         tool={drawingTool}
-        onToolChange={onDrawingToolChange}
+        onToolChange={handleToolChange}
         onDeleteSelected={() => {
           if (selectedDrawingId) {
             const next = drawings.filter((d) => d.id !== selectedDrawingId);
@@ -713,7 +799,10 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       {/* Floating delete button for selected drawing — easy deletion */}
       {selectedDrawingId && (
         <button
-          onClick={() => {
+          onPointerDown={(e) => e.stopPropagation()}
+          onPointerUp={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
             const next = drawings.filter((d) => d.id !== selectedDrawingId);
             onDrawingsChange(next);
             pushHistory(next);

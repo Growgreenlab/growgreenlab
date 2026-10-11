@@ -72,6 +72,12 @@ export default function DrawingToolbar({
 
   return (
     <div
+      // CRITICAL: Stop all pointer events from bubbling to the chart.
+      // Toolbar clicks must NEVER create drawings or interfere with chart interactions.
+      onPointerDown={(e) => e.stopPropagation()}
+      onPointerMove={(e) => e.stopPropagation()}
+      onPointerUp={(e) => e.stopPropagation()}
+      onClick={(e) => e.stopPropagation()}
       style={{
         position: "absolute",
         left: 8,

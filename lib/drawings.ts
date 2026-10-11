@@ -4,6 +4,19 @@
  * so they stay anchored during pan, zoom, replay, and resize.
  */
 
+/**
+ * Drawing interaction state machine.
+ * Only ONE of these states is active at any moment.
+ */
+export type DrawingInteractionState =
+  | "IDLE"                    // No tool active, no selection, no drawing in progress
+  | "TOOL_SELECTED"           // A drawing tool is active, waiting for first click
+  | "DRAWING_FIRST_ANCHOR"    // First anchor placed, waiting for second click (with preview)
+  | "OBJECT_SELECTED"         // A drawing is selected, showing handles
+  | "OBJECT_DRAGGING"         // Dragging a selected drawing's body
+  | "ANCHOR_DRAGGING"         // Dragging a drawing's endpoint handle
+  | "TEXT_EDITING";           // Editing text annotation
+
 export type DrawingTool =
   | "select"
   | "trendline"

@@ -19,6 +19,7 @@ interface Props {
   width: number;
   height: number;
   pendingPoint?: { time: number; price: number } | null;
+  previewPoint?: { time: number; price: number } | null;
 }
 
 function dashArray(style: LineStyle): string | undefined {
@@ -27,7 +28,7 @@ function dashArray(style: LineStyle): string | undefined {
   return undefined;
 }
 
-export default function DrawingLayer({ chart, series, drawings, selectedId, width, height, pendingPoint }: Props) {
+export default function DrawingLayer({ chart, series, drawings, selectedId, width, height, pendingPoint, previewPoint }: Props) {
   const [, setRev] = useState(0);
 
   useEffect(() => {
@@ -219,6 +220,24 @@ export default function DrawingLayer({ chart, series, drawings, selectedId, widt
       height={height}
     >
       {drawings.map(renderDrawing)}
+      {/* Phase 4: Live preview line for two-click tools */}
+      {pendingPoint && previewPoint && (() => {
+        const x1 = timeToX(pendingPoint.time);
+        const y1 = priceToY(pendingPoint.price);
+        const x2 = timeToX(previewPoint.time);
+        const y2 = priceToY(previewPoint.price);
+        if (x1 == null || y1 == null || x2 == null || y2 == null) return null;
+        return (
+          <line
+            x1={x1} y1={y1} x2={x2} y2={y2}
+            stroke="#34d399"
+            strokeWidth={2}
+            strokeDasharray="6 4"
+            opacity={0.8}
+            pointerEvents="none"
+          />
+        );
+      })()}
       {/* Pending first point marker for two-click tools */}
       {pendingPoint && (() => {
         const px = timeToX(pendingPoint.time);
