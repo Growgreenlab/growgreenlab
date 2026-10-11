@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "../../../lib/supabaseClient";
 import { isRoomMod, type CommunityRoom, type CommunityMessage } from "../../../lib/community";
+import { topicsForRoom } from "../../../lib/community-markets";
 
 const QUICK_REACTIONS = ["👍", "🔥", "📈", "💡"];
 const PAGE_SIZE = 50;
@@ -100,6 +101,12 @@ export default function CommunityRoomPage() {
   const lastSendAt = useRef<number>(0);
   const [newMsgCount, setNewMsgCount] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [activeTopic, setActiveTopic] = useState<string | null>(null);
+  const activeTopicRef = useRef<string | null>(null);
+  const [showDiscussionModal, setShowDiscussionModal] = useState(false);
+  const [discussionTitle, setDiscussionTitle] = useState("");
+  const [discussionTopic, setDiscussionTopic] = useState("");
+  const [discussionBody, setDiscussionBody] = useState("");
 
   const isNearBottom = useCallback(() => {
     const el = messageListRef.current;
@@ -163,12 +170,13 @@ export default function CommunityRoomPage() {
     return msgs;
   }, []);
 
-  const loadMessages = useCallback(async (roomId: string, before?: string) => {
+  const loadMessages = useCallback(async (roomId: string, before?: string, topic?: string | null) => {
     const supabase = createClient();
     const { data: { user } } = await supabase.auth.getUser();
     let query = supabase.from("community_messages")
       .select("*").eq("room_id", roomId).eq("is_deleted", false)
       .order("created_at", { ascending: false }).limit(PAGE_SIZE + 1);
+    if (topic) query = query.eq("topic", topic);
     if (before) {
       const { data: beforeMsg } = await supabase
         .from("community_messages").select("created_at").eq("id", before).single();
@@ -202,7 +210,7 @@ export default function CommunityRoomPage() {
       if (!roomData) { setLoading(false); return; }
       setRoom(roomData);
       if (user) setIsMod(await isRoomMod(roomData.id));
-      await loadMessages(roomData.id);
+      await loadMessages(roomData.id, undefined, activeTopic);
       setLoading(false);
       setTimeout(scrollBottom, 150);
     })();
@@ -221,6 +229,9 @@ export default function CommunityRoomPage() {
         async (payload) => {
           const newMsg = payload.new as CommunityMessage;
           if (newMsg.is_deleted) return;
+          // Respect topic filter — don't show messages from other topics
+          const currentTopic = activeTopicRef.current;
+          if (currentTopic && newMsg.topic !== currentTopic) return;
           const wasNearBottom = isNearBottom();
           const enriched = (await enrichMessages(supabase, [newMsg], userId)) as UIMessage[];
           enriched[0]._status = "sent";
@@ -298,6 +309,7 @@ export default function CommunityRoomPage() {
       id: tempId, _tempId: tempId, _status: "sending",
       room_id: room.id, user_id: userId || "", content,
       reply_to: replyTo?.id ?? null,
+      topic: activeTopic, title: null,
       reply_preview: replyTo ? replyTo.content.slice(0, 80) : undefined,
       author_name: nameCache.current[userId || ""] || "You",
       created_at: new Date().toISOString(),
@@ -330,6 +342,8 @@ export default function CommunityRoomPage() {
       const { data: inserted, error } = await supabase.from("community_messages").insert({
         room_id: room.id, user_id: user.id, content,
         reply_to: retryMsg ? retryMsg.reply_to : replyTo?.id ?? null,
+        topic: retryMsg ? (retryMsg as UIMessage).topic ?? null : activeTopic,
+        title: retryMsg ? (retryMsg as UIMessage).title ?? null : null,
       }).select().single();
       if (error) throw new Error(error.message);
       // Replace optimistic with confirmed
@@ -345,6 +359,47 @@ export default function CommunityRoomPage() {
           : m
       ));
       setError(e instanceof Error ? e.message : "Failed to send.");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const startDiscussion = async () => {
+    if (!requireAuth() || !room || !userId) return;
+    const title = discussionTitle.trim();
+    const body = discussionBody.trim();
+    if (!title || !body) {
+      setError("Please add both a title and message.");
+      return;
+    }
+    setSending(true);
+    setError(null);
+    try {
+      const supabase = createClient();
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error("Not signed in.");
+      // Server validates room_id — user cannot post to another market
+      const { data: inserted, error } = await supabase.from("community_messages").insert({
+        room_id: room.id, // locked to current market room
+        user_id: user.id,
+        content: body,
+        title,
+        topic: discussionTopic || null,
+      }).select().single();
+      if (error) throw new Error(error.message);
+      const enriched = (await enrichMessages(supabase, [inserted as CommunityMessage], user.id)) as UIMessage[];
+      enriched[0]._status = "sent";
+      // Only show if it matches the active topic filter
+      if (!activeTopic || activeTopic === (discussionTopic || null)) {
+        setMessages((prev) => [...prev, enriched[0]]);
+      }
+      setShowDiscussionModal(false);
+      setDiscussionTitle("");
+      setDiscussionTopic("");
+      setDiscussionBody("");
+      setTimeout(scrollBottom, 100);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to start discussion.");
     } finally {
       setSending(false);
     }
@@ -396,6 +451,16 @@ export default function CommunityRoomPage() {
     else await deleteMessage(msg);
   };
 
+  const changeTopic = async (topic: string | null) => {
+    if (!room || topic === activeTopic) return;
+    setActiveTopic(topic);
+    activeTopicRef.current = topic;
+    setMessages([]);
+    setNewMsgCount(0);
+    await loadMessages(room.id, undefined, topic);
+    setTimeout(scrollBottom, 150);
+  };
+
   const loadOlder = async () => {
     if (!room || loadingOlder || messages.length === 0) return;
     const listEl = messageListRef.current;
@@ -403,7 +468,7 @@ export default function CommunityRoomPage() {
     setLoadingOlder(true);
     try {
       const oldest = messages.find((m) => !m._tempId && m._status !== "sending");
-      if (oldest) await loadMessages(room.id, oldest.id);
+      if (oldest) await loadMessages(room.id, oldest.id, activeTopic);
       // Preserve scroll position after prepending
       requestAnimationFrame(() => {
         if (listEl) {
@@ -482,7 +547,56 @@ export default function CommunityRoomPage() {
         {reconnecting && (
           <span style={{ fontSize: 11, color: "#fbbf24" }}>Reconnecting…</span>
         )}
+        {signedIn && (
+          <button
+            onClick={() => setShowDiscussionModal(true)}
+            style={{
+              flexShrink: 0, padding: "7px 14px", borderRadius: 16, cursor: "pointer",
+              background: "rgba(66,216,121,0.12)", border: "1px solid rgba(66,216,121,0.3)",
+              color: "#42d879", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap",
+            }}
+          >
+            + Start Discussion
+          </button>
+        )}
       </div>
+
+      {/* Topic filters */}
+      {topicsForRoom(slug).length > 0 && (
+        <div style={{
+          flexShrink: 0, display: "flex", gap: 8, padding: "8px 12px",
+          overflowX: "auto", borderBottom: "1px solid rgba(255,255,255,0.06)",
+          background: "rgba(10,14,17,0.9)", scrollbarWidth: "none",
+        }}>
+          <button
+            onClick={() => changeTopic(null)}
+            style={{
+              flexShrink: 0, padding: "6px 14px", borderRadius: 14, cursor: "pointer",
+              fontSize: 12, fontWeight: activeTopic === null ? 700 : 400,
+              background: activeTopic === null ? "rgba(66,216,121,0.15)" : "rgba(255,255,255,0.04)",
+              border: activeTopic === null ? "1px solid rgba(66,216,121,0.4)" : "1px solid rgba(255,255,255,0.08)",
+              color: activeTopic === null ? "#42d879" : "var(--ggl-muted)",
+            }}
+          >
+            All Discussions
+          </button>
+          {topicsForRoom(slug).map((t) => (
+            <button
+              key={t.value}
+              onClick={() => changeTopic(t.value)}
+              style={{
+                flexShrink: 0, padding: "6px 14px", borderRadius: 14, cursor: "pointer",
+                fontSize: 12, fontWeight: activeTopic === t.value ? 700 : 400,
+                background: activeTopic === t.value ? "rgba(66,216,121,0.15)" : "rgba(255,255,255,0.04)",
+                border: activeTopic === t.value ? "1px solid rgba(66,216,121,0.4)" : "1px solid rgba(255,255,255,0.08)",
+                color: activeTopic === t.value ? "#42d879" : "var(--ggl-muted)",
+              }}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Messages — scrolls internally, never expands page */}
       <div ref={messageListRef} style={{
@@ -505,8 +619,16 @@ export default function CommunityRoomPage() {
         )}
         {messages.length === 0 && (
           <div style={{ color: "var(--ggl-muted)", textAlign: "center", padding: "48px 16px", fontSize: 14 }}>
-            No messages yet.<br />
-            {signedIn ? "Start the conversation below." : "Sign in to start the conversation."}
+            {activeTopic ? (
+              <>No discussions in <strong style={{ color: "var(--ggl-text)" }}>{activeTopic}</strong> yet.<br /></>
+            ) : (
+              <>No messages yet.<br /></>
+            )}
+            {signedIn
+              ? (activeTopic
+                  ? `Start the first discussion in ${activeTopic} below.`
+                  : `Start the first discussion in ${room?.name ?? "this market"}.`)
+              : "Sign in to start the conversation."}
           </div>
         )}
         {grouped.map(({ msg: m, showHeader, showDate }) => (
@@ -531,6 +653,11 @@ export default function CommunityRoomPage() {
                   <span style={{ fontWeight: 700, fontSize: 13, color: m.user_id === userId ? "var(--ggl-green)" : "var(--ggl-text)" }}>
                     {m.author_name}
                   </span>
+                  {m.topic && (
+                    <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 8, background: "rgba(66,216,121,0.1)", color: "#42d879", fontWeight: 600 }}>
+                      {m.topic}
+                    </span>
+                  )}
                   <span style={{ color: "var(--ggl-muted)", fontSize: 10 }}>{formatTime(m.created_at)}</span>
                   {m.is_edited && <span style={{ color: "var(--ggl-muted)", fontSize: 10 }}>(edited)</span>}
                   <span style={{ marginLeft: "auto", display: "flex", gap: 2, position: "relative" }}>
@@ -576,6 +703,11 @@ export default function CommunityRoomPage() {
                 </div>
               )}
               <div style={{ fontSize: 14, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", opacity: m._status === "sending" ? 0.6 : 1 }}>
+                {m.title && (
+                  <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4, color: "var(--ggl-text)" }}>
+                    {m.title}
+                  </div>
+                )}
                 {renderContent(m.content)}
               </div>
               {/* Status / retry */}
@@ -694,6 +826,76 @@ export default function CommunityRoomPage() {
           </button>
         </div>
       </div>
+
+      {/* Start Discussion modal */}
+      {showDiscussionModal && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}
+          onClick={() => setShowDiscussionModal(false)}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: "#0d1319", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 16, padding: 24, width: "100%", maxWidth: 480, boxSizing: "border-box" }}>
+            <h2 style={{ fontSize: 18, fontWeight: 800, margin: "0 0 4px" }}>Start a Discussion</h2>
+            <p style={{ color: "var(--ggl-muted)", fontSize: 13, margin: "0 0 16px" }}>
+              Posting in <strong style={{ color: "var(--ggl-text)" }}>#{room?.name}</strong>
+            </p>
+            <input
+              value={discussionTitle}
+              onChange={(e) => setDiscussionTitle(e.target.value)}
+              placeholder="Discussion title…"
+              maxLength={200}
+              aria-label="Discussion title"
+              style={{
+                width: "100%", padding: "10px 14px", borderRadius: 10, marginBottom: 12,
+                border: "1px solid rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.04)",
+                color: "#fff", fontSize: 15, outline: "none", boxSizing: "border-box",
+              }}
+            />
+            {topicsForRoom(slug).length > 0 && (
+              <select
+                value={discussionTopic}
+                onChange={(e) => setDiscussionTopic(e.target.value)}
+                aria-label="Topic"
+                style={{
+                  width: "100%", padding: "10px 14px", borderRadius: 10, marginBottom: 12,
+                  border: "1px solid rgba(255,255,255,0.1)", background: "#1a2129",
+                  color: "#fff", fontSize: 15, outline: "none", boxSizing: "border-box",
+                }}
+              >
+                <option value="">No specific topic</option>
+                {topicsForRoom(slug).map((t) => (
+                  <option key={t.value} value={t.value}>{t.label}</option>
+                ))}
+              </select>
+            )}
+            <textarea
+              value={discussionBody}
+              onChange={(e) => setDiscussionBody(e.target.value)}
+              placeholder="Share your thoughts, analysis, or question…"
+              rows={4}
+              maxLength={2000}
+              aria-label="Discussion message"
+              style={{
+                width: "100%", padding: "10px 14px", borderRadius: 10, marginBottom: 16,
+                border: "1px solid rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.04)",
+                color: "#fff", fontSize: 15, outline: "none", resize: "vertical",
+                boxSizing: "border-box", fontFamily: "inherit",
+              }}
+            />
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button onClick={() => setShowDiscussionModal(false)}
+                style={{ padding: "10px 18px", borderRadius: 10, cursor: "pointer", background: "none", border: "1px solid rgba(255,255,255,0.12)", color: "var(--ggl-muted)", fontSize: 14 }}>
+                Cancel
+              </button>
+              <button onClick={startDiscussion} disabled={sending || !discussionTitle.trim() || !discussionBody.trim()}
+                style={{
+                  padding: "10px 20px", borderRadius: 10, cursor: "pointer", border: "none",
+                  background: sending || !discussionTitle.trim() || !discussionBody.trim() ? "rgba(66,216,121,0.2)" : "#42d879",
+                  color: "#06110b", fontSize: 14, fontWeight: 700,
+                }}>
+                {sending ? "Posting…" : "Post Discussion"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Sign-in modal */}
       {showSignIn && (

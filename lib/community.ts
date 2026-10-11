@@ -10,6 +10,7 @@ export interface CommunityRoom {
   ticker: string | null;
   is_public: boolean;
   message_preview: boolean;
+  category: string;
   created_at: string;
 }
 
@@ -19,6 +20,8 @@ export interface CommunityMessage {
   user_id: string;
   content: string;
   reply_to: string | null;
+  topic: string | null;
+  title: string | null;
   is_edited: boolean;
   is_deleted: boolean;
   created_at: string;
