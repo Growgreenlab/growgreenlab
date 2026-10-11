@@ -155,18 +155,19 @@ export default function CommunityRoomPage() {
   const toggleReaction = async (msg: CommunityMessage, emoji: string) => {
     if (!requireAuth() || !userId) return;
     const supabase = createClient();
-    const existing = msg.reactions?.find((r) => r.emoji === emoji && r.reacted);
-    if (existing) {
-      await supabase.from("community_reactions")
-        .delete()
-        .eq("message_id", msg.id)
-        .eq("user_id", userId)
-        .eq("emoji", emoji);
-    } else {
+    // Race-safe: try delete first. If a row was deleted, we're done (toggled off).
+    // Otherwise insert (toggled on). This handles rapid taps without duplicate errors.
+    const { data: deleted } = await supabase.from("community_reactions")
+      .delete()
+      .eq("message_id", msg.id)
+      .eq("user_id", userId)
+      .eq("emoji", emoji)
+      .select("id");
+    if (!deleted || deleted.length === 0) {
       const { error } = await supabase.from("community_reactions").insert({
         message_id: msg.id, user_id: userId, emoji,
       });
-      if (error) { setError(error.message); return; }
+      if (error && !error.message.includes("duplicate")) { setError(error.message); return; }
     }
     if (room) await loadMessages(room.id);
   };
