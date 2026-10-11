@@ -66,8 +66,10 @@ export default function Header() {
               Sign In
             </Link>
           )}
-          <Link href="/replay" className="ggl-btn ggl-btn-primary">
-            Launch Simulator <span aria-hidden="true">→</span>
+          <Link href="/replay" className="ggl-btn ggl-btn-primary ggl-launch-btn">
+            <span className="ggl-launch-full">Launch Simulator</span>
+            <span className="ggl-launch-short">Launch</span>
+            <span aria-hidden="true">→</span>
           </Link>
           <button
             className="ggl-menu-btn"
@@ -99,8 +101,10 @@ export default function Header() {
               Sign In
             </Link>
           )}
-          <Link href="/replay" className="ggl-btn ggl-btn-primary" onClick={() => setMenuOpen(false)}>
-            Launch Simulator <span aria-hidden="true">→</span>
+          <Link href="/replay" className="ggl-btn ggl-btn-primary ggl-launch-btn" onClick={() => setMenuOpen(false)}>
+            <span className="ggl-launch-full">Launch Simulator</span>
+            <span className="ggl-launch-short">Launch</span>
+            <span aria-hidden="true">→</span>
           </Link>
         </nav>
       )}

@@ -898,6 +898,7 @@ body.ws-active .footer { display: none; }
   .ggl-section { padding: 28px 20px; }
   .ggl-final { padding: 56px 20px; }
 }
+.ggl-launch-short { display: none; }
 @media (max-width: 430px) {
   .ggl-hero { padding: 36px 16px 32px; }
   .ggl-headline { font-size: 32px; letter-spacing: -0.5px; }
@@ -908,6 +909,8 @@ body.ws-active .footer { display: none; }
   .ggl-brand-logo { height: 28px; }
   .ggl-nav-actions { gap: 8px; }
   .ggl-nav-actions .ggl-btn-primary { padding: 8px 14px; font-size: 13px; }
+  .ggl-launch-full { display: none; }
+  .ggl-launch-short { display: inline; }
   .ggl-menu-btn { width: 40px; height: 40px; font-size: 18px; flex-shrink: 0; }
   .ggl-btn-lg { padding: 12px 20px; font-size: 14px; }
 }
