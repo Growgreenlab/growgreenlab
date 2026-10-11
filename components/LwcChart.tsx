@@ -21,10 +21,10 @@ import {
 import type { Candle } from "../lib/types";
 import { diag } from "../lib/diag";
 import { normalizePrice, formatPrice } from "../lib/price";
-import type { Drawing, DrawingTool } from "../lib/drawings";
-import { newDrawingId, DRAWING_COLORS } from "../lib/drawings";
+import type { Drawing, DrawingTool, DrawingType } from "../lib/drawings";
+import { createDrawing } from "../lib/drawings";
 import DrawingToolbar from "./DrawingToolbar";
-import DrawingLayer, { hitTestDrawing } from "./DrawingLayer";
+import DrawingLayer, { hitTestAll, hitTolerance } from "./DrawingLayer";
 
 const UP = "#2ebd85";
 const DOWN = "#f6465d";
@@ -78,14 +78,40 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
   drawingsRef.current = drawings;
   const toolRef = useRef(drawingTool);
   toolRef.current = drawingTool;
-  // Pending first point for trendline placement; drag state for drawings.
-  const pendingTrendRef = useRef<{ time: number; price: number } | null>(null);
+  // Pending first point for two-click tools; drag state for drawings.
+  const pendingTrendRef = useRef<{ time: number; price: number; tool: DrawingTool } | null>(null);
   const drawingDragRef = useRef<{
     id: string;
     mode: "move" | "p1" | "p2";
     startX: number;
     startY: number;
   } | null>(null);
+  // Undo/redo history
+  const historyRef = useRef<Drawing[][]>([[]]);
+  const historyIdxRef = useRef(0);
+  const pushHistory = (next: Drawing[]) => {
+    const h = historyRef.current.slice(0, historyIdxRef.current + 1);
+    h.push(next);
+    if (h.length > 50) h.shift();
+    historyRef.current = h;
+    historyIdxRef.current = h.length - 1;
+  };
+  const undo = () => {
+    if (historyIdxRef.current > 0) {
+      historyIdxRef.current -= 1;
+      const prev = historyRef.current[historyIdxRef.current];
+      onDrawingsChange([...prev]);
+      setSelectedDrawingId(null);
+    }
+  };
+  const redo = () => {
+    if (historyIdxRef.current < historyRef.current.length - 1) {
+      historyIdxRef.current += 1;
+      const next = historyRef.current[historyIdxRef.current];
+      onDrawingsChange([...next]);
+      setSelectedDrawingId(null);
+    }
+  };
   const [chartSize, setChartSize] = useState({ w: 0, h: 0 });
 
   // Create the chart once.
@@ -373,73 +399,112 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     const y = e.clientY - rect.top;
     const tool = toolRef.current;
 
-    // Drawing placement modes: disable pan, place on click.
-    if (tool === "hline") {
-      e.preventDefault();
-      e.stopPropagation();
-      const price = dc.toPrice(y);
-      if (price != null && isFinite(price) && price > 0) {
-        const clean = normalizePrice(price);
-        const d: Drawing = {
-          id: newDrawingId(),
-          type: "hline",
-          price: clean,
-          color: DRAWING_COLORS.hline,
-        };
-        onDrawingsChange([...drawingsRef.current, d]);
-        setSelectedDrawingId(d.id);
-      }
-      return;
-    }
-    if (tool === "trendline") {
-      e.preventDefault();
-      e.stopPropagation();
+    // Helper to get clean market coords
+    const getCoords = () => {
       const price = dc.toPrice(y);
       const time = dc.toTime(x);
-      if (price == null || !isFinite(price) || price <= 0 || time == null) return;
-      const cleanPrice = normalizePrice(price);
-      if (!pendingTrendRef.current) {
-        // First point.
-        pendingTrendRef.current = { time, price: cleanPrice };
-      } else {
-        // Second point: create the trendline.
-        const p1 = pendingTrendRef.current;
-        pendingTrendRef.current = null;
-        const d: Drawing = {
-          id: newDrawingId(),
-          type: "trendline",
-          p1,
-          p2: { time, price: cleanPrice },
-          color: DRAWING_COLORS.trendline,
-        };
+      if (price == null || !isFinite(price) || price <= 0 || time == null) return null;
+      return { time, price: normalizePrice(price) };
+    };
+
+    // Single-click placement tools
+    if (tool === "hline") {
+      e.preventDefault(); e.stopPropagation();
+      const price = dc.toPrice(y);
+      if (price != null && isFinite(price) && price > 0) {
+        const d = createDrawing("hline", { price: normalizePrice(price) });
         onDrawingsChange([...drawingsRef.current, d]);
         setSelectedDrawingId(d.id);
+        pushHistory([...drawingsRef.current, d]);
       }
       return;
     }
-
-    // Select mode: hit-test drawings first, then SL/TP lines.
+    if (tool === "vline") {
+      e.preventDefault(); e.stopPropagation();
+      const c = getCoords();
+      if (!c) return;
+      const d = createDrawing("vline", { time: c.time, p1: { time: c.time, price: c.price } });
+      onDrawingsChange([...drawingsRef.current, d]);
+      setSelectedDrawingId(d.id);
+      pushHistory([...drawingsRef.current, d]);
+      return;
+    }
+    if (tool === "hray") {
+      e.preventDefault(); e.stopPropagation();
+      const c = getCoords();
+      if (!c) return;
+      const d = createDrawing("hray", { p1: { time: c.time, price: c.price } });
+      onDrawingsChange([...drawingsRef.current, d]);
+      setSelectedDrawingId(d.id);
+      pushHistory([...drawingsRef.current, d]);
+      return;
+    }
+    if (tool === "text") {
+      e.preventDefault(); e.stopPropagation();
+      const c = getCoords();
+      if (!c) return;
+      const text = prompt("Enter text:", "");
+      if (text == null || text.trim() === "") return;
+      const d = createDrawing("text", {
+        p1: { time: c.time, price: c.price },
+        text: text.trim(),
+      });
+      onDrawingsChange([...drawingsRef.current, d]);
+      setSelectedDrawingId(d.id);
+      pushHistory([...drawingsRef.current, d]);
+      return;
+    }
+    // Two-click tools: trendline, extended, arrow, rect
+    if (tool === "trendline" || tool === "extended" || tool === "arrow" || tool === "rect") {
+      e.preventDefault(); e.stopPropagation();
+      const c = getCoords();
+      if (!c) return;
+      if (!pendingTrendRef.current) {
+        pendingTrendRef.current = { time: c.time, price: c.price, tool };
+      } else {
+        const p1 = pendingTrendRef.current;
+        pendingTrendRef.current = null;
+        const type = p1.tool as DrawingType;
+        const d = createDrawing(type, {
+          p1: { time: p1.time, price: p1.price },
+          p2: { time: c.time, price: c.price },
+        });
+        onDrawingsChange([...drawingsRef.current, d]);
+        setSelectedDrawingId(d.id);
+        pushHistory([...drawingsRef.current, d]);
+      }
+      return;
+    }
+    // Select mode: hit-test drawings (with overlap cycling), then SL/TP lines.
     if (tool === "select") {
       const toX = (t: number) => dc.toX(t);
       const toY = (p: number) => dc.toY(p);
-      for (const d of drawingsRef.current) {
-        if (hitTestDrawing(d, x, y, toX, toY)) {
-          e.preventDefault();
-          e.stopPropagation();
-          setSelectedDrawingId(d.id);
-          // Check if hitting an endpoint (for trendline).
-          let mode: "move" | "p1" | "p2" = "move";
-          if (d.type === "trendline" && d.p1 && d.p2) {
-            const x1 = toX(d.p1.time); const y1 = toY(d.p1.price);
-            const x2 = toX(d.p2.time); const y2 = toY(d.p2.price);
-            if (x1 != null && y1 != null && Math.hypot(x - x1, y - y1) < 10) mode = "p1";
-            else if (x2 != null && y2 != null && Math.hypot(x - x2, y - y2) < 10) mode = "p2";
-          }
-          drawingDragRef.current = { id: d.id, mode, startX: x, startY: y };
-          disableChartNav();
-          (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
-          return;
+      const hits = hitTestAll(drawingsRef.current, x, y, toX, toY);
+      if (hits.length > 0) {
+        e.preventDefault();
+        e.stopPropagation();
+        // Cycle through overlapping drawings on repeated clicks
+        let d: Drawing;
+        const currentIdx = hits.findIndex((h) => h.id === selectedDrawingId);
+        if (currentIdx >= 0 && hits.length > 1) {
+          d = hits[(currentIdx + 1) % hits.length];
+        } else {
+          d = hits[0];
         }
+        setSelectedDrawingId(d.id);
+        // Check if hitting an endpoint (for line-type drawings).
+        let mode: "move" | "p1" | "p2" = "move";
+        const tol = hitTolerance();
+        if ((d.type === "trendline" || d.type === "arrow" || d.type === "extended" || d.type === "rect") && d.p1 && d.p2) {
+          const x1 = toX(d.p1.time); const y1 = toY(d.p1.price);
+          const x2 = toX(d.p2.time); const y2 = toY(d.p2.price);
+          if (x1 != null && y1 != null && Math.hypot(x - x1, y - y1) < tol) mode = "p1";
+          else if (x2 != null && y2 != null && Math.hypot(x - x2, y - y2) < tol) mode = "p2";
+        }
+        drawingDragRef.current = { id: d.id, mode, startX: x, startY: y };
+        disableChartNav();
+        (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+        return;
       }
       // Clicked empty space: deselect.
       if (selectedDrawingId) setSelectedDrawingId(null);
@@ -475,23 +540,33 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       const cleanPrice = normalizePrice(price);
       const updated = drawingsRef.current.map((d) => {
         if (d.id !== dDrag.id) return d;
+        if (d.locked) return d;
         if (d.type === "hline") {
           return { ...d, price: cleanPrice };
         }
-        if (d.type === "trendline" && d.p1 && d.p2) {
+        if (d.type === "hray" && d.p1) {
+          return { ...d, p1: { ...d.p1, price: cleanPrice } };
+        }
+        if (d.type === "vline" && d.time != null) {
+          return { ...d, time: time ?? d.time, p1: d.p1 ? { ...d.p1, time: time ?? d.p1.time } : d.p1 };
+        }
+        if (d.type === "text" && d.p1) {
+          // Move text anchor
+          return { ...d, p1: { time: time ?? d.p1.time, price: cleanPrice } };
+        }
+        if ((d.type === "trendline" || d.type === "arrow" || d.type === "extended" || d.type === "rect") && d.p1 && d.p2) {
           if (dDrag.mode === "p1") return { ...d, p1: { time: time ?? d.p1.time, price: cleanPrice } };
           if (dDrag.mode === "p2") return { ...d, p2: { time: time ?? d.p2.time, price: cleanPrice } };
-          // Move whole line: shift both points by delta.
+          // Move whole shape: shift both points by delta.
           const dx = x - dDrag.startX;
           const dy = y - dDrag.startY;
-          // Convert pixel delta to time/price delta via current scale.
           const p1x = dc.toX(d.p1.time); const p1y = dc.toY(d.p1.price);
           const p2x = dc.toX(d.p2.time); const p2y = dc.toY(d.p2.price);
           if (p1x == null || p1y == null || p2x == null || p2y == null) return d;
           const newP1Time = dc.toTime(p1x + dx); const newP1Price = dc.toPrice(p1y + dy);
           const newP2Time = dc.toTime(p2x + dx); const newP2Price = dc.toPrice(p2y + dy);
           if (newP1Time == null || newP1Price == null || newP2Time == null || newP2Price == null) return d;
-          dDrag.startX = x; dDrag.startY = y; // update for incremental moves
+          dDrag.startX = x; dDrag.startY = y;
           return {
             ...d,
             p1: { time: newP1Time, price: normalizePrice(newP1Price) },
@@ -529,10 +604,11 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
   };
 
   const onPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
-    // End drawing drag.
+    // End drawing drag — push to history for undo.
     if (drawingDragRef.current) {
       drawingDragRef.current = null;
       enableChartNav();
+      pushHistory([...drawingsRef.current]);
     }
     const drag = dragRef.current;
     const chart = chartRef.current;
@@ -551,15 +627,25 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     }
   };
 
-  // Keyboard: Delete/Backspace removes selected drawing, Esc exits tool.
+  // Keyboard: Delete/Backspace removes selected drawing, Esc exits tool, Ctrl+Z/Y for undo/redo.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
       if ((e.key === "Delete" || e.key === "Backspace") && selectedDrawingId) {
         e.preventDefault();
-        onDrawingsChange(drawingsRef.current.filter((d) => d.id !== selectedDrawingId));
+        const next = drawingsRef.current.filter((d) => d.id !== selectedDrawingId);
+        onDrawingsChange(next);
+        pushHistory(next);
         setSelectedDrawingId(null);
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === "z" && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+      }
+      if ((e.ctrlKey || e.metaKey) && (e.key === "y" || (e.key === "z" && e.shiftKey))) {
+        e.preventDefault();
+        redo();
       }
       if (e.key === "Escape") {
         pendingTrendRef.current = null;
@@ -594,11 +680,17 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
         onToolChange={onDrawingToolChange}
         onDeleteSelected={() => {
           if (selectedDrawingId) {
-            onDrawingsChange(drawings.filter((d) => d.id !== selectedDrawingId));
+            const next = drawings.filter((d) => d.id !== selectedDrawingId);
+            onDrawingsChange(next);
+            pushHistory(next);
             setSelectedDrawingId(null);
           }
         }}
         hasSelection={selectedDrawingId != null}
+        onUndo={undo}
+        onRedo={redo}
+        canUndo={historyIdxRef.current > 0}
+        canRedo={historyIdxRef.current < historyRef.current.length - 1}
       />
       <div
         ref={countdownRef}
