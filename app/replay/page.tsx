@@ -624,7 +624,15 @@ function ReplayPageInner() {
               <span className="hod-line">HOD <b className="num">{formatMoney(eng.hod)}</b></span>
             </div>
             <div className="ws-top-actions">
-              {saveMsg && <span className={saveMsg.startsWith("Session saved") ? "ok" : "err"} style={{ fontSize: 12 }}>{saveMsg}</span>}
+              {saveMsg && (
+                saveMsg.startsWith("Session saved") ? (
+                  <a href="/sessions" className="ok" style={{ fontSize: 12, textDecoration: "underline", cursor: "pointer" }}>
+                    {saveMsg} →
+                  </a>
+                ) : (
+                  <span className="err" style={{ fontSize: 12 }}>{saveMsg}</span>
+                )
+              )}
               <button className="btn" onClick={() => setDataOpen((v) => !v)}>Data</button>
               <button className="btn primary" onClick={saveSession} disabled={saving}>
                 {saving ? "Saving…" : "Save"}

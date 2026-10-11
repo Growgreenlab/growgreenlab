@@ -51,6 +51,11 @@ export default function Header() {
               {l.label}
             </Link>
           ))}
+          {email && (
+            <Link href="/sessions">
+              My Sessions
+            </Link>
+          )}
         </nav>
 
         <div className="ggl-nav-actions">
