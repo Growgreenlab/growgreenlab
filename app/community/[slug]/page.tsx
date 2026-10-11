@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "../../../lib/supabaseClient";
-import { getDisplayName, isRoomMod, type CommunityRoom, type CommunityMessage } from "../../../lib/community";
+import { isRoomMod, type CommunityRoom, type CommunityMessage } from "../../../lib/community";
 
 const QUICK_REACTIONS = ["👍", "🔥", "📈", "💡"];
 
@@ -16,6 +16,8 @@ export default function CommunityRoomPage() {
   const [room, setRoom] = useState<CommunityRoom | null>(null);
   const [messages, setMessages] = useState<CommunityMessage[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [hasOlder, setHasOlder] = useState(false);
   const [signedIn, setSignedIn] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
   const [isMod, setIsMod] = useState(false);
@@ -26,6 +28,9 @@ export default function CommunityRoomPage() {
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const nameCache = useRef<Record<string, string>>({});
+  const lastSendAt = useRef<number>(0);
+  const PAGE_SIZE = 50;
+  const SEND_COOLDOWN_MS = 2000; // 2s between messages
 
   const scrollBottom = () => bottomRef.current?.scrollIntoView({ behavior: "smooth" });
 
@@ -52,48 +57,122 @@ export default function CommunityRoomPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug]);
 
-  const loadMessages = async (roomId: string) => {
+  // Enrich messages with author names, reply previews, reactions — all batched
+  const enrichMessages = async (
+    supabase: ReturnType<typeof createClient>,
+    msgs: CommunityMessage[],
+    currentUserId: string | null
+  ): Promise<CommunityMessage[]> => {
+    if (msgs.length === 0) return msgs;
+
+    const userIds = [...new Set(msgs.map((m) => m.user_id))];
+    const messageIds = msgs.map((m) => m.id);
+    const replyIds = [...new Set(msgs.map((m) => m.reply_to).filter(Boolean))] as string[];
+
+    // Batch 1: author names (only uncached)
+    const uncachedIds = userIds.filter((id) => !nameCache.current[id]);
+    if (uncachedIds.length > 0) {
+      const { data: profiles } = await supabase
+        .from("profiles")
+        .select("id, display_name, email")
+        .in("id", uncachedIds);
+      for (const p of profiles ?? []) {
+        nameCache.current[p.id] =
+          p.display_name || (p.email ? p.email.split("@")[0] : null) || "Trader";
+      }
+      // Fallback for any still missing
+      for (const id of uncachedIds) {
+        if (!nameCache.current[id]) nameCache.current[id] = "Trader";
+      }
+    }
+
+    // Batch 2: reply previews
+    let replyMap: Record<string, string> = {};
+    if (replyIds.length > 0) {
+      const { data: parents } = await supabase
+        .from("community_messages")
+        .select("id, content")
+        .in("id", replyIds);
+      for (const p of parents ?? []) {
+        replyMap[p.id] = (p.content as string).slice(0, 80);
+      }
+    }
+
+    // Batch 3: all reactions for these messages in one query
+    const { data: allReacts } = await supabase
+      .from("community_reactions")
+      .select("message_id, emoji, user_id")
+      .in("message_id", messageIds);
+
+    const reactsByMsg: Record<string, Record<string, { count: number; reacted: boolean }>> = {};
+    for (const r of allReacts ?? []) {
+      const mid = r.message_id as string;
+      if (!reactsByMsg[mid]) reactsByMsg[mid] = {};
+      if (!reactsByMsg[mid][r.emoji]) reactsByMsg[mid][r.emoji] = { count: 0, reacted: false };
+      reactsByMsg[mid][r.emoji].count++;
+      if (r.user_id === currentUserId) reactsByMsg[mid][r.emoji].reacted = true;
+    }
+
+    for (const m of msgs) {
+      m.author_name = nameCache.current[m.user_id] || "Trader";
+      if (m.reply_to) m.reply_preview = replyMap[m.reply_to];
+      const byEmoji = reactsByMsg[m.id] ?? {};
+      m.reactions = Object.entries(byEmoji).map(([emoji, v]) => ({ emoji, ...v }));
+    }
+    return msgs;
+  };
+
+  const loadMessages = async (roomId: string, before?: string) => {
     const supabase = createClient();
-    const { data } = await supabase
+    const { data: { user } } = await supabase.auth.getUser();
+
+    let query = supabase
       .from("community_messages")
       .select("*")
       .eq("room_id", roomId)
       .eq("is_deleted", false)
-      .order("created_at", { ascending: true })
-      .limit(200);
-    const msgs = (data ?? []) as CommunityMessage[];
-    // Resolve author names + reactions
-    for (const m of msgs) {
-      if (!nameCache.current[m.user_id]) {
-        nameCache.current[m.user_id] = await getDisplayName(m.user_id);
+      .order("created_at", { ascending: false })
+      .limit(PAGE_SIZE + 1); // +1 to detect hasOlder
+
+    if (before) {
+      const { data: beforeMsg } = await supabase
+        .from("community_messages")
+        .select("created_at")
+        .eq("id", before)
+        .single();
+      if (beforeMsg) {
+        query = query.lt("created_at", (beforeMsg as { created_at: string }).created_at);
       }
-      m.author_name = nameCache.current[m.user_id];
-      if (m.reply_to) {
-        const { data: parent } = await supabase
-          .from("community_messages")
-          .select("content")
-          .eq("id", m.reply_to)
-          .single();
-        m.reply_preview = parent?.content?.slice(0, 80);
-      }
-      const { data: reacts } = await supabase
-        .from("community_reactions")
-        .select("emoji, user_id")
-        .eq("message_id", m.id);
-      const byEmoji: Record<string, { count: number; reacted: boolean }> = {};
-      for (const r of reacts ?? []) {
-        if (!byEmoji[r.emoji]) byEmoji[r.emoji] = { count: 0, reacted: false };
-        byEmoji[r.emoji].count++;
-        const { data: { user } } = await supabase.auth.getUser();
-        if (r.user_id === user?.id) byEmoji[r.emoji].reacted = true;
-      }
-      m.reactions = Object.entries(byEmoji).map(([emoji, v]) => ({ emoji, ...v }));
     }
-    setMessages(msgs);
-    setTimeout(scrollBottom, 100);
+
+    const { data } = await query;
+    const raw = ((data ?? []) as CommunityMessage[]).reverse(); // chronological
+    const hasMore = raw.length > PAGE_SIZE;
+    const msgs = raw.slice(-PAGE_SIZE);
+
+    const enriched = await enrichMessages(supabase, msgs, user?.id ?? null);
+
+    if (before) {
+      setMessages((prev) => [...enriched, ...prev]);
+      setHasOlder(hasMore);
+    } else {
+      setMessages(enriched);
+      setHasOlder(hasMore);
+    }
+    return enriched;
   };
 
-  // Realtime subscription
+  const loadOlder = async () => {
+    if (!room || loadingOlder || messages.length === 0) return;
+    setLoadingOlder(true);
+    try {
+      await loadMessages(room.id, messages[0].id);
+    } finally {
+      setLoadingOlder(false);
+    }
+  };
+
+  // Realtime subscription — appends single messages, no full reload
   useEffect(() => {
     if (!room) return;
     const supabase = createClient();
@@ -104,13 +183,34 @@ export default function CommunityRoomPage() {
         schema: "public",
         table: "community_messages",
         filter: `room_id=eq.${room.id}`,
-      }, () => loadMessages(room.id))
+      }, async (payload) => {
+        const newMsg = payload.new as CommunityMessage;
+        if (newMsg.is_deleted) return;
+        // Avoid duplicates (e.g. own message already added optimistically)
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === newMsg.id)) return prev;
+          return [...prev, newMsg];
+        });
+        // Enrich just the new message
+        const enriched = await enrichMessages(supabase, [newMsg], userId);
+        setMessages((prev) => prev.map((m) => (m.id === newMsg.id ? enriched[0] : m)));
+        setTimeout(scrollBottom, 100);
+      })
       .on("postgres_changes", {
         event: "UPDATE",
         schema: "public",
         table: "community_messages",
         filter: `room_id=eq.${room.id}`,
-      }, () => loadMessages(room.id))
+      }, async (payload) => {
+        const updated = payload.new as CommunityMessage;
+        if (updated.is_deleted) {
+          // Remove soft-deleted messages
+          setMessages((prev) => prev.filter((m) => m.id !== updated.id));
+        } else {
+          const enriched = await enrichMessages(supabase, [updated], userId);
+          setMessages((prev) => prev.map((m) => (m.id === updated.id ? enriched[0] : m)));
+        }
+      })
       .subscribe();
     return () => { supabase.removeChannel(ch); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -128,6 +228,13 @@ export default function CommunityRoomPage() {
 
   const sendMessage = async () => {
     if (!requireAuth() || !room || !draft.trim() || sending) return;
+    // Rate limit: 2s cooldown between sends
+    const now = Date.now();
+    if (now - lastSendAt.current < SEND_COOLDOWN_MS) {
+      setError("Please wait a moment before sending another message.");
+      return;
+    }
+    lastSendAt.current = now;
     setSending(true);
     setError(null);
     try {
@@ -140,17 +247,21 @@ export default function CommunityRoomPage() {
         await supabase.from("profiles")
           .upsert({ id: user.id, email: user.email, display_name: displayName }, { onConflict: "id" });
       }
-      const { error } = await supabase.from("community_messages").insert({
+      const { data: inserted, error } = await supabase.from("community_messages").insert({
         room_id: room.id,
         user_id: user.id,
         content: draft.trim(),
         reply_to: replyTo?.id ?? null,
-      });
+      }).select().single();
       if (error) throw new Error(error.message);
       setDraft("");
       setReplyTo(null);
-      await loadMessages(room.id);
-      scrollBottom();
+      // Optimistic append — realtime will also catch it (deduped by id)
+      if (inserted) {
+        const enriched = await enrichMessages(supabase, [inserted as CommunityMessage], user.id);
+        setMessages((prev) => prev.some((m) => m.id === enriched[0].id) ? prev : [...prev, enriched[0]]);
+        scrollBottom();
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to send.");
     } finally {
@@ -175,7 +286,21 @@ export default function CommunityRoomPage() {
       });
       if (error && !error.message.includes("duplicate")) { setError(error.message); return; }
     }
-    if (room) await loadMessages(room.id);
+    // Update just this message's reactions locally instead of full reload
+    if (room) {
+      const { data: reacts } = await supabase
+        .from("community_reactions")
+        .select("emoji, user_id")
+        .eq("message_id", msg.id);
+      const byEmoji: Record<string, { count: number; reacted: boolean }> = {};
+      for (const r of reacts ?? []) {
+        if (!byEmoji[r.emoji]) byEmoji[r.emoji] = { count: 0, reacted: false };
+        byEmoji[r.emoji].count++;
+        if (r.user_id === userId) byEmoji[r.emoji].reacted = true;
+      }
+      const newReactions = Object.entries(byEmoji).map(([emoji, v]) => ({ emoji, ...v }));
+      setMessages((prev) => prev.map((m) => m.id === msg.id ? { ...m, reactions: newReactions } : m));
+    }
   };
 
   const deleteMessage = async (msg: CommunityMessage) => {
@@ -186,7 +311,8 @@ export default function CommunityRoomPage() {
     await supabase.from("community_messages")
       .update({ is_deleted: true, updated_at: new Date().toISOString() })
       .eq("id", msg.id);
-    await loadMessages(room.id);
+    // Remove locally — realtime UPDATE will also handle it
+    setMessages((prev) => prev.filter((m) => m.id !== msg.id));
   };
 
   const banUser = async (msg: CommunityMessage) => {
@@ -232,6 +358,16 @@ export default function CommunityRoomPage() {
 
       {/* Messages */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12, marginBottom: 16 }}>
+        {hasOlder && (
+          <button onClick={loadOlder} disabled={loadingOlder}
+            style={{
+              alignSelf: "center", padding: "8px 20px", borderRadius: 20, cursor: "pointer",
+              border: "1px solid var(--ggl-border)", background: "rgba(255,255,255,0.03)",
+              color: "var(--ggl-muted)", fontSize: 13,
+            }}>
+            {loadingOlder ? "Loading…" : "Load older messages"}
+          </button>
+        )}
         {messages.length === 0 && (
           <p style={{ color: "var(--ggl-muted)", textAlign: "center", padding: 32 }}>
             No messages yet. {signedIn ? "Start the conversation!" : "Sign in to start the conversation."}
