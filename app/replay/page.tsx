@@ -60,8 +60,36 @@ function ReplayPageInner() {
   // Planned entry: captured when levels are first set, fixed thereafter.
   // Used for R:R calculations so they don't drift with live price.
   const [plannedEntry, setPlannedEntry] = useState<number | null>(null);
-  // Chart drawings (in-memory; per session).
+  // Chart drawings (persisted per ticker+date+source in localStorage).
   const [drawings, setDrawings] = useState<Drawing[]>([]);
+  // Load saved drawings when session meta changes
+  useEffect(() => {
+    if (!meta) { setDrawings([]); return; }
+    try {
+      const key = `ggl-drawings:${meta.ticker}:${meta.tradeDate}:${meta.source}`;
+      const raw = localStorage.getItem(key);
+      if (raw) {
+        const saved = JSON.parse(raw) as Drawing[];
+        if (Array.isArray(saved)) setDrawings(saved);
+        else setDrawings([]);
+      } else {
+        setDrawings([]);
+      }
+    } catch { setDrawings([]); }
+  }, [meta?.ticker, meta?.tradeDate, meta?.source]);
+  // Save drawings on change (debounced)
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!meta) return;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      try {
+        const key = `ggl-drawings:${meta.ticker}:${meta.tradeDate}:${meta.source}`;
+        localStorage.setItem(key, JSON.stringify(drawings));
+      } catch { /* storage full or unavailable */ }
+    }, 500);
+    return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
+  }, [drawings, meta?.ticker, meta?.tradeDate, meta?.source]);
   // Right sidebar tabs: order / risk / guard (no scrolling).
   const [rightTab, setRightTab] = useState<"order" | "risk" | "guard">("order");
   const [drawingTool, setDrawingTool] = useState<DrawingTool>("select");
