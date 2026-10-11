@@ -92,6 +92,8 @@ export default function JournalPage() {
   const [fTicker, setFTicker] = useState("");
   const [fSetup, setFSetup] = useState("");
   const [fWinLoss, setFWinLoss] = useState("");
+  const [showRealForm, setShowRealForm] = useState(false);
+  const [showImport, setShowImport] = useState(false);
 
   const load = async () => {
     if (!isSupabaseConfigured()) { setError("Supabase is not configured."); setLoading(false); return; }
@@ -267,8 +269,8 @@ export default function JournalPage() {
         ))}
       </div>
 
-      {tab === "overview" && <OverviewTab metrics={metrics} simMetrics={simMetrics} realMetrics={realMetrics} cumPnl={cumPnl} trades={filtered} period={period} setPeriod={setPeriod} sourceFilter={sourceFilter} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} />}
-      {tab === "trades" && <TradesTab trades={filtered} metas={metas} fTicker={fTicker} setFTicker={setFTicker} fSetup={fSetup} setFSetup={setFSetup} fWinLoss={fWinLoss} setFWinLoss={setFWinLoss} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} onRealTradeSaved={load} />}
+      {tab === "overview" && <OverviewTab metrics={metrics} simMetrics={simMetrics} realMetrics={realMetrics} cumPnl={cumPnl} trades={filtered} period={period} setPeriod={setPeriod} sourceFilter={sourceFilter} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} onAddRealTrade={() => { setTab("trades"); setShowRealForm(true); }} onImportBroker={() => { setTab("trades"); setShowImport(true); }} />}
+      {tab === "trades" && <TradesTab trades={filtered} metas={metas} fTicker={fTicker} setFTicker={setFTicker} fSetup={fSetup} setFSetup={setFSetup} fWinLoss={fWinLoss} setFWinLoss={setFWinLoss} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} onRealTradeSaved={load} showRealForm={showRealForm} setShowRealForm={setShowRealForm} showImport={showImport} setShowImport={setShowImport} />}
       {tab === "review" && <ReviewTab tradeKey={selectedKey} simTrade={!isRealSelected ? (selected as GroupedTrade | null) : null} realTrade={isRealSelected ? (selected as RealTrade | null) : null} meta={selectedMeta} onSaved={load} />}
       {tab === "calendar" && <CalendarTab trades={closedFiltered} onSelectDay={() => {}} />}
     </div>
@@ -288,7 +290,7 @@ function SourceBadge({ source }: { source: "simulator" | "real" }) {
   );
 }
 
-function OverviewTab({ metrics, simMetrics, realMetrics, cumPnl, trades, period, setPeriod, sourceFilter, onSelect }: {
+function OverviewTab({ metrics, simMetrics, realMetrics, cumPnl, trades, period, setPeriod, sourceFilter, onSelect, onAddRealTrade, onImportBroker }: {
   metrics: ReturnType<typeof calcMetrics>;
   simMetrics: ReturnType<typeof calcMetrics>;
   realMetrics: ReturnType<typeof calcMetrics>;
@@ -298,6 +300,8 @@ function OverviewTab({ metrics, simMetrics, realMetrics, cumPnl, trades, period,
   setPeriod: (p: Period) => void;
   sourceFilter: SourceFilter;
   onSelect: (k: string) => void;
+  onAddRealTrade: () => void;
+  onImportBroker: () => void;
 }) {
   const periods: { id: Period; label: string }[] = [
     { id: "today", label: "Today" }, { id: "week", label: "Week" }, { id: "month", label: "Month" },
@@ -332,8 +336,24 @@ function OverviewTab({ metrics, simMetrics, realMetrics, cumPnl, trades, period,
       {m.totalTrades === 0 ? (
         <div className="card" style={{ padding: 32, textAlign: "center" }}>
           <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>No trades yet</div>
-          <p className="hint">Trade in the simulator, then your closed positions will appear here automatically.</p>
-          <Link href="/replay" className="btn primary" style={{ marginTop: 8, display: "inline-block", textDecoration: "none" }}>Open Simulator</Link>
+          {sourceFilter === "real" ? (
+            <>
+              <p className="hint">Add your real market trades manually or import them from your broker.</p>
+              <div style={{ display: "flex", gap: 10, justifyContent: "center", marginTop: 12, flexWrap: "wrap" }}>
+                <button className="btn primary" onClick={onAddRealTrade}>
+                  + Add Real Trade
+                </button>
+                <button className="btn" onClick={onImportBroker}>
+                  ⭳ Import from Broker
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="hint">Trade in the simulator, then your closed positions will appear here automatically.</p>
+              <Link href="/replay" className="btn primary" style={{ marginTop: 8, display: "inline-block", textDecoration: "none" }}>Open Simulator</Link>
+            </>
+          )}
         </div>
       ) : (
         <>
@@ -401,16 +421,16 @@ function OverviewTab({ metrics, simMetrics, realMetrics, cumPnl, trades, period,
 }
 
 /* ---------------- All Trades ---------------- */
-function TradesTab({ trades, metas, fTicker, setFTicker, fSetup, setFSetup, fWinLoss, setFWinLoss, onSelect, onRealTradeSaved }: {
+function TradesTab({ trades, metas, fTicker, setFTicker, fSetup, setFSetup, fWinLoss, setFWinLoss, onSelect, onRealTradeSaved, showRealForm, setShowRealForm, showImport, setShowImport }: {
   trades: UnifiedTrade[]; metas: Record<string, TradeMeta>;
   fTicker: string; setFTicker: (v: string) => void;
   fSetup: string; setFSetup: (v: string) => void;
   fWinLoss: string; setFWinLoss: (v: string) => void;
   onSelect: (k: string) => void;
   onRealTradeSaved: () => void;
+  showRealForm: boolean; setShowRealForm: (v: boolean | ((p: boolean) => boolean)) => void;
+  showImport: boolean; setShowImport: (v: boolean | ((p: boolean) => boolean)) => void;
 }) {
-  const [showRealForm, setShowRealForm] = useState(false);
-  const [showImport, setShowImport] = useState(false);
   return (
     <div>
       <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
