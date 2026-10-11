@@ -94,6 +94,7 @@ export default function CommunityRoomPage() {
   const [showSignIn, setShowSignIn] = useState(false);
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
@@ -208,18 +209,24 @@ export default function CommunityRoomPage() {
       setNewMsgCount(0);
       setRoom(null);
       setLoading(true);
-      const supabase = createClient();
-      const { data: { user } } = await supabase.auth.getUser();
-      setSignedIn(!!user);
-      setUserId(user?.id ?? null);
-      const { data: roomData } = await supabase
-        .from("community_rooms").select("*").eq("slug", slug).single();
-      if (!roomData) { setLoading(false); return; }
-      setRoom(roomData);
-      if (user) setIsMod(await isRoomMod(roomData.id));
-      await loadMessages(roomData.id, undefined, null);
-      setLoading(false);
-      setTimeout(scrollBottom, 150);
+      setLoadError(false);
+      try {
+        const supabase = createClient();
+        const { data: { user } } = await supabase.auth.getUser();
+        setSignedIn(!!user);
+        setUserId(user?.id ?? null);
+        const { data: roomData } = await supabase
+          .from("community_rooms").select("*").eq("slug", slug).single();
+        if (!roomData) return;
+        setRoom(roomData);
+        if (user) setIsMod(await isRoomMod(roomData.id));
+        await loadMessages(roomData.id, undefined, null);
+        setTimeout(scrollBottom, 150);
+      } catch {
+        setLoadError(true);
+      } finally {
+        setLoading(false);
+      }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug]);
@@ -503,6 +510,21 @@ export default function CommunityRoomPage() {
     return (
       <div style={{ maxWidth: 760, margin: "0 auto", padding: "48px 16px", color: "var(--ggl-muted)", textAlign: "center" }}>
         <div style={{ fontSize: 14 }}>Loading conversation…</div>
+      </div>
+    );
+  }
+  if (loadError) {
+    return (
+      <div style={{ maxWidth: 760, margin: "0 auto", padding: "48px 16px", textAlign: "center" }}>
+        <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 8 }}>Couldn't load the conversation</div>
+        <div style={{ color: "var(--ggl-muted)", fontSize: 14, marginBottom: 16 }}>
+          Check your connection and try again.
+        </div>
+        <button onClick={() => window.location.reload()}
+          style={{ padding: "10px 24px", borderRadius: 10, cursor: "pointer", border: "none",
+            background: "#42d879", color: "#06110b", fontSize: 14, fontWeight: 700 }}>
+          Retry
+        </button>
       </div>
     );
   }
