@@ -81,6 +81,9 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
   // Pending first point for two-click tools; drag state for drawings.
   const pendingTrendRef = useRef<{ time: number; price: number; tool: DrawingTool } | null>(null);
   const [pendingPoint, setPendingPoint] = useState<{ time: number; price: number; tool: DrawingTool } | null>(null);
+  // Candles ref for time-snapping in drawingCoords (avoids stale closures).
+  const candlesRef = useRef(candles);
+  candlesRef.current = candles;
   const drawingDragRef = useRef<{
     id: string;
     mode: "move" | "p1" | "p2";
@@ -365,8 +368,6 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     const el = elRef.current;
     if (!chart || !cs || !el) return null;
     const rect = el.getBoundingClientRect();
-    const candlesRef = useRef(candles);
-    candlesRef.current = candles;
     return {
       chart, cs, rect,
       toPrice: (y: number) => cs.coordinateToPrice(y),
