@@ -916,3 +916,164 @@ body.ws-active .footer { display: none; }
   .ggl-menu-btn { width: 40px; height: 40px; font-size: 18px; flex-shrink: 0; }
   .ggl-btn-lg { padding: 12px 20px; font-size: 14px; }
 }
+
+/* ============================================================
+   MOBILE TRADING WORKSPACE — single-screen layout
+   Chart + P&L + Order entry visible together, no page scroll
+   ============================================================ */
+@media (max-width: 768px) {
+  /* Workspace fills viewport, no scrolling */
+  .ws {
+    height: calc(100dvh - 57px); /* viewport minus mobile header */
+    min-height: 0;
+    gap: 6px;
+    padding: 6px 8px 8px;
+    padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+    overflow: hidden;
+    width: 100%;
+    margin-left: 0;
+    margin-right: 0;
+    max-width: 100%;
+  }
+
+  /* Compact top bar */
+  .ws-top {
+    padding: 6px 10px;
+    gap: 10px;
+    border-radius: 10px;
+  }
+  .ws-sym .ticker-name { font-size: 15px; }
+  .ws-sym .ticker-sub { display: none; } /* hide date on mobile */
+  .ws-sym .badge { display: none; } /* hide source badge on mobile */
+  .ws-quote { gap: 8px; }
+  .ws-quote .price-now { font-size: 16px; }
+  .ws-quote .hod-line { font-size: 11px; }
+  .ws-top-actions .btn { padding: 6px 10px; font-size: 12px; }
+
+  /* Main becomes vertical flex */
+  .ws-main {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .ws-left {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex: 1;
+    min-height: 0;
+  }
+
+  /* Compact replay controls */
+  .ws-controls { padding: 6px 10px; border-radius: 10px; }
+  .ws-controls .controlsbar { margin-bottom: 4px; gap: 6px; }
+  .ws-controls .ctl-btn { padding: 6px 10px; font-size: 13px; }
+  .ws-controls .seg-btn { padding: 5px 8px; font-size: 11px; }
+  .ws-controls .progress { height: 3px; }
+
+  /* Chart: ~32% of viewport height */
+  .ws-chart {
+    flex: 0 0 32dvh;
+    min-height: 170px;
+    max-height: 340px;
+    border-radius: 10px;
+  }
+
+  /* Compact P&L: 4 columns, hide Daily + Position on mobile */
+  .ws-pnl {
+    padding: 7px 10px;
+    gap: 6px;
+    border-radius: 10px;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+  }
+  .ws-pnl .pnl-cell:nth-child(3), /* Daily P&L */
+  .ws-pnl .pnl-cell:nth-child(4)  /* Position */ {
+    display: none;
+  }
+  .pnl-cell .tk { font-size: 9px; margin-bottom: 2px; }
+  .pnl-cell .tv { font-size: 13px; }
+
+  /* Order entry panel */
+  .ws-right {
+    flex: 0 0 auto;
+    min-height: 0;
+    overflow: visible;
+  }
+  .ws-tabs { gap: 2px; margin-bottom: 6px; }
+  .ws-tab { padding: 7px 12px; font-size: 12px; }
+
+  /* Compact order panel */
+  .ws-panel.order-panel { padding: 10px 12px; border-radius: 10px; }
+  .ws-panel.order-panel .ws-panel-head { display: none; } /* hide "Order" header on mobile */
+  .ws-panel.order-panel .pos-line {
+    font-size: 12px;
+    padding: 4px 0;
+    margin-bottom: 6px;
+  }
+  .ws-panel.order-panel .seg { margin-bottom: 8px; }
+  .ws-panel.order-panel .seg-btn { padding: 7px 0; font-size: 12px; }
+  .ws-panel.order-panel .field-row { gap: 8px; margin-bottom: 8px; }
+  .ws-panel.order-panel .field { margin-bottom: 0; }
+  .ws-panel.order-panel .field label { font-size: 10px; margin-bottom: 4px; }
+  .ws-panel.order-panel .input { padding: 9px 10px; font-size: 14px; }
+  .ws-panel.order-panel .row { gap: 8px; }
+  .ws-panel.order-panel .btn.buy.big,
+  .ws-panel.order-panel .btn.sell.big {
+    padding: 12px 0;
+    font-size: 15px;
+    min-height: 48px; /* comfortable touch target */
+  }
+  /* Hide SL/TP bracket inputs and hints on mobile Order tab (available in Risk tab) */
+  .ws-panel.order-panel .bracket-row,
+  .ws-panel.order-panel .btn.ghost,
+  .ws-panel.order-panel .hint {
+    display: none;
+  }
+  /* Hide ledger table on mobile (fills visible on chart) */
+  .ws-panel.order-panel .ledger-scroll,
+  .ws-panel.order-panel .ws-panel-head {
+    display: none;
+  }
+  /* Hide working orders list on mobile (accessible via Risk tab if needed) */
+  .ws-panel.order-panel .work-order { display: none; }
+
+  /* Risk tab panel compact */
+  .ws-tabpanel-risk .ws-panel { padding: 10px 12px; border-radius: 10px; max-height: 38dvh; overflow-y: auto; }
+
+  /* Guard tab panel compact */
+  .ws-tabpanel-guard .panel { padding: 10px 12px; border-radius: 10px; max-height: 38dvh; overflow-y: auto; }
+
+  /* Guard banner compact */
+  .guard-banner { padding: 6px 10px; font-size: 12px; margin-bottom: 6px; }
+
+  /* Data source popover full-width on mobile */
+  .ws-data-pop {
+    position: fixed;
+    left: 8px; right: 8px; top: 60px;
+    width: auto;
+    max-height: 80dvh;
+    z-index: 200;
+  }
+}
+
+/* Very small phones: tighten further */
+@media (max-width: 360px) {
+  .ws-chart { flex-basis: 28dvh; min-height: 150px; }
+  .ws-sym .ticker-name { font-size: 13px; }
+  .ws-quote .price-now { font-size: 14px; }
+  .ws-top-actions .btn { padding: 5px 8px; font-size: 11px; }
+}
+
+/* Mobile landscape: side-by-side chart + order entry */
+@media (max-width: 768px) and (orientation: landscape) and (max-height: 500px) {
+  .ws-main { flex-direction: row; }
+  .ws-left { flex: 1 1 55%; }
+  .ws-chart { flex: 1; min-height: 0; max-height: none; }
+  .ws-right { flex: 0 0 260px; overflow-y: auto; }
+  .ws-pnl { grid-template-columns: repeat(4, 1fr); }
+  .ws-controls .seg { display: none; } /* hide speed selector in landscape */
+}

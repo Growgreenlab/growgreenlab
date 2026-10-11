@@ -784,7 +784,7 @@ function ReplayPageInner() {
                 disabled={false}
               />
               </div>
-              <div style={{ display: rightTab === "risk" ? "block" : "none" }}>
+              <div className="ws-tabpanel-risk" style={{ display: rightTab === "risk" ? "block" : "none" }}>
               <RiskCalculator
                 currentPrice={snap.price}
                 cash={snap.cash}
@@ -811,7 +811,7 @@ function ReplayPageInner() {
                 disabled={false}
               />
               </div>
-              <div style={{ display: rightTab === "guard" ? "block" : "none" }}>
+              <div className="ws-tabpanel-guard" style={{ display: rightTab === "guard" ? "block" : "none" }}>
               <PsychologyGuardPanel
                 accountBalance={START_CASH}
                 baseline={guardBaseline.current}

@@ -137,7 +137,7 @@ export default function TradingPanel({ snap, qty, onQtyChange, plannedSL, planne
       </div>
 
       {/* brackets */}
-      <div className="field-row" style={{ marginTop: 10 }}>
+      <div className="field-row bracket-row" style={{ marginTop: 10 }}>
         <div className="field">
           <label>Stop-loss</label>
           <input className="input num" type="number" step="0.01" placeholder="e.g. 5.20"
