@@ -18,6 +18,7 @@ interface Props {
   selectedId: string | null;
   width: number;
   height: number;
+  pendingPoint?: { time: number; price: number } | null;
 }
 
 function dashArray(style: LineStyle): string | undefined {
@@ -26,7 +27,7 @@ function dashArray(style: LineStyle): string | undefined {
   return undefined;
 }
 
-export default function DrawingLayer({ chart, series, drawings, selectedId, width, height }: Props) {
+export default function DrawingLayer({ chart, series, drawings, selectedId, width, height, pendingPoint }: Props) {
   const [, setRev] = useState(0);
 
   useEffect(() => {
@@ -218,6 +219,26 @@ export default function DrawingLayer({ chart, series, drawings, selectedId, widt
       height={height}
     >
       {drawings.map(renderDrawing)}
+      {/* Pending first point marker for two-click tools */}
+      {pendingPoint && (() => {
+        const px = timeToX(pendingPoint.time);
+        const py = priceToY(pendingPoint.price);
+        if (px == null || py == null) return null;
+        return (
+          <g>
+            <circle cx={px} cy={py} r={7}
+              fill="none" stroke="#34d399" strokeWidth={2}
+              strokeDasharray="3 2" opacity={0.9}>
+              <animate attributeName="r" values="7;9;7" dur="1.2s" repeatCount="indefinite" />
+            </circle>
+            <circle cx={px} cy={py} r={3} fill="#34d399" opacity={0.9} />
+            <text x={px} y={py - 14} textAnchor="middle"
+              fontSize={10} fill="#34d399" fontWeight={600}>
+              Click for 2nd point
+            </text>
+          </g>
+        );
+      })()}
     </svg>
   );
 }

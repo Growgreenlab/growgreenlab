@@ -80,6 +80,7 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
   toolRef.current = drawingTool;
   // Pending first point for two-click tools; drag state for drawings.
   const pendingTrendRef = useRef<{ time: number; price: number; tool: DrawingTool } | null>(null);
+  const [pendingPoint, setPendingPoint] = useState<{ time: number; price: number; tool: DrawingTool } | null>(null);
   const drawingDragRef = useRef<{
     id: string;
     mode: "move" | "p1" | "p2";
@@ -461,9 +462,11 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       if (!c) return;
       if (!pendingTrendRef.current) {
         pendingTrendRef.current = { time: c.time, price: c.price, tool };
+        setPendingPoint({ time: c.time, price: c.price, tool });
       } else {
         const p1 = pendingTrendRef.current;
         pendingTrendRef.current = null;
+        setPendingPoint(null);
         const type = p1.tool as DrawingType;
         const d = createDrawing(type, {
           p1: { time: p1.time, price: p1.price },
@@ -649,6 +652,7 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       }
       if (e.key === "Escape") {
         pendingTrendRef.current = null;
+        setPendingPoint(null);
         if (toolRef.current !== "select") onDrawingToolChange("select");
         setSelectedDrawingId(null);
       }
@@ -674,6 +678,7 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
         selectedId={selectedDrawingId}
         width={chartSize.w}
         height={chartSize.h}
+        pendingPoint={pendingPoint}
       />
       <DrawingToolbar
         tool={drawingTool}
