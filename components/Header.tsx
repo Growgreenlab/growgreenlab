@@ -87,6 +87,18 @@ export default function Header() {
               {l.label}
             </Link>
           ))}
+          {email ? (
+            <>
+              <span className="ggl-user-badge" title={email}>{displayName || email}</span>
+              <button className="ggl-btn ggl-btn-ghost" onClick={() => { setMenuOpen(false); signOut(); }}>
+                Sign out
+              </button>
+            </>
+          ) : (
+            <Link href="/login" className="ggl-btn ggl-btn-ghost" onClick={() => setMenuOpen(false)}>
+              Sign In
+            </Link>
+          )}
           <Link href="/replay" className="ggl-btn ggl-btn-primary" onClick={() => setMenuOpen(false)}>
             Launch Simulator <span aria-hidden="true">→</span>
           </Link>
