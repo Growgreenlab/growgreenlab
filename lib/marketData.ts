@@ -145,41 +145,7 @@ export function generateSampleSession(ticker: string, dateStr: string): Candle[]
   return candles;
 }
 
-/**
- * Simulated premarket context: deterministic 1-minute candles ending right
- * before the real session open, random-walking backward from the real open
- * price so the bridge connects seamlessly. Marked `syn: true` — visual
- * context only, never part of HOD/trading math. Used when a data source
- * (e.g. Twelve Data free tier) provides no real premarket candles.
- */
-export function generatePremarketBridge(
-  ticker: string,
-  dateStr: string,
-  openPrice: number,
-  openTimeMs: number,
-  minutes = 120,
-): Candle[] {
-  const rand = mulberry32(hashSeed(`premarket|${ticker.toUpperCase()}|${dateStr}`));
-  // backward walk: pts[0] is the open (newest), pts[minutes-1] the oldest
-  const pts: number[] = [openPrice];
-  for (let i = 1; i < minutes; i++) {
-    const prev = pts[i - 1];
-    const change = (rand() - 0.5) * 0.004 * prev + (openPrice - prev) * 0.02;
-    pts.push(Math.max(0.2, prev + change));
-  }
-  const candles: Candle[] = [];
-  for (let i = minutes - 1; i >= 0; i--) {
-    const c = pts[i];
-    const o = i === minutes - 1 ? c * (1 + (rand() - 0.5) * 0.002) : pts[i + 1];
-    const h = Math.max(o, c) * (1 + rand() * 0.0015);
-    const l = Math.min(o, c) * (1 - rand() * 0.0015);
-    const v = Math.round(1_000 + rand() * 6_000);
-    candles.push({ t: openTimeMs - (i + 1) * 60000, o, h, l, c, v, syn: true });
-  }
-  return candles;
-}
-
-/** Remove simulated premarket context candles (exports stay real-data-only). */
+/** Remove synthetic candles (exports stay real-data-only). Kept for backward compat. */
 export function stripSynthetic(candles: Candle[]): Candle[] {
   return candles.filter((c) => !c.syn);
 }

@@ -189,6 +189,7 @@ function ReplayPageInner() {
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
   const [loadingSession, setLoadingSession] = useState(false);
   const [dataOpen, setDataOpen] = useState(false);
+  const [premarketNoticeDismissed, setPremarketNoticeDismissed] = useState(false);
   const bump = useCallback(() => setVersion((v) => v + 1), []);
 
   const stopTimer = useCallback(() => {
@@ -265,6 +266,7 @@ function ReplayPageInner() {
     // Reset auto-save tracking for the new session
     savedSessionIdRef.current = null;
     lastSavedPnlRef.current = 0;
+    setPremarketNoticeDismissed(false);
     engineRef.current = new ReplayEngine(cs, balanceRef.current, m.startIndex);
     setCandles(cs);
     setMeta(m);
@@ -835,7 +837,54 @@ function ReplayPageInner() {
                 total={candles.length}
                 progress={(eng.index + eng.formationProgress + 1) / Math.max(1, candles.length)}
               />
-              <div className="ws-chart">
+              <div className="ws-chart" style={{ position: "relative" }}>
+                {/* Honest premarket notice — shown only when verified premarket data is unavailable */}
+                {meta?.premarketUnavailable && !premarketNoticeDismissed && (
+                  <div
+                    style={{
+                      position: "absolute",
+                      top: 12,
+                      left: "50%",
+                      transform: "translateX(-50%)",
+                      zIndex: 30,
+                      background: "rgba(15,23,42,0.95)",
+                      border: "1px solid rgba(251,191,36,0.35)",
+                      borderRadius: 8,
+                      padding: "8px 12px",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
+                      maxWidth: "90%",
+                      boxShadow: "0 2px 12px rgba(0,0,0,0.4)",
+                    }}
+                  >
+                    <span style={{ color: "#fbbf24", fontSize: 14 }}>⚠</span>
+                    <div style={{ fontSize: 12, lineHeight: 1.4 }}>
+                      <div style={{ fontWeight: 700, color: "#fbbf24", letterSpacing: "0.02em" }}>
+                        PREMARKET DATA UNAVAILABLE
+                      </div>
+                      <div style={{ color: "var(--muted)" }}>
+                        Historical premarket data isn't available for this session.
+                        Replay starts at 9:30 AM ET using verified regular-market data.
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setPremarketNoticeDismissed(true)}
+                      title="Dismiss"
+                      style={{
+                        background: "none",
+                        border: "none",
+                        color: "var(--muted)",
+                        cursor: "pointer",
+                        fontSize: 16,
+                        padding: "2px 6px",
+                        flexShrink: 0,
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                )}
                 {searchParams.get("chart") === "canvas" ? (
                 <CandleChart
                   candles={eng.displayCandles}
