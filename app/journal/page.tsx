@@ -114,7 +114,8 @@ export default function JournalPage() {
           .from("session_trades")
           .select("*")
           .eq("session_id", s.id)
-          .order("created_at", { ascending: true });
+          .order("created_at", { ascending: true })
+          .order("id", { ascending: true });
         if (fills && fills.length > 0) {
           const grouped = groupFillsIntoTrades(fills as RawFill[], s);
           allTrades.push(...grouped);
@@ -142,7 +143,8 @@ export default function JournalPage() {
           .from("journal_real_fills")
           .select("*")
           .eq("trade_id", rt.id)
-          .order("fill_time", { ascending: true });
+          .order("fill_time", { ascending: true })
+          .order("id", { ascending: true });
         const rf: RealFill[] = (fills ?? []).map((f: any) => ({
           id: f.id, side: f.side, qty: Number(f.qty), price: Number(f.price),
           fees: Number(f.fees ?? 0), fill_time: f.fill_time,
@@ -684,6 +686,7 @@ function BrokerImportForm({ onSaved }: { onSaved: () => void }) {
   const [parseResult, setParseResult] = useState<BrokerParseResult | null>(null);
   const [previewTrades, setPreviewTrades] = useState<ImportedTrade[]>([]);
   const [duplicates, setDuplicates] = useState<number>(0);
+  const [existingHashes, setExistingHashes] = useState<Set<string>>(new Set());
   const [importing, setImporting] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [fileName, setFileName] = useState("");
@@ -696,20 +699,22 @@ function BrokerImportForm({ onSaved }: { onSaved: () => void }) {
   const requiredMapped = ["symbol", "side", "qty", "price"].every((k) => mapping[k]);
 
   const checkDuplicates = async (fills: { hash: string }[]) => {
-    if (fills.length === 0) { setDuplicates(0); return; }
+    if (fills.length === 0) { setDuplicates(0); setExistingHashes(new Set()); return; }
     const supabase = createClient();
     const hashes = fills.map((x) => x.hash);
-    let dupCount = 0;
+    const existing = new Set<string>();
     for (let i = 0; i < hashes.length; i += 100) {
       const chunk = hashes.slice(i, i + 100);
       const { data } = await supabase.from("journal_real_fills").select("import_hash").in("import_hash", chunk);
-      dupCount += data?.length ?? 0;
+      for (const row of data ?? []) existing.add(row.import_hash);
     }
-    setDuplicates(dupCount);
+    setExistingHashes(existing);
+    setDuplicates(existing.size);
   };
 
   const handleFile = async (f: File) => {
     setMsg(null); setShowMapping(false);
+    setExistingHashes(new Set()); setDuplicates(0);
     try {
       const text = await f.text();
       setRawText(text);
@@ -763,8 +768,10 @@ function BrokerImportForm({ onSaved }: { onSaved: () => void }) {
 
       let imported = 0, skipped = 0;
       for (const t of previewTrades) {
-        // Skip trades where all fills are duplicates
-        const newFills = t.fills.filter((f) => f.hash);
+        // Filter out already-imported fills using the pre-fetched hash set.
+        // Only skip the trade when ALL fills are duplicates; otherwise
+        // import the new fills so partial re-imports don't lose data.
+        const newFills = t.fills.filter((f) => f.hash && !existingHashes.has(f.hash));
         if (newFills.length === 0) { skipped++; continue; }
 
         const { data: trade, error: tErr } = await supabase.from("journal_real_trades").insert({
@@ -1048,7 +1055,7 @@ function RealTradeForm({ onSaved }: { onSaved: () => void }) {
 
       <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>Fills <span className="hint">(multiple entries & partial exits)</span></div>
       {fills.map((f, i) => (
-        <div key={i} style={{ display: "grid", gridTemplateColumns: "80px 1fr 1fr 1fr 110px 32px", gap: 8, marginBottom: 8, alignItems: "end" }}>
+        <div key={i} className="fill-row" style={{ display: "grid", gridTemplateColumns: "80px 1fr 1fr 1fr 110px 32px", gap: 8, marginBottom: 8, alignItems: "end" }}>
           <div className="field" style={field}><label>Side</label>
             <select className="input" value={f.side} onChange={(e) => updateFill(i, "side", e.target.value)}>
               <option value="buy">Buy</option><option value="sell">Sell</option>

@@ -235,6 +235,7 @@ function ReplayPageInner() {
       if (now - nextTick > 1000) nextTick = now;
       let ran = 0;
       let finished = false;
+      const qtyBefore = eng.positionQty;
       while (nextTick <= now && ran < 60) {
         diag.tickCalls++;
         diag.lastTick = performance.now();
@@ -242,6 +243,20 @@ function ReplayPageInner() {
         ran++;
         nextTick += tickMs;
         if (r.atEnd) { finished = true; break; }
+      }
+      // Guest limit: consume when a limit buy fill opens a new position.
+      // (Market buys consume in gateBuy; this covers the limit-order path.)
+      if (qtyBefore === 0 && eng.positionQty !== 0 && !guardUserIdRef.current) {
+        consumeGuestTrade(
+          isSupabaseConfigured() ? createClient() : null,
+          getGuestFingerprint()
+        ).then(async () => {
+          const remaining = await getGuestTradesRemaining(
+            isSupabaseConfigured() ? createClient() : null,
+            getGuestFingerprint()
+          );
+          setGuestRemaining(remaining);
+        });
       }
       if (ran > 0) bump();
       if (finished) {
@@ -410,6 +425,9 @@ function ReplayPageInner() {
   const [guardThresholds, setGuardThresholds] = useState<GuardThreshold[]>(() => loadThresholds());
   const [guardLockout, setGuardLockout] = useState<LockoutState | null>(() => loadLockout());
   const [guardUserId, setGuardUserId] = useState<string | null>(null);
+  // Ref mirror for use inside the tick-loop closure (which captures initial values).
+  const guardUserIdRef = useRef<string | null>(null);
+  useEffect(() => { guardUserIdRef.current = guardUserId; }, [guardUserId]);
   // Guest trade limit (5/day, guests only).
   const [guestRemaining, setGuestRemaining] = useState<number>(GUEST_DAILY_LIMIT);
   const [showGuestModal, setShowGuestModal] = useState(false);
@@ -653,6 +671,17 @@ function ReplayPageInner() {
   const placeLimitErr = (side: "buy" | "sell", qty: number, price: number): string | null => {
     const eng = engineRef.current;
     if (!eng) return "Load a session first.";
+    // Guest limit applies to limit buys too (not just market buys).
+    // Note: consumption happens when the limit order FILLS (see fill handling),
+    // so we only pre-check here to block placement at the limit.
+    if (side === "buy" && eng.positionQty === 0 && !guardUserIdRef.current) {
+      // Async pre-check: run synchronously-blocked via the caller's error display.
+      // We do a best-effort sync check using cached remaining count.
+      if (guestRemaining !== null && guestRemaining <= 0) {
+        setShowGuestModal(true);
+        return "Daily guest limit reached (5 trades).";
+      }
+    }
     const err = eng.placeLimitOrder(side, qty, price);
     bump();
     return err;

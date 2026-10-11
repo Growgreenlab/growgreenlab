@@ -99,6 +99,14 @@ export class ReplayEngine {
   private nextFillId = 1;
   private nextOrderId = 1;
   private forming: FormingState | null = null;
+  /**
+   * Lowest/highest tick prices seen since the current position opened.
+   * Used by the end-of-candle bracket backstop so a stop set above an
+   * already-printed low (or target below an already-printed high) doesn't
+   * fire phantom fills for price action that happened before the entry.
+   */
+  private lowSinceEntry: number | null = null;
+  private highSinceEntry: number | null = null;
 
   constructor(candles: Candle[], startCash = 100_000, startIndex = 0) {
     if (candles.length === 0) throw new Error("Engine needs at least one candle");
@@ -170,8 +178,11 @@ export class ReplayEngine {
   /** High of day across revealed candles, including the live-forming high. */
   get hod(): number {
     let m = -Infinity;
-    for (let i = this.sessionStart; i <= this.index; i++) m = Math.max(m, this.candles[i].h);
-    if (this.forming) m = Math.max(m, this.forming.h);
+    for (let i = this.sessionStart; i <= this.index; i++) {
+      if (this.candles[i].syn) continue; // syn candles are visual-only
+      m = Math.max(m, this.candles[i].h);
+    }
+    if (this.forming && !this.candles[this.index + 1]?.syn) m = Math.max(m, this.forming.h);
     return m;
   }
 
@@ -205,6 +216,12 @@ export class ReplayEngine {
     if (tick < f.l) f.l = tick;
     f.v = target.v * f.volFrac[f.pos];
 
+    // Track extremes since position opened (for the end-of-candle backstop).
+    if (this.positionQty > 0) {
+      if (this.lowSinceEntry == null || tick < this.lowSinceEntry) this.lowSinceEntry = tick;
+      if (this.highSinceEntry == null || tick > this.highSinceEntry) this.highSinceEntry = tick;
+    }
+
     // Bracket triggers, evaluated per tick. Stop-first when the candle's
     // true range would touch both (conservative, matches step()).
     if (this.positionQty > 0) {
@@ -233,12 +250,16 @@ export class ReplayEngine {
       finalized = true;
       // Classic end-of-candle check for brackets set mid-formation (or any
       // still-open position): stop-first, fills at stop/target unless gapped.
+      // Uses extremes seen SINCE the position opened (not the candle's true
+      // range) so stops don't phantom-fire on pre-entry price action.
       if (this.positionQty > 0) {
         const c = this.currentCandle;
-        if (this.stopLoss != null && c.l <= this.stopLoss) {
+        const lowSeen = this.lowSinceEntry ?? c.l;
+        const highSeen = this.highSinceEntry ?? c.h;
+        if (this.stopLoss != null && lowSeen <= this.stopLoss) {
           const exitPrice = c.o < this.stopLoss ? c.o : this.stopLoss; // gapped through
           autoFills.push(this.closePosition(exitPrice, "stop-loss"));
-        } else if (this.takeProfit != null && c.h >= this.takeProfit) {
+        } else if (this.takeProfit != null && highSeen >= this.takeProfit) {
           const exitPrice = c.o > this.takeProfit ? c.o : this.takeProfit; // gapped through
           autoFills.push(this.closePosition(exitPrice, "take-profit"));
         }
@@ -387,6 +408,8 @@ export class ReplayEngine {
     this.forming = null;
     this.nextFillId = 1;
     this.nextOrderId = 1;
+    this.lowSinceEntry = null;
+    this.highSinceEntry = null;
     if (!this.atEnd) this.beginForming();
   }
 
@@ -421,10 +444,16 @@ export class ReplayEngine {
     if (!(qty > 0)) return null;
     const cost = qty * price;
     if (cost > this.cash + 1e-9) return null; // insufficient virtual cash
+    const wasFlat = this.positionQty === 0;
     const newQty = this.positionQty + qty;
     this.positionAvg = (this.positionAvg * this.positionQty + price * qty) / newQty;
     this.positionQty = newQty;
     this.cash -= cost;
+    if (wasFlat) {
+      // Start tracking extremes from the entry price for the backstop check.
+      this.lowSinceEntry = price;
+      this.highSinceEntry = price;
+    }
     const fill: Fill = {
       id: this.nextFillId++,
       side: "buy",
@@ -469,6 +498,8 @@ export class ReplayEngine {
     this.realizedPnl += realized;
     this.positionQty = 0;
     this.positionAvg = 0;
+    this.lowSinceEntry = null;
+    this.highSinceEntry = null;
     this.clearBrackets();
     this.cancelWorkingSide("sell");
     const fill: Fill = {

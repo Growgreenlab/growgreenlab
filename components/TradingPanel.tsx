@@ -131,7 +131,7 @@ export default function TradingPanel({ snap, qty, onQtyChange, plannedSL, planne
         )}
       </div>
 
-      <div className="row">
+      <div className="row keep-row">
         <button className="btn buy big" onClick={() => submit("buy")} disabled={disabled}>Buy</button>
         <button className="btn sell big" onClick={() => submit("sell")} disabled={disabled || (orderType === "market" && snap.qty <= 0)}>Sell</button>
       </div>
@@ -218,7 +218,7 @@ export default function TradingPanel({ snap, qty, onQtyChange, plannedSL, planne
             <tbody>
               {snap.fills.slice().reverse().map((f) => (
                 <tr key={f.id} title={f.note ?? ""}>
-                  <td style={{ color: f.side === "buy" ? "var(--green)" : "var(--red)", fontWeight: 700 }}>{f.side === "buy" ? "B" : "S"}</td>
+                  <td style={{ color: f.side === "buy" ? "var(--emerald-bright)" : "var(--red)", fontWeight: 700 }}>{f.side === "buy" ? "B" : "S"}</td>
                   <td className="num">{f.qty}</td>
                   <td className="num">{formatMoney(f.price)}</td>
                   <td className={`num ${f.realizedPnl >= 0 ? "pos" : "neg"}`}>
