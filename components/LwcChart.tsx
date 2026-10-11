@@ -697,6 +697,38 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
         canUndo={historyIdxRef.current > 0}
         canRedo={historyIdxRef.current < historyRef.current.length - 1}
       />
+      {/* Floating delete button for selected drawing — easy deletion */}
+      {selectedDrawingId && (
+        <button
+          onClick={() => {
+            const next = drawings.filter((d) => d.id !== selectedDrawingId);
+            onDrawingsChange(next);
+            pushHistory(next);
+            setSelectedDrawingId(null);
+          }}
+          title="Delete selected drawing"
+          style={{
+            position: "absolute",
+            right: 8,
+            top: 8,
+            zIndex: 25,
+            background: "rgba(220,38,38,0.92)",
+            color: "#fff",
+            border: "1px solid rgba(255,255,255,0.2)",
+            borderRadius: 8,
+            padding: "8px 12px",
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
+          }}
+        >
+          🗑 Delete
+        </button>
+      )}
       <div
         ref={countdownRef}
         style={{
