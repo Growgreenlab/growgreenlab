@@ -52,9 +52,14 @@ export default function Header() {
             </Link>
           ))}
           {email && (
-            <Link href="/sessions">
-              My Sessions
-            </Link>
+            <>
+              <Link href="/sessions">
+                My Sessions
+              </Link>
+              <Link href="/journal">
+                Trade Journal
+              </Link>
+            </>
           )}
         </nav>
 

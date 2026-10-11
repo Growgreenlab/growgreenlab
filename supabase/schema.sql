@@ -157,3 +157,82 @@ $$ language plpgsql security definer;
 
 -- Persistent account balance (carries P&L across sessions)
 alter table public.profiles add column if not exists account_balance numeric not null default 100000;
+
+-- Trade Journal Phase 1: annotations for simulator trades + manual trade storage.
+
+-- Per-trade annotations (Trade DNA, psychology, grades) for simulator trades.
+-- Trade data itself comes from session_trades; this stores the human layer.
+-- trade_key is deterministic: "{session_id}:{sequence}" where sequence is the
+-- Nth position cycle (flat -> open -> flat) in that session. Idempotent.
+create table if not exists public.journal_trade_meta (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  session_id uuid references public.replay_sessions(id) on delete cascade,
+  trade_key text not null,
+  setup_tag text,
+  hod_class text check (hod_class in ('clean', 'weak', 'failed', 'anticipation')),
+  exec_grade text check (exec_grade in ('A', 'B', 'C', 'D')),
+  entry_reasoning text,
+  exit_reasoning text,
+  followed_plan boolean,
+  confidence integer check (confidence between 1 and 10),
+  emotional_tags text[] not null default '{}',
+  mistakes text[] not null default '{}',
+  notes text,
+  lessons text,
+  would_take_again boolean,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique(user_id, trade_key)
+);
+
+-- Manual trades (external/live trades not from the simulator).
+create table if not exists public.journal_manual_trades (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  ticker text not null,
+  trade_date date not null,
+  direction text not null check (direction in ('long', 'short')),
+  entry_price numeric not null,
+  exit_price numeric,
+  qty numeric not null,
+  entry_time timestamptz,
+  exit_time timestamptz,
+  stop_loss numeric,
+  target numeric,
+  fees numeric not null default 0,
+  realized_pnl numeric,
+  setup_tag text,
+  hod_class text check (hod_class in ('clean', 'weak', 'failed', 'anticipation')),
+  exec_grade text check (exec_grade in ('A', 'B', 'C', 'D')),
+  entry_reasoning text,
+  exit_reasoning text,
+  followed_plan boolean,
+  confidence integer check (confidence between 1 and 10),
+  emotional_tags text[] not null default '{}',
+  mistakes text[] not null default '{}',
+  notes text,
+  lessons text,
+  would_take_again boolean,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.journal_trade_meta enable row level security;
+alter table public.journal_manual_trades enable row level security;
+
+drop policy if exists "own journal meta" on public.journal_trade_meta;
+create policy "own journal meta" on public.journal_trade_meta
+  for all to authenticated
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+drop policy if exists "own manual trades" on public.journal_manual_trades;
+create policy "own manual trades" on public.journal_manual_trades
+  for all to authenticated
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+create index if not exists journal_meta_user_key on public.journal_trade_meta (user_id, trade_key);
+create index if not exists journal_meta_session on public.journal_trade_meta (session_id);
+create index if not exists journal_manual_user_date on public.journal_manual_trades (user_id, trade_date desc);
