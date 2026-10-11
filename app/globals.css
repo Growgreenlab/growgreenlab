@@ -925,6 +925,9 @@ body.ws-active .footer { display: none; }
   .ggl-mobile-menu { display: flex; }
   .ggl-nav-inner { gap: 16px; }
   .ggl-nav-actions .ggl-btn-ghost { display: none; }
+  /* Hide name badge in the top bar on mobile — it squeezes the hamburger menu off screen.
+     User identity remains accessible via the hamburger menu. */
+  .ggl-nav-actions > .ggl-user-badge { display: none; }
 }
 @media (max-width: 768px) {
   .ggl-hero { padding: 48px 20px 40px; }
