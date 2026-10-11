@@ -18,6 +18,7 @@ export default function CommunityLanding() {
       const { data } = await supabase
         .from("community_rooms")
         .select("*")
+        .neq("slug", "global") // hide internal admin-scope room
         .order("created_at", { ascending: true });
       setRooms(data ?? []);
       setLoading(false);
