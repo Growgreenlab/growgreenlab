@@ -221,9 +221,10 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
       ctx.textAlign = "center";
       let lastLabelX = -Infinity;
       for (let i = d0; i <= d1; i++) {
-        const d = new Date(data[i].t);
+        // Use ET minutes (not browser-local) so labels align with ET boundaries
+        const etMin = new Date(new Date(data[i].t).toLocaleString("en-US", { timeZone: "America/New_York" })).getMinutes();
         const xx = x(i);
-        if (d.getMinutes() % stepMin === 0 && xx - lastLabelX > 56 && xx > 34 && xx < pw - 10) {
+        if (etMin % stepMin === 0 && xx - lastLabelX > 56 && xx > 34 && xx < pw - 10) {
           ctx.fillText(formatEtTime(data[i].t), xx, h - 8);
           lastLabelX = xx;
         }

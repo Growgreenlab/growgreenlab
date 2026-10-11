@@ -81,7 +81,7 @@ export function candlesToCsv(candles: Candle[]): string {
     const iso = `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(
       d.getUTCHours()
     )}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
-    rows.push(`${iso},${c.o},${c.h},${c.l},${c.c},${c.v}`);
+    rows.push(`${iso}Z,${c.o},${c.h},${c.l},${c.c},${c.v}`);
   }
   return rows.join("\n");
 }

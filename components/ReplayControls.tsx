@@ -54,7 +54,7 @@ export default function ReplayControls(p: Props) {
           {SPEEDS.map((s) => (
             <button
               key={s}
-              className={p.speed === s ? "on" : ""}
+              className={`seg-btn ${p.speed === s ? "on" : ""}`}
               onClick={() => p.onSpeed(s)}
               disabled={!p.canPlay}
               title={`${s}x speed`}

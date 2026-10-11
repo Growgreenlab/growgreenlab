@@ -984,6 +984,22 @@ body.ws-active .footer { display: none; }
   .ws-controls .ctl-count { font-size: 10px; }
   .ws-controls .progress { height: 2px; }
 
+/* Hide candle count on very narrow screens to prevent controls overflow */
+@media (max-width: 380px) {
+  .ws-controls .ctl-count { display: none; }
+}
+
+/* Journal fill rows: reflow to 2 columns on mobile */
+@media (max-width: 640px) {
+  .fill-row {
+    grid-template-columns: 1fr 1fr !important;
+  }
+  .fill-row > *:nth-child(5),
+  .fill-row > *:nth-child(6) {
+    grid-column: span 1;
+  }
+}
+
   /* Chart: dominant — ~52% of viewport height */
   .ws-chart {
     flex: 0 0 52dvh;
@@ -1070,6 +1086,7 @@ body.ws-active .footer { display: none; }
     width: auto;
     max-height: 80dvh;
     z-index: 200;
+    transform: none;
   }
 }
 
