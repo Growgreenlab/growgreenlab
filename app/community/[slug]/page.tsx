@@ -95,12 +95,22 @@ export default function CommunityRoomPage() {
   const [error, setError] = useState<string | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const messageListRef = useRef<HTMLDivElement>(null);
   const nameCache = useRef<Record<string, string>>({});
   const lastSendAt = useRef<number>(0);
+  const [newMsgCount, setNewMsgCount] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+  const isNearBottom = useCallback(() => {
+    const el = messageListRef.current;
+    if (!el) return true;
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+  }, []);
+
   const scrollBottom = useCallback(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    const el = messageListRef.current;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    setNewMsgCount(0);
   }, []);
 
   // ---------- Data loading ----------
@@ -211,20 +221,18 @@ export default function CommunityRoomPage() {
         async (payload) => {
           const newMsg = payload.new as CommunityMessage;
           if (newMsg.is_deleted) return;
+          const wasNearBottom = isNearBottom();
           const enriched = (await enrichMessages(supabase, [newMsg], userId)) as UIMessage[];
           enriched[0]._status = "sent";
           setMessages((prev) => {
-            // Replace optimistic message if IDs match temp, else dedupe by real ID
-            const idx = prev.findIndex((m) => m.id === newMsg.id || (m._tempId && payload.new && false));
-            if (idx >= 0) {
-              const next = [...prev];
-              next[idx] = enriched[0];
-              return next;
-            }
             if (prev.some((m) => m.id === newMsg.id)) return prev;
             return [...prev, enriched[0]];
           });
-          setTimeout(scrollBottom, 100);
+          if (wasNearBottom) {
+            setTimeout(scrollBottom, 100);
+          } else {
+            setNewMsgCount((c) => c + 1);
+          }
         })
       .on("postgres_changes",
         { event: "UPDATE", schema: "public", table: "community_messages", filter: `room_id=eq.${room.id}` },
@@ -390,11 +398,18 @@ export default function CommunityRoomPage() {
 
   const loadOlder = async () => {
     if (!room || loadingOlder || messages.length === 0) return;
+    const listEl = messageListRef.current;
+    const prevScrollHeight = listEl?.scrollHeight ?? 0;
     setLoadingOlder(true);
     try {
-      // Find oldest non-optimistic message
       const oldest = messages.find((m) => !m._tempId && m._status !== "sending");
       if (oldest) await loadMessages(room.id, oldest.id);
+      // Preserve scroll position after prepending
+      requestAnimationFrame(() => {
+        if (listEl) {
+          listEl.scrollTop = listEl.scrollHeight - prevScrollHeight;
+        }
+      });
     } finally {
       setLoadingOlder(false);
     }
@@ -435,14 +450,20 @@ export default function CommunityRoomPage() {
   });
 
   return (
-    <div style={{ maxWidth: 760, margin: "0 auto", minHeight: "100dvh", display: "flex", flexDirection: "column", background: "#0a0e11" }}>
+    <div style={{
+      maxWidth: 760, margin: "0 auto",
+      height: "100dvh", display: "flex", flexDirection: "column",
+      background: "#0a0e11", overflow: "hidden",
+      boxSizing: "border-box", position: "relative",
+    }}>
       {/* Compact room header */}
       <div style={{
-        position: "sticky", top: 0, zIndex: 20,
+        flexShrink: 0, zIndex: 20,
         background: "rgba(10,14,17,0.96)", backdropFilter: "blur(8px)",
         borderBottom: "1px solid rgba(255,255,255,0.07)",
         padding: "10px 12px",
         display: "flex", alignItems: "center", gap: 10,
+        minWidth: 0, boxSizing: "border-box",
       }}>
         <Link href="/community" aria-label="Back to rooms"
           style={{ color: "var(--ggl-muted)", display: "flex", padding: 6, borderRadius: 8 }}>
@@ -463,8 +484,15 @@ export default function CommunityRoomPage() {
         )}
       </div>
 
-      {/* Messages */}
-      <div style={{ flex: 1, padding: "12px 12px 8px", display: "flex", flexDirection: "column", gap: 2 }}>
+      {/* Messages — scrolls internally, never expands page */}
+      <div ref={messageListRef} style={{
+        flex: 1, minHeight: 0, minWidth: 0,
+        overflowY: "auto", overflowX: "hidden",
+        padding: "12px 12px 8px",
+        display: "flex", flexDirection: "column", gap: 2,
+        boxSizing: "border-box",
+        WebkitOverflowScrolling: "touch",
+      }}>
         {hasOlder && (
           <button onClick={loadOlder} disabled={loadingOlder}
             style={{
@@ -495,6 +523,8 @@ export default function CommunityRoomPage() {
               borderRadius: 8,
               background: m._status === "failed" ? "rgba(248,113,113,0.05)" : "transparent",
               position: "relative",
+              minWidth: 0, overflowWrap: "break-word", wordBreak: "break-word",
+              boxSizing: "border-box",
             }}>
               {showHeader && (
                 <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 2 }}>
@@ -587,12 +617,27 @@ export default function CommunityRoomPage() {
         <div ref={bottomRef} style={{ height: 8 }} />
       </div>
 
-      {/* Composer */}
+      {/* New messages indicator */}
+      {newMsgCount > 0 && (
+        <button onClick={scrollBottom}
+          style={{
+            position: "absolute", bottom: 90, left: "50%", transform: "translateX(-50%)",
+            zIndex: 25, padding: "8px 16px", borderRadius: 20, cursor: "pointer",
+            background: "var(--ggl-green)", color: "#06110b", border: "none",
+            fontSize: 12, fontWeight: 700,
+            boxShadow: "0 4px 12px rgba(0,0,0,0.4)",
+          }}>
+          ↓ {newMsgCount} new message{newMsgCount > 1 ? "s" : ""}
+        </button>
+      )}
+
+      {/* Composer — fixed at bottom of flex column */}
       <div style={{
-        position: "sticky", bottom: 0, zIndex: 20,
+        flexShrink: 0, zIndex: 20,
         background: "rgba(10,14,17,0.97)", backdropFilter: "blur(8px)",
         borderTop: "1px solid rgba(255,255,255,0.07)",
         padding: "10px 12px calc(10px + env(safe-area-inset-bottom))",
+        boxSizing: "border-box", minWidth: 0,
       }}>
         {replyTo && (
           <div style={{ fontSize: 12, color: "var(--ggl-muted)", marginBottom: 8, display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(255,255,255,0.03)", padding: "6px 10px", borderRadius: 8 }}>
