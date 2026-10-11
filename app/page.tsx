@@ -159,6 +159,45 @@ export default function Home() {
           Start Practising <span aria-hidden="true">→</span>
         </Link>
       </section>
+
+      {/* ============ FOUNDER ============ */}
+      <section className="ggl-founder" aria-labelledby="founder-heading">
+        <div className="ggl-founder-inner">
+          <p className="ggl-eyebrow">THE STORY BEHIND THE PLATFORM</p>
+          <h2 id="founder-heading">
+            Built for Traders. <span className="ggl-green">Driven by Purpose.</span>
+          </h2>
+          <div className="ggl-founder-rule" aria-hidden="true" />
+          <div className="ggl-founder-story">
+            <p>
+              I&rsquo;m <strong>Karandeep Singh</strong>, from Ladhra, a small village near
+              Jalandhar, Punjab, India.
+            </p>
+            <p>
+              Like many traders, I understand that trading is a continuous journey of
+              learning, discipline, and improvement. I started building Grow Green Trade Lab
+              with a simple vision: to make that journey easier through practical tools that
+              help traders review their trades, analyze their performance, learn from
+              mistakes, and develop better habits.
+            </p>
+            <p>
+              I&rsquo;m building this platform not because I have everything figured out, but
+              because I believe there&rsquo;s always room to learn, improve, and build better
+              tools along the way.
+            </p>
+            <p>
+              My goal is to create something meaningful for the trading community &mdash; a
+              platform built around the challenges traders face and the tools that can help
+              them grow.
+            </p>
+          </div>
+          <p className="ggl-founder-closing">&ldquo;Big visions can come from small beginnings.&rdquo;</p>
+          <div className="ggl-founder-sign">
+            <div className="ggl-founder-name">Karandeep Singh</div>
+            <div className="ggl-founder-role">Founder, Grow Green Trade Lab</div>
+          </div>
+        </div>
+      </section>
     </div>
   );
 }

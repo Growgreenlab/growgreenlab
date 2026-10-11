@@ -868,6 +868,41 @@ body.ws-active .footer { display: none; }
 .ggl-final h2 { font-size: clamp(28px, 3.4vw, 42px); font-weight: 800; margin: 0 0 14px; letter-spacing: -0.8px; }
 .ggl-final p { font-size: 16px; color: var(--ggl-muted); margin: 0 0 28px; }
 
+/* Founder section */
+.ggl-founder {
+  border-top: 1px solid var(--ggl-border);
+  background: linear-gradient(180deg, rgba(66,216,121,0.025) 0%, transparent 40%);
+  padding: 72px 24px 80px;
+}
+.ggl-founder-inner { max-width: 680px; margin: 0 auto; text-align: center; }
+.ggl-founder-inner .ggl-eyebrow { margin-bottom: 16px; }
+.ggl-founder-inner h2 {
+  font-size: clamp(26px, 3vw, 38px); font-weight: 800; letter-spacing: -0.7px;
+  margin: 0 0 20px; color: var(--ggl-text); line-height: 1.15;
+}
+.ggl-founder-rule {
+  width: 48px; height: 2px; background: var(--ggl-green);
+  margin: 0 auto 32px; border-radius: 1px;
+}
+.ggl-founder-story { text-align: left; margin-bottom: 32px; }
+.ggl-founder-story p {
+  font-size: 15.5px; line-height: 1.75; color: var(--ggl-text2); margin: 0 0 16px;
+}
+.ggl-founder-story p:last-child { margin-bottom: 0; }
+.ggl-founder-story strong { color: var(--ggl-text); font-weight: 700; }
+.ggl-founder-closing {
+  font-size: 19px; font-weight: 600; font-style: italic; letter-spacing: -0.2px;
+  color: var(--ggl-text); margin: 0 0 28px; line-height: 1.5;
+}
+.ggl-founder-sign { margin: 0; }
+.ggl-founder-name { font-size: 16px; font-weight: 700; color: var(--ggl-text); margin-bottom: 4px; }
+.ggl-founder-role { font-size: 13px; color: var(--ggl-muted); }
+@media (max-width: 640px) {
+  .ggl-founder { padding: 56px 20px 64px; }
+  .ggl-founder-story p { font-size: 15px; }
+  .ggl-founder-closing { font-size: 17px; }
+}
+
 /* Focus states */
 .ggl-btn:focus-visible, .ggl-nav-links a:focus-visible, .ggl-card-link:focus-visible {
   outline: 2px solid var(--ggl-green); outline-offset: 2px;
