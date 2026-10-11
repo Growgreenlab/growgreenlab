@@ -184,9 +184,9 @@ export interface BrokerParseResult {
 /** Fields the user can map */
 export const MAPPABLE_FIELDS = [
   { key: "symbol", label: "Symbol *", aliases: ["symbol", "ticker", "instrument"] },
-  { key: "side", label: "Side (Buy/Sell) *", aliases: ["side", "action", "buy/sell", "direction"] },
-  { key: "qty", label: "Quantity *", aliases: ["filled", "quantity", "qty", "filled qty", "shares", "volume"] },
-  { key: "price", label: "Price *", aliases: ["avg price", "average filled price", "price", "fill price", "average price", "execution price"] },
+  { key: "side", label: "Side (Buy/Sell) *", aliases: ["b/s", "side", "action", "buy/sell", "direction"] },
+  { key: "qty", label: "Quantity *", aliases: ["filled qty", "filled", "quantity", "qty", "filled qty", "shares", "volume"] },
+  { key: "price", label: "Price *", aliases: ["filled avg price", "avg price", "average filled price", "price", "fill price", "average price", "execution price"] },
   { key: "time", label: "Fill Time", aliases: ["filled time", "fill time", "exec time", "execution time", "time", "date", "timestamp", "date/time", "datetime"] },
   { key: "fees", label: "Fees/Commission", aliases: ["commission", "comm", "fees", "fee"] },
   { key: "status", label: "Order Status", aliases: ["status", "order status", "state"] },
@@ -246,9 +246,9 @@ export function parseWithMapping(
       const symbol = get(row, "symbol").toUpperCase().replace(/[^A-Z0-9.\-]/g, "");
       const sideRaw = get(row, "side").toLowerCase();
       const side = sideRaw.startsWith("buy") ? "buy" : sideRaw.startsWith("sell") ? "sell" : null;
-      const qty = parseFloat(get(row, "qty").replace(/,/g, ""));
-      const price = parseFloat(get(row, "price").replace(/,/g, ""));
-      const fees = parseFloat(get(row, "fees").replace(/,/g, "")) || 0;
+      const qty = parseNum(get(row, "qty"));
+      const price = parseNum(get(row, "price"));
+      const fees = parseNum(get(row, "fees")) || 0;
       const fillTime = parseBrokerTime(get(row, "time"));
 
       if (!symbol) { rejected.push({ row: rowNum, reason: "Missing symbol" }); return; }
@@ -304,6 +304,12 @@ function parseCsvRows(text: string): Record<string, string>[] {
   });
 }
 
+/** Parse a number that may have $ , or other formatting */
+function parseNum(s: string): number {
+  if (!s) return NaN;
+  return parseFloat(s.replace(/[$,\s]/g, ""));
+}
+
 /** Parse "11/14/2025 11:31:56 EST" → ISO string */
 function parseBrokerTime(s: string): string | null {
   if (!s) return null;
@@ -330,9 +336,10 @@ export function parseBrokerCsv(text: string): BrokerParseResult {
   const rejected: { row: number; reason: string }[] = [];
   const fills: ParsedBrokerFill[] = [];
 
-  // Detect Webull: has "filled time" + "avg price" + "filled" columns
+  // Detect Webull: has "filled time" + price column (either "avg price" or "filled avg price" format)
   const sampleKeys = rows.length > 0 ? Object.keys(rows[0]) : [];
-  const isWebull = sampleKeys.includes("filled time") && sampleKeys.includes("avg price");
+  const isWebull = sampleKeys.includes("filled time") &&
+    (sampleKeys.includes("avg price") || sampleKeys.includes("filled avg price"));
   const broker = isWebull ? "Webull" : "Generic";
 
   // Column aliases
@@ -347,18 +354,22 @@ export function parseBrokerCsv(text: string): BrokerParseResult {
   rows.forEach((row, idx) => {
     const rowNum = idx + 2; // 1-based + header
     try {
-      // Webull: only process Filled orders
-      if (isWebull) {
+      // Webull Trade Record export has no Status column — all rows are filled trades.
+      // Webull Order History export has Status — only process Filled ones.
+      if (isWebull && sampleKeys.includes("status")) {
         const status = col(row, "status").toLowerCase();
         if (status !== "filled") return; // skip pending/cancelled silently
       }
       const symbol = col(row, "symbol", "ticker").toUpperCase().replace(/[^A-Z0-9.\-]/g, "");
-      const sideRaw = col(row, "side", "action").toLowerCase();
+      const sideRaw = col(row, "b/s", "side", "action").toLowerCase();
       const side = sideRaw.startsWith("buy") ? "buy" : sideRaw.startsWith("sell") ? "sell" : null;
-      const qty = parseFloat(col(row, "filled", "quantity", "qty", "filled qty"));
-      const price = parseFloat(col(row, "avg price", "average filled price", "price", "fill price", "average price"));
+      const qty = parseNum(col(row, "filled qty", "filled", "quantity", "qty"));
+      const price = parseNum(col(row, "filled avg price", "avg price", "average filled price", "price", "fill price", "average price"));
       const fillTimeRaw = col(row, "filled time", "fill time", "exec time", "execution time", "time", "date");
-      const fees = parseFloat(col(row, "commission", "comm", "fees", "fee")) || 0;
+      // Webull splits fees: Commission + Fee columns
+      const commission = parseNum(col(row, "commission", "comm")) || 0;
+      const fee = parseNum(col(row, "fee", "fees")) || 0;
+      const fees = commission + fee;
 
       if (!symbol) { rejected.push({ row: rowNum, reason: "Missing symbol" }); return; }
       if (!side) { rejected.push({ row: rowNum, reason: `Unknown side: "${sideRaw}"` }); return; }
