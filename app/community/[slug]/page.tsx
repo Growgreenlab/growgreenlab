@@ -182,6 +182,25 @@ export default function CommunityRoomPage() {
     await loadMessages(room.id);
   };
 
+  const banUser = async (msg: CommunityMessage) => {
+    if (!room || !isMod) return;
+    const reason = prompt(`Ban ${msg.author_name} from this room? Enter a reason (or leave blank):`);
+    if (reason === null) return; // cancelled
+    const supabase = createClient();
+    const { error } = await supabase.from("community_bans").insert({
+      user_id: msg.user_id,
+      room_id: room.id,
+      reason: reason || "No reason given",
+      banned_by: userId,
+    });
+    if (error) {
+      setError(error.message);
+    } else {
+      // Also delete their message
+      await deleteMessage(msg);
+    }
+  };
+
   if (loading) {
     return <div style={{ maxWidth: 800, margin: "0 auto", padding: 48, color: "var(--ggl-muted)" }}>Loading…</div>;
   }
@@ -236,6 +255,10 @@ export default function CommunityRoomPage() {
                 {(isMod || m.user_id === userId) && (
                   <button onClick={() => deleteMessage(m)} title="Delete"
                     style={{ background: "none", border: "none", color: "var(--ggl-muted)", cursor: "pointer", fontSize: 13 }}>🗑</button>
+                )}
+                {isMod && m.user_id !== userId && (
+                  <button onClick={() => banUser(m)} title={`Ban ${m.author_name}`}
+                    style={{ background: "none", border: "none", color: "#f87171", cursor: "pointer", fontSize: 13 }}>🚫</button>
                 )}
               </span>
             </div>
