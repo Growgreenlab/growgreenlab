@@ -198,9 +198,16 @@ export default function CommunityRoomPage() {
     return enriched;
   }, [enrichMessages]);
 
-  // Initial load
+  // Initial load — reset everything when switching rooms
   useEffect(() => {
     (async () => {
+      // Clear immediately to prevent showing old room's messages
+      setMessages([]);
+      setActiveTopic(null);
+      activeTopicRef.current = null;
+      setNewMsgCount(0);
+      setRoom(null);
+      setLoading(true);
       const supabase = createClient();
       const { data: { user } } = await supabase.auth.getUser();
       setSignedIn(!!user);
@@ -210,7 +217,7 @@ export default function CommunityRoomPage() {
       if (!roomData) { setLoading(false); return; }
       setRoom(roomData);
       if (user) setIsMod(await isRoomMod(roomData.id));
-      await loadMessages(roomData.id, undefined, activeTopic);
+      await loadMessages(roomData.id, undefined, null);
       setLoading(false);
       setTimeout(scrollBottom, 150);
     })();
@@ -229,6 +236,8 @@ export default function CommunityRoomPage() {
         async (payload) => {
           const newMsg = payload.new as CommunityMessage;
           if (newMsg.is_deleted) return;
+          // Safety: ignore messages from other rooms (stale subscription race)
+          if (newMsg.room_id !== room.id) return;
           // Respect topic filter — don't show messages from other topics
           const currentTopic = activeTopicRef.current;
           if (currentTopic && newMsg.topic !== currentTopic) return;
@@ -249,6 +258,8 @@ export default function CommunityRoomPage() {
         { event: "UPDATE", schema: "public", table: "community_messages", filter: `room_id=eq.${room.id}` },
         async (payload) => {
           const updated = payload.new as CommunityMessage;
+          // Safety: ignore updates from other rooms
+          if (updated.room_id !== room.id) return;
           if (updated.is_deleted) {
             setMessages((prev) => prev.filter((m) => m.id !== updated.id));
           } else {
