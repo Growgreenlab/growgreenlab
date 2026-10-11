@@ -396,6 +396,11 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
 
   // Drawing coordinate helpers. All coordinates are element-relative
   // (relative to the chart div), matching e.clientX - rect.left.
+  // Phase 3: Centralized coordinate adapter (single source of truth).
+  // All drawing interactions — creation, preview, selection, dragging,
+  // anchor editing, labels, hit-testing — use these conversions.
+  // Pointer coordinates are measured relative to the chart element's
+  // bounding rect (not viewport), matching e.clientX - rect.left.
   const drawingCoords = () => {
     const chart = chartRef.current;
     const cs = candleSeriesRef.current;
@@ -409,14 +414,26 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
         const t = chart.timeScale().coordinateToTime(x);
         if (t == null) return null;
         const timeMs = Number(t) * 1000;
-        // Snap to nearest candle timestamp for reliable timeToCoordinate
-        const cs_ = candlesRef.current;
-        if (cs_.length === 0) return timeMs;
-        let best = cs_[0].t;
+        // Snap to nearest candle timestamp for reliable timeToCoordinate.
+        // Uses binary search (O(log n)) instead of linear scan.
+        const arr = candlesRef.current;
+        if (arr.length === 0) return timeMs;
+        let lo = 0, hi = arr.length - 1;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (arr[mid].t < timeMs) lo = mid + 1;
+          else hi = mid;
+        }
+        // lo is the insertion point; check neighbors for closest
+        let best = arr[lo].t;
         let bestDiff = Math.abs(best - timeMs);
-        for (const c of cs_) {
-          const diff = Math.abs(c.t - timeMs);
-          if (diff < bestDiff) { bestDiff = diff; best = c.t; }
+        if (lo > 0) {
+          const diff = Math.abs(arr[lo - 1].t - timeMs);
+          if (diff < bestDiff) { bestDiff = diff; best = arr[lo - 1].t; }
+        }
+        if (lo + 1 < arr.length) {
+          const diff = Math.abs(arr[lo + 1].t - timeMs);
+          if (diff < bestDiff) best = arr[lo + 1].t;
         }
         return best;
       },
