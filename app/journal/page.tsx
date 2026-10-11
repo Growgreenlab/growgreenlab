@@ -3,10 +3,11 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
-import { groupFillsIntoTrades, calcMetrics, fmtPnl, fmtPct, type GroupedTrade, type RawFill } from "../../lib/journal";
+import { groupFillsIntoTrades, calcMetrics, calcRealTrade, fmtPnl, fmtPct, type GroupedTrade, type RawFill, type RealFill, type RealTradeCalc } from "../../lib/journal";
 
 type Tab = "overview" | "trades" | "review" | "calendar";
 type Period = "today" | "week" | "month" | "30d" | "90d" | "ytd" | "all";
+type SourceFilter = "all" | "simulator" | "real";
 
 interface TradeMeta {
   trade_key: string;
@@ -24,18 +25,38 @@ interface TradeMeta {
   would_take_again: boolean | null;
 }
 
-interface ManualTrade {
+interface RealTrade {
   id: string;
   ticker: string;
+  company_name: string | null;
+  broker: string | null;
   trade_date: string;
   direction: "long" | "short";
-  entry_price: number;
-  exit_price: number | null;
+  strategy: string | null;
+  status: "open" | "closed";
+  stop_loss: number | null;
+  target: number | null;
+  float_shares: number | null;
+  relative_volume: number | null;
+  market_conditions: string | null;
+  level2_tas_notes: string | null;
+  fills: RealFill[];
+  calc: RealTradeCalc;
+}
+
+/** Unified trade row for display */
+interface UnifiedTrade {
+  key: string;
+  source: "simulator" | "real";
+  ticker: string;
+  tradeDate: string;
+  direction: "long" | "short";
+  entryPrice: number | null;
+  exitPrice: number | null;
   qty: number;
-  realized_pnl: number | null;
-  setup_tag: string | null;
-  exec_grade: string | null;
-  notes: string | null;
+  realizedPnl: number;
+  isOpen: boolean;
+  rMultiple: number | null;
 }
 
 const SETUPS = ["HOD breakout", "EMA pullback", "VWAP pullback", "Clean breakout", "Weak breakout", "Failed breakout", "Anticipation", "Other"];
@@ -62,10 +83,11 @@ export default function JournalPage() {
   const [period, setPeriod] = useState<Period>("all");
   const [trades, setTrades] = useState<GroupedTrade[]>([]);
   const [metas, setMetas] = useState<Record<string, TradeMeta>>({});
-  const [manual, setManual] = useState<ManualTrade[]>([]);
+  const [realTrades, setRealTrades] = useState<RealTrade[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   // Filters
   const [fTicker, setFTicker] = useState("");
   const [fSetup, setFSetup] = useState("");
@@ -100,19 +122,42 @@ export default function JournalPage() {
       }
       setTrades(allTrades);
 
-      // Fetch annotations
+      // Fetch annotations (shared by simulator + real trades via trade_key)
       const { data: metaRows } = await supabase.from("journal_trade_meta").select("*");
       const metaMap: Record<string, TradeMeta> = {};
       for (const m of metaRows ?? []) metaMap[m.trade_key] = m;
       setMetas(metaMap);
 
-      // Fetch manual trades
-      const { data: manualRows } = await supabase
-        .from("journal_manual_trades")
+      // Fetch real-market trades with their fills
+      const { data: realRows, error: rErr } = await supabase
+        .from("journal_real_trades")
         .select("*")
         .order("trade_date", { ascending: false })
         .limit(500);
-      setManual((manualRows ?? []) as ManualTrade[]);
+      if (rErr) throw new Error(rErr.message);
+
+      const real: RealTrade[] = [];
+      for (const rt of realRows ?? []) {
+        const { data: fills } = await supabase
+          .from("journal_real_fills")
+          .select("*")
+          .eq("trade_id", rt.id)
+          .order("fill_time", { ascending: true });
+        const rf: RealFill[] = (fills ?? []).map((f: any) => ({
+          id: f.id, side: f.side, qty: Number(f.qty), price: Number(f.price),
+          fees: Number(f.fees ?? 0), fill_time: f.fill_time,
+        }));
+        real.push({
+          ...rt,
+          direction: rt.direction as "long" | "short",
+          status: rt.status as "open" | "closed",
+          stop_loss: rt.stop_loss != null ? Number(rt.stop_loss) : null,
+          target: rt.target != null ? Number(rt.target) : null,
+          fills: rf,
+          calc: calcRealTrade(rf, rt.direction, rt.stop_loss != null ? Number(rt.stop_loss) : null, rt.target != null ? Number(rt.target) : null),
+        });
+      }
+      setRealTrades(real);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load journal.");
     } finally {
@@ -122,30 +167,73 @@ export default function JournalPage() {
 
   useEffect(() => { load(); }, []);
 
-  // Filter trades by period
+  // Build unified trade list with source tags
+  const unified: UnifiedTrade[] = useMemo(() => {
+    const sim: UnifiedTrade[] = trades.map((t) => ({
+      key: t.tradeKey,
+      source: "simulator" as const,
+      ticker: t.ticker,
+      tradeDate: t.tradeDate,
+      direction: t.direction,
+      entryPrice: t.entryPrice,
+      exitPrice: t.exitPrice,
+      qty: t.qty,
+      realizedPnl: t.realizedPnl,
+      isOpen: false,
+      rMultiple: t.rMultiple,
+    }));
+    const rl: UnifiedTrade[] = realTrades.map((t) => ({
+      key: `real:${t.id}`,
+      source: "real" as const,
+      ticker: t.ticker,
+      tradeDate: t.trade_date,
+      direction: t.direction,
+      entryPrice: t.calc.avgEntry,
+      exitPrice: null,
+      qty: t.calc.entryQty,
+      realizedPnl: t.calc.netRealized,
+      isOpen: !t.calc.isClosed,
+      rMultiple: t.calc.rMultiple,
+    }));
+    return [...sim, ...rl].sort((a, b) => b.tradeDate.localeCompare(a.tradeDate));
+  }, [trades, realTrades]);
+
+  // Filter by source + period + search
   const filtered = useMemo(() => {
     const start = periodStart(period);
-    return trades.filter((t) => {
+    return unified.filter((t) => {
+      if (sourceFilter !== "all" && t.source !== sourceFilter) return false;
       if (start && new Date(t.tradeDate) < start) return false;
       if (fTicker && !t.ticker.toLowerCase().includes(fTicker.toLowerCase())) return false;
-      if (fSetup && metas[t.tradeKey]?.setup_tag !== fSetup) return false;
+      if (fSetup && metas[t.key]?.setup_tag !== fSetup) return false;
       if (fWinLoss === "win" && t.realizedPnl <= 0) return false;
       if (fWinLoss === "loss" && t.realizedPnl >= 0) return false;
       return true;
     });
-  }, [trades, period, fTicker, fSetup, fWinLoss, metas]);
+  }, [unified, sourceFilter, period, fTicker, fSetup, fWinLoss, metas]);
 
-  const metrics = useMemo(() => calcMetrics(filtered), [filtered]);
+  // Closed trades only for metrics
+  const closedFiltered = useMemo(() => filtered.filter((t) => !t.isOpen), [filtered]);
+  const metrics = useMemo(() => calcMetrics(closedFiltered), [closedFiltered]);
+
+  // Per-source metrics
+  const simMetrics = useMemo(() => calcMetrics(closedFiltered.filter((t) => t.source === "simulator")), [closedFiltered]);
+  const realMetrics = useMemo(() => calcMetrics(closedFiltered.filter((t) => t.source === "real")), [closedFiltered]);
 
   // Cumulative P&L for chart (simple SVG)
   const cumPnl = useMemo(() => {
-    const sorted = [...filtered].sort((a, b) => new Date(a.tradeDate).getTime() - new Date(b.tradeDate).getTime());
+    const sorted = [...closedFiltered].sort((a, b) => new Date(a.tradeDate).getTime() - new Date(b.tradeDate).getTime());
     let cum = 0;
     return sorted.map((t) => { cum += t.realizedPnl; return cum; });
-  }, [filtered]);
+  }, [closedFiltered]);
 
-  const selected = selectedKey ? trades.find((t) => t.tradeKey === selectedKey) : null;
+  const selected = selectedKey
+    ? (selectedKey.startsWith("real:")
+        ? realTrades.find((t) => `real:${t.id}` === selectedKey) ?? null
+        : trades.find((t) => t.tradeKey === selectedKey) ?? null)
+    : null;
   const selectedMeta = selectedKey ? metas[selectedKey] : null;
+  const isRealSelected = selectedKey?.startsWith("real:") ?? false;
 
   if (loading) return <div className="wrap" style={{ padding: 40 }}><p className="hint">Loading journal…</p></div>;
   if (error) return <div className="wrap" style={{ padding: 40 }}><div className="err">{error}</div><p style={{ marginTop: 12 }}><Link href="/replay">← Back to simulator</Link></p></div>;
@@ -155,7 +243,7 @@ export default function JournalPage() {
       <h2 style={{ margin: "0 0 4px" }}>Trade Journal</h2>
       <p className="hint" style={{ margin: "0 0 16px" }}>Your Trade DNA — every trade, graded and reviewed.</p>
 
-      <div className="tabs" style={{ marginBottom: 20 }}>
+      <div className="tabs" style={{ marginBottom: 12 }}>
         {(["overview", "trades", "review", "calendar"] as Tab[]).map((t) => (
           <button key={t} className={`tab ${tab === t ? "active" : ""}`} onClick={() => setTab(t)}>
             {t === "overview" ? "Overview" : t === "trades" ? "All Trades" : t === "review" ? "Trade Review" : "Calendar"}
@@ -163,21 +251,50 @@ export default function JournalPage() {
         ))}
       </div>
 
-      {tab === "overview" && <OverviewTab metrics={metrics} cumPnl={cumPnl} trades={filtered} period={period} setPeriod={setPeriod} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} />}
-      {tab === "trades" && <TradesTab trades={filtered} metas={metas} fTicker={fTicker} setFTicker={setFTicker} fSetup={fSetup} setFSetup={setFSetup} fWinLoss={fWinLoss} setFWinLoss={setFWinLoss} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} />}
-      {tab === "review" && <ReviewTab trade={selected} meta={selectedMeta} onSaved={load} />}
-      {tab === "calendar" && <CalendarTab trades={filtered} onSelectDay={() => {}} />}
+      {/* Source filter */}
+      <div style={{ display: "flex", gap: 6, marginBottom: 20, alignItems: "center", flexWrap: "wrap" }}>
+        <span style={{ fontSize: 12, color: "var(--muted)" }}>Source:</span>
+        {([["all", "All Trades"], ["simulator", "Simulator"], ["real", "Real Market"]] as [SourceFilter, string][]).map(([s, label]) => (
+          <button key={s} onClick={() => setSourceFilter(s)}
+            style={{
+              padding: "4px 12px", borderRadius: 16, fontSize: 12, cursor: "pointer",
+              background: sourceFilter === s ? "rgba(16,185,129,0.2)" : "rgba(255,255,255,0.05)",
+              border: sourceFilter === s ? "1px solid rgba(16,185,129,0.5)" : "1px solid rgba(255,255,255,0.1)",
+              color: sourceFilter === s ? "#34d399" : "var(--muted)",
+            }}>{label}</button>
+        ))}
+      </div>
+
+      {tab === "overview" && <OverviewTab metrics={metrics} simMetrics={simMetrics} realMetrics={realMetrics} cumPnl={cumPnl} trades={filtered} period={period} setPeriod={setPeriod} sourceFilter={sourceFilter} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} />}
+      {tab === "trades" && <TradesTab trades={filtered} metas={metas} fTicker={fTicker} setFTicker={setFTicker} fSetup={fSetup} setFSetup={setFSetup} fWinLoss={fWinLoss} setFWinLoss={setFWinLoss} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} onRealTradeSaved={load} />}
+      {tab === "review" && <ReviewTab tradeKey={selectedKey} simTrade={!isRealSelected ? (selected as GroupedTrade | null) : null} realTrade={isRealSelected ? (selected as RealTrade | null) : null} meta={selectedMeta} onSaved={load} />}
+      {tab === "calendar" && <CalendarTab trades={closedFiltered} onSelectDay={() => {}} />}
     </div>
   );
 }
 
 /* ---------------- Overview ---------------- */
-function OverviewTab({ metrics, cumPnl, trades, period, setPeriod, onSelect }: {
+function SourceBadge({ source }: { source: "simulator" | "real" }) {
+  const isReal = source === "real";
+  return (
+    <span style={{
+      fontSize: 10, padding: "2px 8px", borderRadius: 10, fontWeight: 600,
+      background: isReal ? "rgba(96,165,250,0.15)" : "rgba(16,185,129,0.12)",
+      border: isReal ? "1px solid rgba(96,165,250,0.4)" : "1px solid rgba(16,185,129,0.3)",
+      color: isReal ? "#93c5fd" : "#34d399",
+    }}>{isReal ? "Real Market" : "Simulator"}</span>
+  );
+}
+
+function OverviewTab({ metrics, simMetrics, realMetrics, cumPnl, trades, period, setPeriod, sourceFilter, onSelect }: {
   metrics: ReturnType<typeof calcMetrics>;
+  simMetrics: ReturnType<typeof calcMetrics>;
+  realMetrics: ReturnType<typeof calcMetrics>;
   cumPnl: number[];
-  trades: GroupedTrade[];
+  trades: UnifiedTrade[];
   period: Period;
   setPeriod: (p: Period) => void;
+  sourceFilter: SourceFilter;
   onSelect: (k: string) => void;
 }) {
   const periods: { id: Period; label: string }[] = [
@@ -242,13 +359,39 @@ function OverviewTab({ metrics, cumPnl, trades, period, setPeriod, onSelect }: {
           <div className="card" style={{ padding: 16 }}>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Recent Trades</div>
             {trades.slice(0, 10).map((t) => (
-              <div key={t.tradeKey} onClick={() => onSelect(t.tradeKey)}
-                style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid rgba(255,255,255,0.06)", cursor: "pointer" }}>
-                <span><b>{t.ticker}</b> <span className="hint">{t.tradeDate} · {t.direction}</span></span>
+              <div key={t.key} onClick={() => onSelect(t.key)}
+                style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: "1px solid rgba(255,255,255,0.06)", cursor: "pointer" }}>
+                <span><b>{t.ticker}</b> <span className="hint">{t.tradeDate} · {t.direction}</span> <SourceBadge source={t.source} />{t.isOpen && <span style={{ fontSize: 10, color: "#fbbf24", marginLeft: 6 }}>OPEN</span>}</span>
                 <span className="num" style={{ color: t.realizedPnl > 0 ? "var(--emerald-bright)" : t.realizedPnl < 0 ? "#f6465d" : "var(--muted)", fontWeight: 600 }}>{fmtPnl(t.realizedPnl)}</span>
               </div>
             ))}
           </div>
+
+          {/* Per-source breakdown */}
+          {sourceFilter === "all" && (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 10, marginTop: 16 }}>
+              <div className="card" style={{ padding: 16 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                  <SourceBadge source="simulator" />
+                  <span className="hint">{simMetrics.totalTrades} trades</span>
+                </div>
+                <div className="num" style={{ fontSize: 22, fontWeight: 700, color: simMetrics.netPnl > 0 ? "var(--emerald-bright)" : simMetrics.netPnl < 0 ? "#f6465d" : "var(--text)" }}>
+                  {fmtPnl(simMetrics.netPnl)}
+                </div>
+                <div className="hint" style={{ marginTop: 4 }}>Win rate {fmtPct(simMetrics.winRate)} · PF {simMetrics.profitFactor == null ? "—" : simMetrics.profitFactor === Infinity ? "∞" : simMetrics.profitFactor.toFixed(2)}</div>
+              </div>
+              <div className="card" style={{ padding: 16 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                  <SourceBadge source="real" />
+                  <span className="hint">{realMetrics.totalTrades} trades</span>
+                </div>
+                <div className="num" style={{ fontSize: 22, fontWeight: 700, color: realMetrics.netPnl > 0 ? "var(--emerald-bright)" : realMetrics.netPnl < 0 ? "#f6465d" : "var(--text)" }}>
+                  {fmtPnl(realMetrics.netPnl)}
+                </div>
+                <div className="hint" style={{ marginTop: 4 }}>Win rate {fmtPct(realMetrics.winRate)} · PF {realMetrics.profitFactor == null ? "—" : realMetrics.profitFactor === Infinity ? "∞" : realMetrics.profitFactor.toFixed(2)}</div>
+              </div>
+            </div>
+          )}
         </>
       )}
     </div>
@@ -256,14 +399,15 @@ function OverviewTab({ metrics, cumPnl, trades, period, setPeriod, onSelect }: {
 }
 
 /* ---------------- All Trades ---------------- */
-function TradesTab({ trades, metas, fTicker, setFTicker, fSetup, setFSetup, fWinLoss, setFWinLoss, onSelect }: {
-  trades: GroupedTrade[]; metas: Record<string, TradeMeta>;
+function TradesTab({ trades, metas, fTicker, setFTicker, fSetup, setFSetup, fWinLoss, setFWinLoss, onSelect, onRealTradeSaved }: {
+  trades: UnifiedTrade[]; metas: Record<string, TradeMeta>;
   fTicker: string; setFTicker: (v: string) => void;
   fSetup: string; setFSetup: (v: string) => void;
   fWinLoss: string; setFWinLoss: (v: string) => void;
   onSelect: (k: string) => void;
+  onRealTradeSaved: () => void;
 }) {
-  const [showManual, setShowManual] = useState(false);
+  const [showRealForm, setShowRealForm] = useState(false);
   return (
     <div>
       <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
@@ -277,31 +421,31 @@ function TradesTab({ trades, metas, fTicker, setFTicker, fSetup, setFSetup, fWin
           <option value="win">Winners</option>
           <option value="loss">Losers</option>
         </select>
-        <button className="btn" onClick={() => setShowManual((v) => !v)} style={{ marginLeft: "auto" }}>
-          {showManual ? "Cancel" : "+ Manual Trade"}
+        <button className="btn primary" onClick={() => setShowRealForm((v) => !v)} style={{ marginLeft: "auto" }}>
+          {showRealForm ? "Cancel" : "+ Add Real Trade"}
         </button>
       </div>
-      {showManual && <ManualTradeForm onSaved={() => setShowManual(false)} />}
+      {showRealForm && <RealTradeForm onSaved={() => { setShowRealForm(false); onRealTradeSaved(); }} />}
       <div className="card" style={{ padding: 0, overflowX: "auto" }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
           <thead>
             <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)", textAlign: "left" }}>
-              {["Date", "Symbol", "Dir", "Entry", "Exit", "Qty", "P&L", "Setup", "Grade"].map((h) => (
+              {["Date", "Symbol", "Src", "Dir", "Entry", "Qty", "P&L", "Setup", "Grade"].map((h) => (
                 <th key={h} style={{ padding: "10px 12px", color: "var(--muted)", fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {trades.map((t) => {
-              const meta = metas[t.tradeKey];
+              const meta = metas[t.key];
               return (
-                <tr key={t.tradeKey} onClick={() => onSelect(t.tradeKey)}
+                <tr key={t.key} onClick={() => onSelect(t.key)}
                   style={{ borderBottom: "1px solid rgba(255,255,255,0.05)", cursor: "pointer" }}>
                   <td style={{ padding: "10px 12px" }}>{t.tradeDate}</td>
                   <td style={{ padding: "10px 12px", fontWeight: 600 }}>{t.ticker}</td>
-                  <td style={{ padding: "10px 12px" }}>{t.direction}</td>
-                  <td className="num" style={{ padding: "10px 12px" }}>${t.entryPrice.toFixed(2)}</td>
-                  <td className="num" style={{ padding: "10px 12px" }}>${t.exitPrice.toFixed(2)}</td>
+                  <td style={{ padding: "10px 12px" }}><SourceBadge source={t.source} /></td>
+                  <td style={{ padding: "10px 12px" }}>{t.direction}{t.isOpen && <span style={{ fontSize: 10, color: "#fbbf24", marginLeft: 4 }}>OPEN</span>}</td>
+                  <td className="num" style={{ padding: "10px 12px" }}>{t.entryPrice != null ? `$${t.entryPrice.toFixed(2)}` : "—"}</td>
                   <td className="num" style={{ padding: "10px 12px" }}>{t.qty}</td>
                   <td className="num" style={{ padding: "10px 12px", fontWeight: 700, color: t.realizedPnl > 0 ? "var(--emerald-bright)" : t.realizedPnl < 0 ? "#f6465d" : "var(--muted)" }}>{fmtPnl(t.realizedPnl)}</td>
                   <td style={{ padding: "10px 12px" }}>{meta?.setup_tag ?? "—"}</td>
@@ -318,7 +462,13 @@ function TradesTab({ trades, metas, fTicker, setFTicker, fSetup, setFSetup, fWin
 }
 
 /* ---------------- Trade Review ---------------- */
-function ReviewTab({ trade, meta, onSaved }: { trade: GroupedTrade | null | undefined; meta: TradeMeta | null | undefined; onSaved: () => void }) {
+function ReviewTab({ tradeKey, simTrade, realTrade, meta, onSaved }: {
+  tradeKey: string | null;
+  simTrade: GroupedTrade | null;
+  realTrade: RealTrade | null;
+  meta: TradeMeta | null | undefined;
+  onSaved: () => void;
+}) {
   const [form, setForm] = useState<Partial<TradeMeta>>({});
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -327,15 +477,26 @@ function ReviewTab({ trade, meta, onSaved }: { trade: GroupedTrade | null | unde
     if (meta) setForm(meta);
     else setForm({});
     setMsg(null);
-  }, [trade?.tradeKey]);
+  }, [tradeKey]);
 
-  if (!trade) {
+  if (!simTrade && !realTrade) {
     return (
       <div className="card" style={{ padding: 32, textAlign: "center" }}>
         <p className="hint">Select a trade from All Trades or Overview to review it.</p>
       </div>
     );
   }
+
+  // Unified display values
+  const isReal = !!realTrade;
+  const displayTicker = isReal ? realTrade!.ticker : simTrade!.ticker;
+  const displayDate = isReal ? realTrade!.trade_date : simTrade!.tradeDate;
+  const displayDir = isReal ? realTrade!.direction : simTrade!.direction;
+  const displayPnl = isReal ? realTrade!.calc.netRealized : simTrade!.realizedPnl;
+  const displayEntry = isReal ? realTrade!.calc.avgEntry : simTrade!.entryPrice;
+  const displayQty = isReal ? realTrade!.calc.entryQty : simTrade!.qty;
+  const displayR = isReal ? realTrade!.calc.rMultiple : simTrade!.rMultiple;
+  const tradeKeyVal = tradeKey!;
 
   const save = async () => {
     setSaving(true); setMsg(null);
@@ -345,8 +506,8 @@ function ReviewTab({ trade, meta, onSaved }: { trade: GroupedTrade | null | unde
       if (!user) throw new Error("Not signed in.");
       const payload = {
         user_id: user.id,
-        session_id: trade.sessionId,
-        trade_key: trade.tradeKey,
+        session_id: isReal ? null : simTrade!.sessionId,
+        trade_key: tradeKeyVal,
         setup_tag: form.setup_tag ?? null,
         hod_class: form.hod_class ?? null,
         exec_grade: form.exec_grade ?? null,
@@ -396,19 +557,39 @@ function ReviewTab({ trade, meta, onSaved }: { trade: GroupedTrade | null | unde
     <div style={{ display: "grid", gap: 16, maxWidth: 720 }}>
       <div className="card" style={{ padding: 16 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-          <h3 style={{ margin: 0 }}>{trade.ticker} <span className="hint">· {trade.tradeDate} · {trade.direction}</span></h3>
-          <span className="num" style={{ fontSize: 22, fontWeight: 700, color: trade.realizedPnl > 0 ? "var(--emerald-bright)" : trade.realizedPnl < 0 ? "#f6465d" : "var(--muted)" }}>
-            {fmtPnl(trade.realizedPnl)}
+          <h3 style={{ margin: 0 }}>{displayTicker} <span className="hint">· {displayDate} · {displayDir}</span> <SourceBadge source={isReal ? "real" : "simulator"} /></h3>
+          <span className="num" style={{ fontSize: 22, fontWeight: 700, color: displayPnl > 0 ? "var(--emerald-bright)" : displayPnl < 0 ? "#f6465d" : "var(--muted)" }}>
+            {fmtPnl(displayPnl)}
           </span>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 8, fontSize: 13 }}>
-          <div><span className="hint">Entry</span><div className="num">${trade.entryPrice.toFixed(2)}</div></div>
-          <div><span className="hint">Exit</span><div className="num">${trade.exitPrice.toFixed(2)}</div></div>
-          <div><span className="hint">Qty</span><div className="num">{trade.qty}</div></div>
-          <div><span className="hint">Fills</span><div className="num">{trade.fills.length}</div></div>
+          <div><span className="hint">Avg Entry</span><div className="num">{displayEntry != null ? `$${displayEntry.toFixed(2)}` : "—"}</div></div>
+          <div><span className="hint">Qty</span><div className="num">{displayQty}</div></div>
+          <div><span className="hint">R-multiple</span><div className="num">{displayR != null ? displayR.toFixed(2) : "—"}</div></div>
+          {isReal && (
+            <>
+              <div><span className="hint">Broker</span><div>{realTrade!.broker ?? "—"}</div></div>
+              <div><span className="hint">Fees</span><div className="num">{fmtPnl(-realTrade!.calc.totalFees)}</div></div>
+              <div><span className="hint">Gross P&L</span><div className="num">{fmtPnl(realTrade!.calc.grossRealized)}</div></div>
+            </>
+          )}
+          {!isReal && <div><span className="hint">Fills</span><div className="num">{simTrade!.fills.length}</div></div>}
         </div>
-        {trade.sessionId && (
-          <p style={{ marginTop: 12 }}><Link href={`/replay?session=${trade.sessionId}`} style={{ fontSize: 13 }}>↩ Open replay session</Link></p>
+        {isReal && realTrade!.fills.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Fills</div>
+            {realTrade!.fills.map((f) => (
+              <div key={f.id} style={{ display: "flex", gap: 12, fontSize: 13, padding: "4px 0", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+                <span style={{ color: f.side === "buy" ? "var(--emerald-bright)" : "#f6465d", fontWeight: 600, textTransform: "uppercase", width: 36 }}>{f.side}</span>
+                <span className="num">{f.qty} @ ${Number(f.price).toFixed(2)}</span>
+                {f.fees > 0 && <span className="hint">fees ${Number(f.fees).toFixed(2)}</span>}
+                {f.fill_time && <span className="hint">{new Date(f.fill_time).toLocaleTimeString()}</span>}
+              </div>
+            ))}
+          </div>
+        )}
+        {!isReal && simTrade!.sessionId && (
+          <p style={{ marginTop: 12 }}><Link href={`/replay?session=${simTrade!.sessionId}`} style={{ fontSize: 13 }}>↩ Open replay session</Link></p>
         )}
       </div>
 
@@ -493,48 +674,112 @@ function ReviewTab({ trade, meta, onSaved }: { trade: GroupedTrade | null | unde
   );
 }
 
-/* ---------------- Manual Trade Form ---------------- */
-function ManualTradeForm({ onSaved }: { onSaved: () => void }) {
+/* ---------------- Real Trade Form ---------------- */
+function RealTradeForm({ onSaved }: { onSaved: () => void }) {
   const [ticker, setTicker] = useState("");
+  const [company, setCompany] = useState("");
+  const [broker, setBroker] = useState("Webull");
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [direction, setDirection] = useState<"long" | "short">("long");
-  const [entry, setEntry] = useState("");
-  const [exit, setExit] = useState("");
-  const [qty, setQty] = useState("");
+  const [strategy, setStrategy] = useState("");
+  // Fills: start with one entry fill
+  const [fills, setFills] = useState<{ side: "buy" | "sell"; qty: string; price: string; fees: string; time: string }[]>([
+    { side: "buy", qty: "", price: "", fees: "", time: "" },
+  ]);
+  const [stopLoss, setStopLoss] = useState("");
+  const [target, setTarget] = useState("");
+  const [floatShares, setFloatShares] = useState("");
+  const [rvol, setRvol] = useState("");
+  const [marketCond, setMarketCond] = useState("");
+  const [l2tas, setL2Tas] = useState("");
   const [setup, setSetup] = useState("");
+  const [hodClass, setHodClass] = useState("");
+  const [grade, setGrade] = useState("");
+  const [entryReason, setEntryReason] = useState("");
   const [notes, setNotes] = useState("");
+  const [lessons, setLessons] = useState("");
+  const [emotions, setEmotions] = useState<string[]>([]);
+  const [mistakes, setMistakes] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
+  const addFill = (side: "buy" | "sell") =>
+    setFills([...fills, { side, qty: "", price: "", fees: "", time: "" }]);
+  const updateFill = (i: number, k: string, v: string) =>
+    setFills(fills.map((f, j) => (j === i ? { ...f, [k]: v } : f)));
+  const removeFill = (i: number) => setFills(fills.filter((_, j) => j !== i));
+
+  const toggle = (arr: string[], set: (v: string[]) => void, val: string) =>
+    set(arr.includes(val) ? arr.filter((x) => x !== val) : [...arr, val]);
+
+  // Live preview of calculations
+  const previewFills: RealFill[] = fills
+    .filter((f) => f.qty && f.price)
+    .map((f, i) => ({ id: `p${i}`, side: f.side, qty: Number(f.qty), price: Number(f.price), fees: Number(f.fees || 0), fill_time: f.time || null }));
+  const preview = previewFills.length > 0
+    ? calcRealTrade(previewFills, direction, stopLoss ? Number(stopLoss) : null, target ? Number(target) : null)
+    : null;
+
   const save = async () => {
-    if (!ticker.trim() || !entry || !qty) { setMsg("Ticker, entry price, and quantity are required."); return; }
+    if (!ticker.trim()) { setMsg("Ticker is required."); return; }
+    const validFills = fills.filter((f) => f.qty && f.price && Number(f.qty) > 0 && Number(f.price) > 0);
+    if (validFills.length === 0) { setMsg("Add at least one fill with quantity and price."); return; }
     setSaving(true); setMsg(null);
     try {
       const supabase = createClient();
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Not signed in.");
-      const entryP = Number(entry), exitP = exit ? Number(exit) : null, q = Number(qty);
-      if (!isFinite(entryP) || entryP <= 0 || !isFinite(q) || q <= 0) throw new Error("Invalid entry price or quantity.");
-      let pnl: number | null = null;
-      if (exitP != null && isFinite(exitP)) {
-        pnl = direction === "long" ? (exitP - entryP) * q : (entryP - exitP) * q;
-      }
-      const { error } = await supabase.from("journal_manual_trades").insert({
+
+      const { data: trade, error: tErr } = await supabase.from("journal_real_trades").insert({
         user_id: user.id,
         ticker: ticker.trim().toUpperCase(),
+        company_name: company.trim() || null,
+        broker: broker.trim() || null,
         trade_date: date,
         direction,
-        entry_price: entryP,
-        exit_price: exitP,
-        qty: q,
-        realized_pnl: pnl,
+        strategy: strategy.trim() || null,
+        stop_loss: stopLoss ? Number(stopLoss) : null,
+        target: target ? Number(target) : null,
+        float_shares: floatShares ? Number(floatShares) : null,
+        relative_volume: rvol ? Number(rvol) : null,
+        market_conditions: marketCond.trim() || null,
+        level2_tas_notes: l2tas.trim() || null,
+      }).select("id").single();
+      if (tErr) throw new Error(tErr.message);
+
+      const fillRows = validFills.map((f) => ({
+        trade_id: trade.id,
+        user_id: user.id,
+        side: f.side,
+        qty: Number(f.qty),
+        price: Number(f.price),
+        fees: f.fees ? Number(f.fees) : 0,
+        fill_time: f.time ? new Date(`${date}T${f.time}`).toISOString() : null,
+        note: null,
+      }));
+      const { error: fErr } = await supabase.from("journal_real_fills").insert(fillRows);
+      if (fErr) throw new Error(fErr.message);
+
+      // Save Trade DNA annotations via shared meta table
+      const tradeKey = `real:${trade.id}`;
+      const { error: mErr } = await supabase.from("journal_trade_meta").upsert({
+        user_id: user.id,
+        session_id: null,
+        trade_key: tradeKey,
         setup_tag: setup || null,
-        notes: notes || null,
-      });
-      if (error) throw new Error(error.message);
+        hod_class: hodClass || null,
+        exec_grade: grade || null,
+        entry_reasoning: entryReason.trim() || null,
+        emotional_tags: emotions,
+        mistakes,
+        notes: notes.trim() || null,
+        lessons: lessons.trim() || null,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: "user_id,trade_key" });
+      if (mErr) throw new Error(mErr.message);
+
       setMsg("Saved.");
       onSaved();
-      window.location.reload();
     } catch (e) {
       setMsg(e instanceof Error ? e.message : "Save failed.");
     } finally {
@@ -542,21 +787,97 @@ function ManualTradeForm({ onSaved }: { onSaved: () => void }) {
     }
   };
 
+  const chip = (arr: string[], set: (v: string[]) => void, val: string, options: string[]) =>
+    options.map((o) => {
+      const active = arr.includes(o);
+      return (
+        <button key={o} type="button" onClick={() => toggle(arr, set, o)}
+          style={{
+            padding: "4px 10px", borderRadius: 20, fontSize: 12, cursor: "pointer",
+            background: active ? "rgba(16,185,129,0.2)" : "rgba(255,255,255,0.05)",
+            border: active ? "1px solid rgba(16,185,129,0.5)" : "1px solid rgba(255,255,255,0.1)",
+            color: active ? "#34d399" : "var(--muted)",
+          }}>{o}</button>
+      );
+    });
+
+  const field = { marginBottom: 0 };
+
   return (
     <div className="card" style={{ padding: 16, marginBottom: 16 }}>
-      <h4 style={{ margin: "0 0 12px" }}>Add Manual Trade</h4>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 12 }}>
-        <div className="field"><label>Ticker *</label><input className="input mono" value={ticker} onChange={(e) => setTicker(e.target.value.toUpperCase())} placeholder="AAPL" /></div>
-        <div className="field"><label>Date *</label><input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} /></div>
-        <div className="field"><label>Direction</label><select className="input" value={direction} onChange={(e) => setDirection(e.target.value as "long" | "short")}><option value="long">Long</option><option value="short">Short</option></select></div>
-        <div className="field"><label>Entry Price *</label><input className="input num" type="number" step="any" value={entry} onChange={(e) => setEntry(e.target.value)} /></div>
-        <div className="field"><label>Exit Price</label><input className="input num" type="number" step="any" value={exit} onChange={(e) => setExit(e.target.value)} placeholder="—" /></div>
-        <div className="field"><label>Quantity *</label><input className="input num" type="number" step="any" value={qty} onChange={(e) => setQty(e.target.value)} /></div>
-        <div className="field"><label>Setup</label><select className="input" value={setup} onChange={(e) => setSetup(e.target.value)}><option value="">—</option>{SETUPS.map((s) => <option key={s} value={s}>{s}</option>)}</select></div>
+      <h4 style={{ margin: "0 0 4px" }}>Add Real Trade</h4>
+      <p className="hint" style={{ margin: "0 0 16px" }}>From your broker — never touches the simulator.</p>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 12, marginBottom: 16 }}>
+        <div className="field" style={field}><label>Ticker *</label><input className="input mono" value={ticker} onChange={(e) => setTicker(e.target.value.toUpperCase())} placeholder="AAPL" /></div>
+        <div className="field" style={field}><label>Company</label><input className="input" value={company} onChange={(e) => setCompany(e.target.value)} placeholder="—" /></div>
+        <div className="field" style={field}><label>Broker</label><input className="input" value={broker} onChange={(e) => setBroker(e.target.value)} /></div>
+        <div className="field" style={field}><label>Date *</label><input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} /></div>
+        <div className="field" style={field}><label>Direction</label><select className="input" value={direction} onChange={(e) => setDirection(e.target.value as "long" | "short")}><option value="long">Long</option><option value="short">Short</option></select></div>
+        <div className="field" style={field}><label>Strategy</label><input className="input" value={strategy} onChange={(e) => setStrategy(e.target.value)} placeholder="HOD breakout…" /></div>
       </div>
-      <div className="field" style={{ marginTop: 12 }}><label>Notes</label><textarea className="input" rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} /></div>
-      <div style={{ marginTop: 12 }}>
-        <button className="btn primary" onClick={save} disabled={saving}>{saving ? "Saving…" : "Save Trade"}</button>
+
+      <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>Fills <span className="hint">(multiple entries & partial exits)</span></div>
+      {fills.map((f, i) => (
+        <div key={i} style={{ display: "grid", gridTemplateColumns: "80px 1fr 1fr 1fr 110px 32px", gap: 8, marginBottom: 8, alignItems: "end" }}>
+          <div className="field" style={field}><label>Side</label>
+            <select className="input" value={f.side} onChange={(e) => updateFill(i, "side", e.target.value)}>
+              <option value="buy">Buy</option><option value="sell">Sell</option>
+            </select></div>
+          <div className="field" style={field}><label>Qty *</label><input className="input num" type="number" step="any" value={f.qty} onChange={(e) => updateFill(i, "qty", e.target.value)} /></div>
+          <div className="field" style={field}><label>Price *</label><input className="input num" type="number" step="any" value={f.price} onChange={(e) => updateFill(i, "price", e.target.value)} /></div>
+          <div className="field" style={field}><label>Fees $</label><input className="input num" type="number" step="any" value={f.fees} onChange={(e) => updateFill(i, "fees", e.target.value)} placeholder="0" /></div>
+          <div className="field" style={field}><label>Time</label><input className="input" type="time" value={f.time} onChange={(e) => updateFill(i, "time", e.target.value)} /></div>
+          <button className="btn" onClick={() => removeFill(i)} disabled={fills.length === 1} style={{ height: 38 }}>×</button>
+        </div>
+      ))}
+      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+        <button className="btn" onClick={() => addFill(direction === "long" ? "buy" : "sell")}>+ Add entry</button>
+        <button className="btn" onClick={() => addFill(direction === "long" ? "sell" : "buy")}>+ Add exit</button>
+      </div>
+
+      {preview && (
+        <div className="card" style={{ padding: 12, marginBottom: 16, background: "rgba(16,185,129,0.04)" }}>
+          <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Live Preview</div>
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 13 }}>
+            <span>Avg entry <b className="num">{preview.avgEntry != null ? `$${preview.avgEntry.toFixed(2)}` : "—"}</b></span>
+            <span>Gross <b className="num" style={{ color: preview.grossRealized >= 0 ? "var(--emerald-bright)" : "#f6465d" }}>{fmtPnl(preview.grossRealized)}</b></span>
+            <span>Fees <b className="num">{fmtPnl(-preview.totalFees)}</b></span>
+            <span>Net <b className="num" style={{ color: preview.netRealized >= 0 ? "var(--emerald-bright)" : "#f6465d" }}>{fmtPnl(preview.netRealized)}</b></span>
+            {preview.openQty > 0 && <span style={{ color: "#fbbf24" }}>Open: {preview.openQty} shares</span>}
+            {preview.rMultiple != null && <span>R <b className="num">{preview.rMultiple.toFixed(2)}</b></span>}
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 12, marginBottom: 16 }}>
+        <div className="field" style={field}><label>Stop Loss</label><input className="input num" type="number" step="any" value={stopLoss} onChange={(e) => setStopLoss(e.target.value)} /></div>
+        <div className="field" style={field}><label>Target</label><input className="input num" type="number" step="any" value={target} onChange={(e) => setTarget(e.target.value)} /></div>
+        <div className="field" style={field}><label>Float</label><input className="input num" type="number" step="any" value={floatShares} onChange={(e) => setFloatShares(e.target.value)} placeholder="—" /></div>
+        <div className="field" style={field}><label>Rel Volume</label><input className="input num" type="number" step="any" value={rvol} onChange={(e) => setRvol(e.target.value)} placeholder="—" /></div>
+        <div className="field" style={field}><label>Setup</label><select className="input" value={setup} onChange={(e) => setSetup(e.target.value)}><option value="">—</option>{SETUPS.map((s) => <option key={s} value={s}>{s}</option>)}</select></div>
+        <div className="field" style={field}><label>HOD Class</label><select className="input" value={hodClass} onChange={(e) => setHodClass(e.target.value)}><option value="">—</option>{HOD_CLASSES.map((c) => <option key={c} value={c}>{c}</option>)}</select></div>
+        <div className="field" style={field}><label>Exec Grade</label><select className="input" value={grade} onChange={(e) => setGrade(e.target.value)}><option value="">—</option>{GRADES.map((g) => <option key={g} value={g}>{g}</option>)}</select></div>
+      </div>
+
+      <div style={{ display: "grid", gap: 12, marginBottom: 16 }}>
+        <div className="field" style={field}><label>Entry reasoning</label><textarea className="input" rows={2} value={entryReason} onChange={(e) => setEntryReason(e.target.value)} /></div>
+        <div className="field" style={field}><label>Market conditions</label><textarea className="input" rows={2} value={marketCond} onChange={(e) => setMarketCond(e.target.value)} placeholder="Spy trend, sector strength…" /></div>
+        <div className="field" style={field}><label>Level 2 / Time & Sales notes</label><textarea className="input" rows={2} value={l2tas} onChange={(e) => setL2Tas(e.target.value)} placeholder="Bid stacking, large prints…" /></div>
+        <div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>Emotional state</div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{chip(emotions, setEmotions, "", EMOTIONS)}</div>
+        </div>
+        <div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>Mistakes</div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{chip(mistakes, setMistakes, "", MISTAKES)}</div>
+        </div>
+        <div className="field" style={field}><label>Notes</label><textarea className="input" rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} /></div>
+        <div className="field" style={field}><label>Lessons learned</label><textarea className="input" rows={2} value={lessons} onChange={(e) => setLessons(e.target.value)} /></div>
+      </div>
+
+      <div>
+        <button className="btn primary big" onClick={save} disabled={saving}>{saving ? "Saving…" : "Save Real Trade"}</button>
         {msg && <span style={{ marginLeft: 12, fontSize: 13 }}>{msg}</span>}
       </div>
     </div>
@@ -564,7 +885,7 @@ function ManualTradeForm({ onSaved }: { onSaved: () => void }) {
 }
 
 /* ---------------- Calendar ---------------- */
-function CalendarTab({ trades, onSelectDay }: { trades: GroupedTrade[]; onSelectDay: (d: string) => void }) {
+function CalendarTab({ trades, onSelectDay }: { trades: UnifiedTrade[]; onSelectDay: (d: string) => void }) {
   const [month, setMonth] = useState(() => { const d = new Date(); return { y: d.getFullYear(), m: d.getMonth() }; });
 
   const byDay = useMemo(() => {

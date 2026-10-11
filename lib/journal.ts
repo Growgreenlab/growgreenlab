@@ -167,3 +167,112 @@ export function fmtPct(n: number | null): string {
   if (n == null || !isFinite(n)) return "—";
   return `${n.toFixed(1)}%`;
 }
+
+/* ================= Real-market trades: FIFO accounting ================= */
+
+export interface RealFill {
+  id: string;
+  side: "buy" | "sell";
+  qty: number;
+  price: number;
+  fees: number;
+  fill_time: string | null;
+}
+
+export interface RealTradeCalc {
+  /** Weighted average entry price across all entry fills */
+  avgEntry: number | null;
+  /** Total entry quantity */
+  entryQty: number;
+  /** Quantity still open */
+  openQty: number;
+  /** Gross realized P&L (before fees) */
+  grossRealized: number;
+  /** Total fees across all fills */
+  totalFees: number;
+  /** Net realized P&L (after fees) */
+  netRealized: number;
+  /** Initial risk in $ (null when stop loss missing) */
+  initialRisk: number | null;
+  /** R-multiple (null when risk missing/invalid) */
+  rMultiple: number | null;
+  /** Risk-to-reward ratio (null when risk or target missing) */
+  riskReward: number | null;
+  /** Whether position is fully closed */
+  isClosed: boolean;
+}
+
+/**
+ * FIFO matching for real-market trades.
+ * Long: buys are entries, sells are exits. Short: reversed.
+ * Each exit fill matches against oldest unmatched entry fills.
+ */
+export function calcRealTrade(
+  fills: RealFill[],
+  direction: "long" | "short",
+  stopLoss: number | null,
+  target: number | null,
+): RealTradeCalc {
+  const sorted = [...fills].sort((a, b) =>
+    new Date(a.fill_time ?? 0).getTime() - new Date(b.fill_time ?? 0).getTime()
+  );
+  const isEntry = (f: RealFill) =>
+    direction === "long" ? f.side === "buy" : f.side === "sell";
+
+  // FIFO queue of unmatched entry lots: { qty, price }
+  const lots: { qty: number; price: number }[] = [];
+  let grossRealized = 0;
+  let totalFees = 0;
+  let entryQty = 0;
+  let entryCost = 0;
+
+  for (const f of sorted) {
+    const q = Number(f.qty), p = Number(f.price);
+    totalFees += Number(f.fees || 0);
+    if (isEntry(f)) {
+      lots.push({ qty: q, price: p });
+      entryQty += q;
+      entryCost += p * q;
+    } else {
+      let remaining = q;
+      while (remaining > 1e-9 && lots.length > 0) {
+        const lot = lots[0];
+        const matched = Math.min(remaining, lot.qty);
+        const pnlPerShare = direction === "long" ? p - lot.price : lot.price - p;
+        grossRealized += pnlPerShare * matched;
+        lot.qty -= matched;
+        remaining -= matched;
+        if (lot.qty < 1e-9) lots.shift();
+      }
+      // Excess exit beyond entries: treat as reducing/closing (no cost basis)
+      // — unmatched exits don't generate P&L beyond matched portion.
+    }
+  }
+
+  const openQty = lots.reduce((s, l) => s + l.qty, 0);
+  const avgEntry = entryQty > 0 ? entryCost / entryQty : null;
+  const netRealized = grossRealized - totalFees;
+  const isClosed = openQty < 1e-9 && entryQty > 0;
+
+  // Initial risk: |entry - stop| × closed qty (use entry qty for open trades)
+  let initialRisk: number | null = null;
+  if (stopLoss != null && avgEntry != null && avgEntry > 0 && entryQty > 0) {
+    const riskPerShare = Math.abs(avgEntry - stopLoss);
+    if (riskPerShare > 0) initialRisk = riskPerShare * entryQty;
+  }
+  const rMultiple = initialRisk != null && initialRisk > 0 ? netRealized / initialRisk : null;
+
+  let riskReward: number | null = null;
+  if (stopLoss != null && target != null && avgEntry != null && avgEntry > 0) {
+    const risk = Math.abs(avgEntry - stopLoss);
+    const reward = Math.abs(target - avgEntry);
+    if (risk > 0) riskReward = reward / risk;
+  }
+
+  return {
+    avgEntry, entryQty, openQty,
+    grossRealized, totalFees, netRealized,
+    initialRisk, rMultiple, riskReward,
+    isClosed,
+  };
+}
