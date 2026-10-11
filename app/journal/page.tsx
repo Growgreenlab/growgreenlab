@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
-import { groupFillsIntoTrades, calcMetrics, calcRealTrade, parseBrokerCsv, groupImportedFills, fmtPnl, fmtPct, type GroupedTrade, type RawFill, type RealFill, type RealTradeCalc, type BrokerParseResult, type ImportedTrade } from "../../lib/journal";
+import { groupFillsIntoTrades, calcMetrics, calcRealTrade, parseBrokerCsv, parseWithMapping, autoMapColumns, MAPPABLE_FIELDS, groupImportedFills, fmtPnl, fmtPct, type GroupedTrade, type RawFill, type RealFill, type RealTradeCalc, type BrokerParseResult, type ImportedTrade } from "../../lib/journal";
 
 type Tab = "overview" | "trades" | "review" | "calendar";
 type Period = "today" | "week" | "month" | "30d" | "90d" | "ytd" | "all";
@@ -687,32 +687,69 @@ function BrokerImportForm({ onSaved }: { onSaved: () => void }) {
   const [importing, setImporting] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [fileName, setFileName] = useState("");
+  const [rawText, setRawText] = useState("");
+  const [showMapping, setShowMapping] = useState(false);
+  const [mapping, setMapping] = useState<Record<string, string>>({});
+  const [brokerName, setBrokerName] = useState("My Broker");
   const fileRef = useRef<HTMLInputElement>(null);
 
+  const requiredMapped = ["symbol", "side", "qty", "price"].every((k) => mapping[k]);
+
+  const checkDuplicates = async (fills: { hash: string }[]) => {
+    if (fills.length === 0) { setDuplicates(0); return; }
+    const supabase = createClient();
+    const hashes = fills.map((x) => x.hash);
+    let dupCount = 0;
+    for (let i = 0; i < hashes.length; i += 100) {
+      const chunk = hashes.slice(i, i + 100);
+      const { data } = await supabase.from("journal_real_fills").select("import_hash").in("import_hash", chunk);
+      dupCount += data?.length ?? 0;
+    }
+    setDuplicates(dupCount);
+  };
+
   const handleFile = async (f: File) => {
-    setMsg(null);
+    setMsg(null); setShowMapping(false);
     try {
       const text = await f.text();
+      setRawText(text);
       const result = parseBrokerCsv(text);
-      setParseResult(result);
       setFileName(f.name);
-      setPreviewTrades(groupImportedFills(result.fills));
 
-      // Check for duplicates already in DB
-      if (result.fills.length > 0) {
-        const supabase = createClient();
-        const hashes = result.fills.map((x) => x.hash);
-        // Chunk to avoid URL length limits
-        let dupCount = 0;
-        for (let i = 0; i < hashes.length; i += 100) {
-          const chunk = hashes.slice(i, i + 100);
-          const { data } = await supabase.from("journal_real_fills").select("import_hash").in("import_hash", chunk);
-          dupCount += data?.length ?? 0;
+      // If Webull auto-detect worked with fills, use it directly
+      if (result.broker === "Webull" && result.fills.length > 0) {
+        setParseResult(result);
+        setPreviewTrades(groupImportedFills(result.fills));
+        checkDuplicates(result.fills);
+      } else {
+        // Unknown format → show column mapping
+        const autoMap = autoMapColumns(result.headers);
+        setMapping(autoMap);
+        setParseResult(result);
+        setShowMapping(true);
+        // Preview with auto-map if all required fields found
+        if (["symbol", "side", "qty", "price"].every((k) => autoMap[k])) {
+          applyMapping(text, autoMap, result.headers);
         }
-        setDuplicates(dupCount);
       }
     } catch (e) {
       setMsg(e instanceof Error ? e.message : "Could not parse CSV.");
+    }
+  };
+
+  const applyMapping = (text: string, map: Record<string, string>, headers: string[]) => {
+    const result = parseWithMapping(text, map, null, brokerName || "My Broker");
+    // Keep original headers for the mapping UI
+    setParseResult({ ...result, headers });
+    setPreviewTrades(groupImportedFills(result.fills));
+    checkDuplicates(result.fills);
+  };
+
+  const onMappingChange = (field: string, header: string) => {
+    const newMap = { ...mapping, [field]: header };
+    setMapping(newMap);
+    if (["symbol", "side", "qty", "price"].every((k) => newMap[k])) {
+      applyMapping(rawText, newMap, parseResult?.headers ?? []);
     }
   };
 
@@ -775,15 +812,43 @@ function BrokerImportForm({ onSaved }: { onSaved: () => void }) {
     <div className="card" style={{ padding: 16, marginBottom: 16 }}>
       <h4 style={{ margin: "0 0 4px" }}>Import from Broker</h4>
       <p className="hint" style={{ margin: "0 0 12px" }}>
-        Export your order history from Webull (Account → History → Export Orders) and upload the CSV.
-        Only <b>Filled</b> orders are imported. Duplicates are automatically skipped.
+        Export your order history from your broker and upload the CSV.
+        Webull is auto-detected — other brokers get a column mapping step.
+        Only filled orders are imported. Duplicates are automatically skipped.
       </p>
       <input ref={fileRef} type="file" accept=".csv,text/csv" style={{ display: "none" }}
         onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); e.target.value = ""; }} />
       <button className="btn" onClick={() => fileRef.current?.click()}>Choose CSV file</button>
       {fileName && <span className="hint" style={{ marginLeft: 12 }}>{fileName}</span>}
 
-      {parseResult && (
+      {showMapping && parseResult && (
+        <div className="card" style={{ padding: 12, marginTop: 16, marginBottom: 16, background: "rgba(96,165,250,0.04)" }}>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>Map your broker's columns</div>
+          <p className="hint" style={{ margin: "0 0 12px" }}>Match each field to the correct column in your CSV.</p>
+          <div className="field" style={{ marginBottom: 12, maxWidth: 280 }}>
+            <label>Broker name</label>
+            <input className="input" value={brokerName} onChange={(e) => { setBrokerName(e.target.value); if (requiredMapped) applyMapping(rawText, mapping, parseResult.headers); }} placeholder="e.g. Interactive Brokers" />
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 10 }}>
+            {MAPPABLE_FIELDS.map((field) => (
+              <div className="field" key={field.key} style={{ marginBottom: 0 }}>
+                <label>{field.label}</label>
+                <select className="input" value={mapping[field.key] ?? ""} onChange={(e) => onMappingChange(field.key, e.target.value)}>
+                  <option value="">— Select column —</option>
+                  {parseResult.headers.map((h) => (
+                    <option key={h} value={h}>{h}</option>
+                  ))}
+                </select>
+              </div>
+            ))}
+          </div>
+          {!requiredMapped && (
+            <p className="hint" style={{ marginTop: 10, color: "#fbbf24" }}>Map at least Symbol, Side, Quantity, and Price to continue.</p>
+          )}
+        </div>
+      )}
+
+      {parseResult && (previewTrades.length > 0 || !showMapping) && (
         <div style={{ marginTop: 16 }}>
           <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 13, marginBottom: 12 }}>
             <span>Detected: <b>{parseResult.broker}</b></span>

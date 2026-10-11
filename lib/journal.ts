@@ -175,6 +175,98 @@ export interface BrokerParseResult {
   fills: ParsedBrokerFill[];
   rejected: { row: number; reason: string }[];
   totalRows: number;
+  /** Raw headers for manual mapping fallback */
+  headers: string[];
+  /** Auto-detected column mapping */
+  detectedMap: Record<string, string>;
+}
+
+/** Fields the user can map */
+export const MAPPABLE_FIELDS = [
+  { key: "symbol", label: "Symbol *", aliases: ["symbol", "ticker", "instrument"] },
+  { key: "side", label: "Side (Buy/Sell) *", aliases: ["side", "action", "buy/sell", "direction"] },
+  { key: "qty", label: "Quantity *", aliases: ["filled", "quantity", "qty", "filled qty", "shares", "volume"] },
+  { key: "price", label: "Price *", aliases: ["avg price", "average filled price", "price", "fill price", "average price", "execution price"] },
+  { key: "time", label: "Fill Time", aliases: ["filled time", "fill time", "exec time", "execution time", "time", "date", "timestamp", "date/time", "datetime"] },
+  { key: "fees", label: "Fees/Commission", aliases: ["commission", "comm", "fees", "fee"] },
+  { key: "status", label: "Order Status", aliases: ["status", "order status", "state"] },
+];
+
+/** Try to auto-map headers to fields */
+export function autoMapColumns(headers: string[]): Record<string, string> {
+  const map: Record<string, string> = {};
+  const lower = headers.map((h) => h.toLowerCase());
+  for (const field of MAPPABLE_FIELDS) {
+    for (const alias of field.aliases) {
+      const idx = lower.indexOf(alias);
+      if (idx >= 0) { map[field.key] = headers[idx]; break; }
+    }
+  }
+  return map;
+}
+
+/**
+ * Parse CSV using an explicit column mapping (for non-Webull brokers).
+ * mapping: { symbol: "Symbol", side: "Action", ... } — values are CSV header names.
+ * statusFilter: only import rows where status column matches (e.g. "Filled"), or null for all.
+ */
+export function parseWithMapping(
+  text: string,
+  mapping: Record<string, string>,
+  statusFilter: string | null,
+  brokerName: string,
+): BrokerParseResult {
+  const rows = parseCsvRows(text);
+  const headers = rows.length > 0 ? Object.keys(rows[0]).map((k) => {
+    // Recover original-case header
+    const line = text.trim().split(/\r?\n/)[0];
+    return k;
+  }) : [];
+  const rejected: { row: number; reason: string }[] = [];
+  const fills: ParsedBrokerFill[] = [];
+  // Build lowercase lookup: header-lower -> actual key in row
+  const headerLookup: Record<string, string> = {};
+  if (rows.length > 0) {
+    for (const k of Object.keys(rows[0])) headerLookup[k.toLowerCase()] = k;
+  }
+  const get = (row: Record<string, string>, fieldKey: string): string => {
+    const headerName = mapping[fieldKey];
+    if (!headerName) return "";
+    const actualKey = headerLookup[headerName.toLowerCase()];
+    return actualKey ? row[actualKey] : "";
+  };
+
+  rows.forEach((row, idx) => {
+    const rowNum = idx + 2;
+    try {
+      if (statusFilter && mapping.status) {
+        const st = get(row, "status").toLowerCase();
+        if (st !== statusFilter.toLowerCase()) return;
+      }
+      const symbol = get(row, "symbol").toUpperCase().replace(/[^A-Z0-9.\-]/g, "");
+      const sideRaw = get(row, "side").toLowerCase();
+      const side = sideRaw.startsWith("buy") ? "buy" : sideRaw.startsWith("sell") ? "sell" : null;
+      const qty = parseFloat(get(row, "qty").replace(/,/g, ""));
+      const price = parseFloat(get(row, "price").replace(/,/g, ""));
+      const fees = parseFloat(get(row, "fees").replace(/,/g, "")) || 0;
+      const fillTime = parseBrokerTime(get(row, "time"));
+
+      if (!symbol) { rejected.push({ row: rowNum, reason: "Missing symbol" }); return; }
+      if (!side) { rejected.push({ row: rowNum, reason: `Unknown side: "${get(row, "side")}"` }); return; }
+      if (!isFinite(qty) || qty <= 0) { rejected.push({ row: rowNum, reason: "Invalid quantity" }); return; }
+      if (!isFinite(price) || price <= 0) { rejected.push({ row: rowNum, reason: "Invalid price" }); return; }
+
+      fills.push({
+        symbol, side, qty, price, fillTime, fees,
+        hash: fillHash(symbol, side, qty, price, fillTime),
+        raw: row,
+      });
+    } catch {
+      rejected.push({ row: rowNum, reason: "Parse error" });
+    }
+  });
+
+  return { broker: brokerName, fills, rejected, totalRows: rows.length, headers: Object.keys(headerLookup).map((k) => headerLookup[k]), detectedMap: mapping };
 }
 
 /** Simple deterministic hash (djb2) for dedup */
@@ -284,7 +376,7 @@ export function parseBrokerCsv(text: string): BrokerParseResult {
     }
   });
 
-  return { broker, fills, rejected, totalRows: rows.length };
+  return { broker, fills, rejected, totalRows: rows.length, headers: sampleKeys, detectedMap: autoMapColumns(sampleKeys) };
 }
 
 /**
