@@ -344,10 +344,6 @@ function ReplayPageInner() {
     setGuardWarned(false);
   }
   guardPrevQty.current = gQty;
-  // Auto-switch to Risk tab when a position opens.
-  const prevTabPos = useRef(false);
-  if (gQty > 0 && !prevTabPos.current) setRightTab("risk");
-  prevTabPos.current = gQty > 0;
 
   const guardLoss = calculatePositionLoss(
     guardBaseline.current,
