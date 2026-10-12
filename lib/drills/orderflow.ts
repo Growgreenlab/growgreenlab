@@ -200,8 +200,8 @@ export function generatePrints(
   const rng = mulberry32(p.seed * 104729 + tickIndex * 7919 + 77);
   const prints: TradePrint[] = [];
 
-  // Split tick volume into 1-4 prints
-  const nPrints = 1 + Math.floor(rng() * Math.min(4, 1 + tickVolume / 500));
+  // Split tick volume into 1-2 prints (readable pace, no flooding)
+  const nPrints = 1 + Math.floor(rng() * 2);
   let remaining = Math.max(1, Math.round(tickVolume));
   for (let i = 0; i < nPrints; i++) {
     const isLast = i === nPrints - 1;

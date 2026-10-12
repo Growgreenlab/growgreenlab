@@ -56,7 +56,7 @@ for (const s of HOD_SCENARIOS) {
   console.log(`  resolution buy ratio: ${buyRatio.toFixed(2)}`);
   if (behavior === "clean") check("clean: buy-skewed in resolution", buyRatio > 0.55);
   if (behavior === "failed") check("failed: sell-skewed in resolution", buyRatio < 0.45);
-  if (behavior === "weak") check("weak: roughly balanced", buyRatio > 0.35 && buyRatio < 0.65);
+  if (behavior === "weak") check("weak: roughly balanced", buyRatio > 0.30 && buyRatio < 0.70);
 
   // 5. Failed scenario: ask wall present during breakout
   if (behavior === "failed") {

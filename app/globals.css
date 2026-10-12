@@ -1237,3 +1237,16 @@ body.ws-active .footer { display: none; }
 .ts-row.buy .ts-price { color: #2ebd85; }
 .ts-row.sell .ts-price { color: #f6465d; }
 .ts-row .ts-size { color: #8b949e; text-align: right; }
+
+/* L2 readability improvements */
+.l2-row.at-level {
+  background: rgba(240,180,41,0.14);
+  border-left: 2px solid #f0b429;
+}
+.l2-row.at-level .l2-price { font-weight: 800; }
+.l2-spread {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.l2-spread strong { font-size: 13px; }

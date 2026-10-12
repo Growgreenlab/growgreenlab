@@ -1,22 +1,19 @@
 /**
- * Breakout Recognition Drill — HOD scenario library (v1).
+ * Breakout Recognition Drill — HOD scenario library (v2).
  *
- * Four hand-designed scenarios. Each is fully predefined: the candle
- * array IS the scenario. The deterministic tick engine (mulberry32 in
- * lib/engine.ts) turns these candles into identical tick sequences on
- * every replay — no runtime randomness anywhere.
+ * Four hand-designed scenarios with REALISTIC price action: wicks, varying
+ * candle sizes, pullbacks, and texture — while preserving each scenario's
+ * structural story and intended classification.
  *
- * Candle construction: prices are authored in "ticks" of $0.01 around a
- * base price so shapes are intentional, not accidental. Volume is authored
- * per candle to tell the volume story (expansion on real breaks, weak
- * volume on traps).
+ * Each scenario is fully predefined. The deterministic tick engine turns
+ * these candles into identical tick sequences on every replay.
  */
 import type { Candle } from "../types";
 import type { DrillScenario } from "./types";
 
-const BASE = 10.0; // base price; scenarios are price-agnostic shapes
-const T = 60_000; // 1-minute candles
-const T0 = 1_700_000_000_000; // fixed epoch so timestamps are deterministic
+const BASE = 10.0;
+const T = 60_000;
+const T0 = 1_700_000_000_000;
 
 interface RawCandle {
   o: number;
@@ -43,51 +40,53 @@ function round2(n: number): number {
 
 /**
  * Scenario 1 — CLEAN BREAKOUT (beginner).
- * Tight consolidation under HOD, breakout candle closes near highs on
- * 3x average volume, next candles hold above the broken level and push
- * higher. The textbook read.
+ * Realistic grind up with pullbacks, tight consolidation, strong break.
  */
 function cleanBreakout(): DrillScenario {
-  const hod = 0.5; // HOD is $10.50
+  const hod = 0.5;
   const raw: RawCandle[] = [
-    // --- Approach: grinding up toward HOD ---
-    { o: 0.10, h: 0.18, l: 0.08, c: 0.15, v: 8000 },
-    { o: 0.15, h: 0.24, l: 0.13, c: 0.22, v: 9000 },
-    { o: 0.22, h: 0.30, l: 0.20, c: 0.28, v: 8500 },
-    { o: 0.28, h: 0.36, l: 0.26, c: 0.34, v: 9500 },
-    // --- Consolidation: tight range just under HOD ---
-    { o: 0.34, h: 0.42, l: 0.33, c: 0.40, v: 6000 },
-    { o: 0.40, h: 0.44, l: 0.37, c: 0.42, v: 5500 },
-    { o: 0.42, h: 0.46, l: 0.39, c: 0.44, v: 5200 },
-    { o: 0.44, h: 0.47, l: 0.41, c: 0.45, v: 5000 },
-    { o: 0.45, h: 0.48, l: 0.43, c: 0.47, v: 5800 },
-    // --- Breakout: strong candle through HOD, closes near high, 3x volume ---
-    { o: 0.47, h: 0.62, l: 0.46, c: 0.60, v: 24000 },
-    // --- CHECKPOINT (index 10): user sees up to here ---
-    // --- Follow-through: holds above broken level, pushes higher ---
-    { o: 0.60, h: 0.68, l: 0.57, c: 0.66, v: 18000 },
-    { o: 0.66, h: 0.72, l: 0.62, c: 0.70, v: 15000 },
-    { o: 0.70, h: 0.74, l: 0.66, c: 0.72, v: 12000 },
-    { o: 0.72, h: 0.80, l: 0.70, c: 0.78, v: 16000 },
-    { o: 0.78, h: 0.84, l: 0.75, c: 0.82, v: 13000 },
+    // --- Approach: realistic grind with pullbacks (0-8) ---
+    { o: 0.10, h: 0.17, l: 0.08, c: 0.14, v: 8200 },
+    { o: 0.14, h: 0.20, l: 0.12, c: 0.18, v: 7800 },
+    { o: 0.18, h: 0.21, l: 0.14, c: 0.16, v: 8500 },  // pullback
+    { o: 0.16, h: 0.24, l: 0.15, c: 0.22, v: 9200 },  // engulfing
+    { o: 0.22, h: 0.27, l: 0.20, c: 0.25, v: 8700 },
+    { o: 0.25, h: 0.28, l: 0.21, c: 0.23, v: 7900 },  // indecision
+    { o: 0.23, h: 0.32, l: 0.22, c: 0.30, v: 9800 },  // strong push
+    { o: 0.30, h: 0.35, l: 0.28, c: 0.33, v: 8900 },
+    { o: 0.33, h: 0.39, l: 0.31, c: 0.37, v: 9300 },
+    // --- Consolidation: tight but with texture (9-13) ---
+    { o: 0.37, h: 0.44, l: 0.35, c: 0.41, v: 6200 },
+    { o: 0.41, h: 0.45, l: 0.38, c: 0.42, v: 5400 },
+    { o: 0.42, h: 0.47, l: 0.40, c: 0.45, v: 5100 },
+    { o: 0.45, h: 0.48, l: 0.42, c: 0.44, v: 5300 },  // small red
+    { o: 0.44, h: 0.49, l: 0.43, c: 0.47, v: 5900 },
+    // --- Breakout (14) — CHECKPOINT ---
+    { o: 0.47, h: 0.63, l: 0.46, c: 0.60, v: 24500 },
+    // --- Resolution: holds and continues (15-19) ---
+    { o: 0.60, h: 0.69, l: 0.58, c: 0.66, v: 18200 },
+    { o: 0.66, h: 0.73, l: 0.63, c: 0.70, v: 14800 },
+    { o: 0.70, h: 0.75, l: 0.67, c: 0.72, v: 12100 },
+    { o: 0.72, h: 0.81, l: 0.70, c: 0.78, v: 16300 },
+    { o: 0.78, h: 0.85, l: 0.76, c: 0.82, v: 13200 },
   ];
   return {
     id: "hod-clean-001",
-    version: 1,
+    version: 2,
     setupCategory: "hod-breakout",
     classification: "clean",
     difficulty: "beginner",
     title: "Clean HOD Breakout",
-    description: "Price consolidates tightly under the high of day, then breaks out.",
+    description: "Price grinds up, consolidates tightly under the high of day, then breaks out.",
     seed: 11001,
     candles: toCandles(raw),
     hod: round2(BASE + hod),
-    checkpointIndex: 10,
+    checkpointIndex: 14,
     evidence: {
-      candleStructure: "Five tight consolidation candles (each under $0.05 range) formed directly beneath the $10.50 HOD — classic coiling before expansion.",
-      volumeBehavior: "Volume contracted during consolidation (5k-6k vs 8k-9k on the approach), then expanded to 24k on the breakout candle — roughly 3x the consolidation average.",
-      priceVsLevel: "The breakout candle opened at $10.47, pushed through $10.50, and closed at $10.60 near its high. No long upper wick — buyers held control into the close.",
-      resolution: "The next five candles held above $10.50 (the broken level became support) and pushed to $10.82. No retest even touched the HOD.",
+      candleStructure: "Nine approach candles showed a healthy grind with two natural pullbacks (candles 3 and 6) — real uptrends breathe. Five consolidation candles coiled tightly between $10.40–$10.48 directly beneath the $10.50 HOD.",
+      volumeBehavior: "Volume contracted during consolidation (5k–6k vs 8k–9k on the approach), then expanded to 24.5k on the breakout candle — nearly 4x the consolidation average.",
+      priceVsLevel: "The breakout candle opened at $10.47, pushed through $10.50, and closed at $10.60 near its $10.63 high. Minimal upper wick — buyers held control into the close.",
+      resolution: "The next five candles held above $10.50 (broken resistance became support) and pushed to $10.82. The HOD was never retested.",
     },
     teaching: {
       lessons: [
@@ -95,7 +94,7 @@ function cleanBreakout(): DrillScenario {
         "A clean break closes near its high on expanding volume — that's acceptance, not just a poke above the level.",
       ],
       missedByAnswer: {
-        weak: "The volume expansion (3x) and close-near-high rule out a weak read — weak breaks show hesitation, not conviction.",
+        weak: "The volume expansion (4x) and close-near-high rule out a weak read — weak breaks show hesitation, not conviction.",
         failed: "Nothing in the breakout candle suggested failure: no long upper wick, no volume climax followed by reversal.",
         not_sure: "This one had the three classic tells: tight coil, volume contraction then expansion, and a strong close. Worth committing to the read.",
       },
@@ -106,47 +105,54 @@ function cleanBreakout(): DrillScenario {
 
 /**
  * Scenario 2 — WEAK BREAKOUT (beginner).
- * Price drifts above HOD on thin volume, small-bodied candles, no
- * follow-through. Stalls and fades back under the level.
+ * Choppy grind, indecisive poke above HOD, fades back.
  */
 function weakBreakout(): DrillScenario {
   const hod = 0.5;
   const raw: RawCandle[] = [
-    { o: 0.10, h: 0.16, l: 0.08, c: 0.14, v: 7000 },
-    { o: 0.14, h: 0.22, l: 0.12, c: 0.20, v: 7500 },
-    { o: 0.20, h: 0.28, l: 0.18, c: 0.26, v: 7000 },
-    { o: 0.26, h: 0.34, l: 0.24, c: 0.32, v: 8000 },
-    { o: 0.32, h: 0.40, l: 0.30, c: 0.38, v: 7500 },
-    { o: 0.38, h: 0.44, l: 0.36, c: 0.42, v: 7000 },
-    { o: 0.42, h: 0.47, l: 0.40, c: 0.45, v: 6500 },
-    // --- Weak poke above HOD: small body, no volume ---
-    { o: 0.45, h: 0.53, l: 0.44, c: 0.51, v: 8000 },
-    { o: 0.51, h: 0.54, l: 0.48, c: 0.52, v: 6000 },
-    { o: 0.52, h: 0.55, l: 0.49, c: 0.50, v: 5500 },
-    // --- CHECKPOINT (index 10) ---
-    // --- Stalls, drifts back under HOD ---
+    // --- Choppy approach (0-8) ---
+    { o: 0.10, h: 0.15, l: 0.08, c: 0.13, v: 7200 },
+    { o: 0.13, h: 0.19, l: 0.11, c: 0.17, v: 7600 },
+    { o: 0.17, h: 0.20, l: 0.13, c: 0.15, v: 7400 },
+    { o: 0.15, h: 0.22, l: 0.14, c: 0.20, v: 7900 },
+    { o: 0.20, h: 0.26, l: 0.18, c: 0.24, v: 8100 },
+    { o: 0.24, h: 0.28, l: 0.21, c: 0.23, v: 7300 },
+    { o: 0.23, h: 0.31, l: 0.22, c: 0.29, v: 8000 },
+    { o: 0.29, h: 0.34, l: 0.27, c: 0.32, v: 7700 },
+    { o: 0.32, h: 0.38, l: 0.30, c: 0.36, v: 7500 },
+    // --- Drifting toward HOD, losing momentum (9-12) ---
+    { o: 0.36, h: 0.41, l: 0.34, c: 0.39, v: 6800 },
+    { o: 0.39, h: 0.44, l: 0.37, c: 0.42, v: 6600 },
+    { o: 0.42, h: 0.47, l: 0.40, c: 0.44, v: 6400 },
+    { o: 0.44, h: 0.48, l: 0.42, c: 0.46, v: 6200 },
+    // --- Weak poke above HOD (13) ---
+    { o: 0.46, h: 0.54, l: 0.45, c: 0.51, v: 8100 },
+    // --- CHECKPOINT (14): indecisive doji at the level ---
+    { o: 0.51, h: 0.55, l: 0.49, c: 0.52, v: 6000 },
+    // --- Resolution: stalls and fades (15-19) ---
+    { o: 0.52, h: 0.54, l: 0.48, c: 0.50, v: 5800 },
     { o: 0.50, h: 0.53, l: 0.46, c: 0.47, v: 7000 },
-    { o: 0.47, h: 0.49, l: 0.42, c: 0.44, v: 8000 },
-    { o: 0.44, h: 0.46, l: 0.39, c: 0.41, v: 7500 },
-    { o: 0.41, h: 0.43, l: 0.36, c: 0.38, v: 7000 },
+    { o: 0.47, h: 0.50, l: 0.43, c: 0.45, v: 7800 },
+    { o: 0.45, h: 0.47, l: 0.40, c: 0.42, v: 7400 },
+    { o: 0.42, h: 0.44, l: 0.37, c: 0.39, v: 7100 },
   ];
   return {
     id: "hod-weak-001",
-    version: 1,
+    version: 2,
     setupCategory: "hod-breakout",
     classification: "weak",
     difficulty: "beginner",
     title: "Weak HOD Breakout",
-    description: "Price edges above the high of day but something feels off.",
+    description: "Price edges above the high of day but conviction is missing.",
     seed: 11002,
     candles: toCandles(raw),
     hod: round2(BASE + hod),
-    checkpointIndex: 10,
+    checkpointIndex: 14,
     evidence: {
-      candleStructure: "The breakout candles had small bodies ($0.02-$0.03) with overlapping ranges — no conviction, just drift.",
-      volumeBehavior: "Volume on the break (8k) was barely above the approach average (7k). A real break demands expansion; this was flat.",
-      priceVsLevel: "Price poked to $10.55 but couldn't hold — each candle after the break closed weaker, sliding back toward and under $10.50.",
-      resolution: "Within four candles price was back under the HOD at $10.38. The 'breakout' never attracted follow-through buying.",
+      candleStructure: "The approach was choppy with overlapping candles — no clean trend. The breakout candle had a small $0.05 body with wicks both sides, followed by a doji. Indecision, not conviction.",
+      volumeBehavior: "Volume on the break (8.1k) barely exceeded the approach average (7.5k), then faded to 6k. A real break demands expansion; this was flat to declining.",
+      priceVsLevel: "Price poked to $10.54 but closed at $10.51–$10.52 — barely above $10.50. Each subsequent candle closed weaker, sliding back under the level.",
+      resolution: "Within five candles price was back at $10.39, under the HOD. The 'breakout' never attracted follow-through buying.",
     },
     teaching: {
       lessons: [
@@ -154,58 +160,66 @@ function weakBreakout(): DrillScenario {
         "Small overlapping bodies after the break = indecision. Strong breaks show expanding ranges, not shrinking ones.",
       ],
       missedByAnswer: {
-        clean: "Compare the breakout candle here ($0.03 body, 8k volume) to a clean break — no expansion, no strong close. The level was touched, not taken.",
-        failed: "Close — but a failed breakout/trap implies a sharp rejection. This just fizzled. Weak is the more precise read.",
+        clean: "Compare the breakout candle here ($0.05 body, 8k volume) to a clean break — no expansion, no strong close. The level was touched, not taken.",
+        failed: "Close — but a failed breakout/trap implies sharp rejection. This just fizzled. Weak is the more precise read.",
         not_sure: "The tell was volume: flat into the break. When in doubt, volume is the tiebreaker between weak and clean.",
       },
-      alternativeOutcome: "A clean version of this would have shown the breakout candle closing near its high on 2-3x volume, with the next candles holding above $10.50.",
+      alternativeOutcome: "A clean version would have shown the breakout candle closing near its high on 2–3x volume, with the next candles holding above $10.50.",
     },
   };
 }
 
 /**
  * Scenario 3 — FAILED BREAKOUT / TRAP (intermediate).
- * Strong-looking break that immediately reverses — long upper wick,
- * volume climax, then collapse back through the HOD.
+ * Strong run-up, violent spike and rejection, collapse.
  */
 function failedBreakout(): DrillScenario {
   const hod = 0.5;
   const raw: RawCandle[] = [
-    { o: 0.10, h: 0.18, l: 0.08, c: 0.16, v: 8000 },
-    { o: 0.16, h: 0.24, l: 0.14, c: 0.22, v: 8500 },
-    { o: 0.22, h: 0.30, l: 0.20, c: 0.28, v: 9000 },
-    { o: 0.28, h: 0.36, l: 0.26, c: 0.34, v: 9500 },
-    { o: 0.34, h: 0.42, l: 0.32, c: 0.40, v: 9000 },
-    { o: 0.40, h: 0.46, l: 0.38, c: 0.44, v: 8500 },
-    { o: 0.44, h: 0.49, l: 0.42, c: 0.47, v: 9000 },
-    // --- Trap candle: spikes well above HOD then collapses ---
-    { o: 0.47, h: 0.66, l: 0.46, c: 0.52, v: 28000 },
-    { o: 0.52, h: 0.56, l: 0.48, c: 0.49, v: 20000 },
-    { o: 0.49, h: 0.52, l: 0.44, c: 0.45, v: 18000 },
-    // --- CHECKPOINT (index 10) ---
-    // --- Collapse: back under HOD, selling accelerates ---
-    { o: 0.45, h: 0.47, l: 0.38, c: 0.40, v: 22000 },
-    { o: 0.40, h: 0.42, l: 0.33, c: 0.35, v: 20000 },
-    { o: 0.35, h: 0.37, l: 0.28, c: 0.30, v: 18000 },
-    { o: 0.30, h: 0.32, l: 0.24, c: 0.26, v: 16000 },
+    // --- Strong approach (0-8) ---
+    { o: 0.10, h: 0.17, l: 0.08, c: 0.15, v: 8200 },
+    { o: 0.15, h: 0.22, l: 0.13, c: 0.20, v: 8600 },
+    { o: 0.20, h: 0.24, l: 0.17, c: 0.19, v: 8000 },
+    { o: 0.19, h: 0.27, l: 0.18, c: 0.25, v: 9100 },
+    { o: 0.25, h: 0.32, l: 0.23, c: 0.30, v: 9400 },
+    { o: 0.30, h: 0.35, l: 0.28, c: 0.33, v: 8900 },
+    { o: 0.33, h: 0.40, l: 0.32, c: 0.38, v: 9200 },
+    { o: 0.38, h: 0.44, l: 0.36, c: 0.42, v: 8800 },
+    { o: 0.42, h: 0.48, l: 0.41, c: 0.46, v: 9100 },
+    // --- Tightening under HOD (9-11) ---
+    { o: 0.46, h: 0.50, l: 0.44, c: 0.48, v: 8700 },
+    { o: 0.48, h: 0.51, l: 0.46, c: 0.49, v: 8400 },
+    { o: 0.49, h: 0.52, l: 0.47, c: 0.50, v: 8900 },
+    // --- Trap candle: violent spike and rejection (12) ---
+    { o: 0.50, h: 0.68, l: 0.49, c: 0.54, v: 28500 },
+    // --- Immediate weakness (13) ---
+    { o: 0.54, h: 0.58, l: 0.50, c: 0.51, v: 20500 },
+    // --- CHECKPOINT (14) ---
+    { o: 0.51, h: 0.54, l: 0.46, c: 0.47, v: 18500 },
+    // --- Collapse (15-19) ---
+    { o: 0.47, h: 0.49, l: 0.40, c: 0.42, v: 22000 },
+    { o: 0.42, h: 0.44, l: 0.35, c: 0.37, v: 20500 },
+    { o: 0.37, h: 0.39, l: 0.30, c: 0.32, v: 18800 },
+    { o: 0.32, h: 0.34, l: 0.26, c: 0.28, v: 17200 },
+    { o: 0.28, h: 0.30, l: 0.22, c: 0.24, v: 15800 },
   ];
   return {
     id: "hod-failed-001",
-    version: 1,
+    version: 2,
     setupCategory: "hod-breakout",
     classification: "failed",
     difficulty: "intermediate",
     title: "Failed HOD Breakout (Trap)",
-    description: "A strong-looking break that doesn't hold. Watch the wick.",
+    description: "A strong-looking break that violently reverses. Watch the wick.",
     seed: 11003,
     candles: toCandles(raw),
     hod: round2(BASE + hod),
-    checkpointIndex: 10,
+    checkpointIndex: 14,
     evidence: {
-      candleStructure: "The breakout candle spiked to $10.66 but closed at $10.52 — a $0.14 upper wick. That's rejection, not acceptance. The next two candles closed progressively weaker.",
-      volumeBehavior: "Volume climaxed at 28k on the spike candle (3x average) — climax volume into resistance often marks the trap, not the launch.",
-      priceVsLevel: "Price tagged $10.66 but couldn't hold above $10.50 into any close. By the checkpoint, it was already back to $10.45 — under the level it 'broke.'",
-      resolution: "Four candles later price was at $10.26, down $0.40 from the spike high. The breakout trapped late buyers and unwound completely.",
+      candleStructure: "The trap candle spiked to $10.68 but closed at $10.54 — a $0.14 upper wick on massive range. The next two candles closed at $10.51 then $10.47, already back under $10.50 by the checkpoint.",
+      volumeBehavior: "Volume climaxed at 28.5k on the spike (3x average) — climax volume into resistance often marks exhaustion, not launch. Volume stayed elevated on the way down (distribution).",
+      priceVsLevel: "Price tagged $10.68 but never held above $10.50 into a close after the spike. By the checkpoint it was $10.47 — the 'breakout' had already failed.",
+      resolution: "Five candles later price was $10.24, down $0.44 from the spike high. Late buyers were trapped and the move fully unwound.",
     },
     teaching: {
       lessons: [
@@ -213,45 +227,51 @@ function failedBreakout(): DrillScenario {
         "Climax volume + failure to hold = trap signature. Volume alone doesn't confirm; it's volume WITH price acceptance that matters.",
       ],
       missedByAnswer: {
-        clean: "The spike looked strong in real time, but the close is what matters — $10.52 close vs $10.66 high left a rejection wick. Clean breaks close near highs.",
+        clean: "The spike looked strong in real time, but the close is what matters — $10.54 vs $10.68 high left a massive rejection wick. Clean breaks close near highs.",
         weak: "This wasn't weak — it was violent. Weak breaks fizzle; this spiked and got slammed. The aggression of the reversal is the trap tell.",
-        not_sure: "The wick was the tell: $0.14 of rejection on the breakout candle. When the high and close disagree that much, trust the close.",
+        not_sure: "The wick was the tell: $0.14 of rejection on huge range. When the high and close disagree that much, trust the close.",
       },
-      alternativeOutcome: "If this had been clean, the spike candle would have closed near $10.64 (not $10.52), and the next candles would have held above $10.50 instead of fading immediately.",
+      alternativeOutcome: "If this had been clean, the spike candle would have closed near $10.66 (not $10.54), and the next candles would have held above $10.50 instead of fading immediately.",
     },
   };
 }
 
 /**
  * Scenario 4 — AMBIGUOUS (advanced).
- * Genuinely mixed evidence: decent break, holds briefly, then choppy
- * two-way action. No single correct read — the lesson is recognizing
- * when the evidence doesn't support a strong opinion.
+ * Genuinely mixed: decent break, brief hold, then directionless chop.
  */
 function ambiguousBreakout(): DrillScenario {
   const hod = 0.5;
   const raw: RawCandle[] = [
-    { o: 0.10, h: 0.17, l: 0.08, c: 0.15, v: 7500 },
-    { o: 0.15, h: 0.23, l: 0.13, c: 0.21, v: 8000 },
-    { o: 0.21, h: 0.29, l: 0.19, c: 0.27, v: 7800 },
-    { o: 0.27, h: 0.35, l: 0.25, c: 0.33, v: 8200 },
-    { o: 0.33, h: 0.41, l: 0.31, c: 0.39, v: 8000 },
-    { o: 0.39, h: 0.45, l: 0.37, c: 0.43, v: 7800 },
-    { o: 0.43, h: 0.48, l: 0.41, c: 0.46, v: 8200 },
-    // --- Break: decent candle, moderate volume, closes mid-range ---
-    { o: 0.46, h: 0.58, l: 0.45, c: 0.54, v: 14000 },
-    { o: 0.54, h: 0.60, l: 0.51, c: 0.56, v: 12000 },
-    { o: 0.56, h: 0.59, l: 0.52, c: 0.53, v: 11000 },
-    // --- CHECKPOINT (index 10) ---
-    // --- Choppy: holds, dips, recovers — no clear verdict ---
-    { o: 0.53, h: 0.57, l: 0.50, c: 0.55, v: 10000 },
-    { o: 0.55, h: 0.58, l: 0.51, c: 0.52, v: 10500 },
-    { o: 0.52, h: 0.56, l: 0.49, c: 0.54, v: 9800 },
-    { o: 0.54, h: 0.57, l: 0.50, c: 0.51, v: 10200 },
+    // --- Grind up (0-8) ---
+    { o: 0.10, h: 0.16, l: 0.08, c: 0.14, v: 7600 },
+    { o: 0.14, h: 0.20, l: 0.12, c: 0.18, v: 7900 },
+    { o: 0.18, h: 0.22, l: 0.15, c: 0.17, v: 7700 },
+    { o: 0.17, h: 0.24, l: 0.16, c: 0.22, v: 8100 },
+    { o: 0.22, h: 0.28, l: 0.20, c: 0.26, v: 8000 },
+    { o: 0.26, h: 0.30, l: 0.23, c: 0.28, v: 7800 },
+    { o: 0.28, h: 0.35, l: 0.27, c: 0.33, v: 8200 },
+    { o: 0.33, h: 0.39, l: 0.31, c: 0.37, v: 8000 },
+    { o: 0.37, h: 0.43, l: 0.35, c: 0.41, v: 7900 },
+    // --- Consolidation (9-12) ---
+    { o: 0.41, h: 0.46, l: 0.39, c: 0.44, v: 7600 },
+    { o: 0.44, h: 0.48, l: 0.42, c: 0.46, v: 7400 },
+    { o: 0.46, h: 0.49, l: 0.43, c: 0.45, v: 7500 },
+    { o: 0.45, h: 0.49, l: 0.43, c: 0.47, v: 7700 },
+    // --- Break: decent but closes mid-range (13) ---
+    { o: 0.47, h: 0.59, l: 0.46, c: 0.55, v: 14200 },
+    // --- CHECKPOINT (14): holds but choppy ---
+    { o: 0.55, h: 0.60, l: 0.52, c: 0.56, v: 11800 },
+    // --- Resolution: directionless chop (15-19) ---
+    { o: 0.56, h: 0.59, l: 0.51, c: 0.53, v: 10500 },
+    { o: 0.53, h: 0.58, l: 0.50, c: 0.56, v: 10200 },
+    { o: 0.56, h: 0.59, l: 0.52, c: 0.54, v: 9800 },
+    { o: 0.54, h: 0.57, l: 0.50, c: 0.52, v: 10100 },
+    { o: 0.52, h: 0.56, l: 0.49, c: 0.53, v: 9900 },
   ];
   return {
     id: "hod-ambiguous-001",
-    version: 1,
+    version: 2,
     setupCategory: "hod-breakout",
     classification: "ambiguous",
     difficulty: "advanced",
@@ -260,12 +280,12 @@ function ambiguousBreakout(): DrillScenario {
     seed: 11004,
     candles: toCandles(raw),
     hod: round2(BASE + hod),
-    checkpointIndex: 10,
+    checkpointIndex: 14,
     evidence: {
-      candleStructure: "The breakout candle ($10.46 → $10.54) was decent but closed mid-range, not near the high. Afterward: overlapping chop, no direction.",
-      volumeBehavior: "Volume expanded to 14k (moderate, not convincing 2-3x), then faded back to average. Neither climax nor conviction.",
-      priceVsLevel: "Price held above $10.50 but couldn't extend — four candles of sideways drift between $10.50 and $10.58.",
-      resolution: "The scenario ends unresolved: price is still above HOD but going nowhere. This is the market saying 'not yet.'",
+      candleStructure: "The breakout candle ($10.47 → $10.55) was decent but closed mid-range at $10.55 vs $10.59 high. Afterward: five overlapping chop candles between $10.52–$10.58, no direction.",
+      volumeBehavior: "Volume expanded to 14.2k (moderate, not convincing), then faded back to ~10k. Neither climax nor conviction — just participation.",
+      priceVsLevel: "Price held above $10.50 but couldn't extend — six candles of sideways drift. Above the level, but going nowhere.",
+      resolution: "The scenario ends unresolved: $10.53, still above HOD, still chopping. The market is saying 'not yet.'",
     },
     teaching: {
       lessons: [
@@ -273,10 +293,10 @@ function ambiguousBreakout(): DrillScenario {
         "When evidence conflicts (decent break + flat follow-through + fading volume), the professional move is to wait, not to force a read.",
       ],
       missedByAnswer: {
-        clean: "Reasonable instinct — it did hold above HOD. But clean requires continuation, and four candles of chop isn't continuation.",
-        weak: "Also reasonable — the follow-through was weak. But it never broke back down either. The honest answer is that the evidence was mixed.",
+        clean: "Reasonable instinct — it did hold above HOD. But clean requires continuation, and chop isn't continuation.",
+        weak: "Also reasonable — the follow-through was weak. But it never broke back down either. The honest answer is mixed evidence.",
         failed: "Understandable caution, but nothing actually failed — price never lost the level. This is why 'not sure' exists.",
-        not_sure: "Correct instinct. The evidence genuinely didn't support a strong read in either direction — and recognizing that IS the skill being tested.",
+        not_sure: "Correct instinct. The evidence genuinely didn't support a strong read — and recognizing that IS the skill being tested.",
       },
       alternativeOutcome: "A clean version would have shown the next candles pushing to $10.70+ on rising volume. A failed version would have shown a rejection wick and a close back under $10.50. This showed neither.",
     },

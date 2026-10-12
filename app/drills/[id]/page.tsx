@@ -56,7 +56,7 @@ export default function DrillRunner() {
   const scenario = getScenario(id);
 
   const [phase, setPhase] = useState<DrillPhase>("intro");
-  const [speed, setSpeed] = useState(8);
+  const [speed, setSpeed] = useState(4);
   const [tickVersion, setTickVersion] = useState(0); // re-render trigger
   const [answer, setAnswer] = useState<DrillAnswer | null>(null);
   const [confidence, setConfidence] = useState<number | null>(null);
@@ -230,6 +230,18 @@ export default function DrillRunner() {
 
       {(phase === "running" || phase === "resolving" || phase === "checkpoint") && engine && (
         <>
+          {/* HOD readout */}
+          <div style={{
+            display: "flex", gap: 20, alignItems: "center", marginBottom: 10,
+            padding: "8px 14px", background: "#0d1117",
+            border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8, fontSize: 13,
+          }}>
+            <span><span style={{ color: "#f0b429", fontWeight: 700 }}>HOD:</span> <strong>${scenario.hod.toFixed(2)}</strong></span>
+            <span><span style={{ color: "var(--ggl-muted)" }}>Current:</span> <strong>${engine.displayPrice.toFixed(2)}</strong></span>
+            <span><span style={{ color: "var(--ggl-muted)" }}>Distance:</span> <strong style={{ color: engine.displayPrice >= scenario.hod ? "#2ebd85" : "#f0b429" }}>
+              ${Math.abs(engine.displayPrice - scenario.hod).toFixed(2)} {engine.displayPrice >= scenario.hod ? "above" : "below"}
+            </strong></span>
+          </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 300px", gap: 12 }} className="drill-grid">
             <div style={{ minHeight: 380 }}>
               <LwcChart
