@@ -56,7 +56,7 @@ export default function DrillRunner() {
   const scenario = getScenario(id);
 
   const [phase, setPhase] = useState<DrillPhase>("intro");
-  const [speed, setSpeed] = useState(4);
+  const [speed, setSpeed] = useState(16);
   const [tickVersion, setTickVersion] = useState(0); // re-render trigger
   const [answer, setAnswer] = useState<DrillAnswer | null>(null);
   const [confidence, setConfidence] = useState<number | null>(null);
@@ -139,7 +139,12 @@ export default function DrillRunner() {
         setBook(newBook);
         setPrints((prev) => [...newPrints.reverse(), ...prev].slice(0, 60));
       }
-      setTickVersion((v) => v + 1);
+      // Throttle React re-renders: update at most every 6 ticks so high
+      // speeds stay smooth. The chart series updates efficiently per tick
+      // internally; this just limits component re-renders.
+      if (ticksThisCandle % 6 === 0 || r.finalized) {
+        setTickVersion((v) => v + 1);
+      }
 
       // Checkpoint: pause when the checkpoint candle is finalized
       if (!answeredRef.current && eng.index >= scenario.checkpointIndex) {
@@ -201,7 +206,7 @@ export default function DrillRunner() {
             <label style={{ fontSize: 12, color: "var(--ggl-muted)" }}>Speed</label>
             <select value={speed} onChange={(e) => setSpeed(Number(e.target.value))}
               style={{ padding: "4px 8px", borderRadius: 6, background: "#0d1117", color: "#fff", border: "1px solid rgba(255,255,255,0.15)" }}>
-              {[1, 2, 4, 8, 16].map((s) => <option key={s} value={s}>{s}x</option>)}
+              {[1, 2, 4, 8, 16, 32].map((s) => <option key={s} value={s}>{s}x</option>)}
             </select>
             {phase === "resolving" && (
               <button onClick={skipToResult}
