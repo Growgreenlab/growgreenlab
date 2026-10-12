@@ -99,6 +99,8 @@ export class ReplayEngine {
   private nextFillId = 1;
   private nextOrderId = 1;
   private forming: FormingState | null = null;
+  /** Ticks per candle — 360 default; drills may use fewer for faster pacing. */
+  readonly ticksPerCandle: number;
   /**
    * Lowest/highest tick prices seen since the current position opened.
    * Used by the end-of-candle bracket backstop so a stop set above an
@@ -108,10 +110,11 @@ export class ReplayEngine {
   private lowSinceEntry: number | null = null;
   private highSinceEntry: number | null = null;
 
-  constructor(candles: Candle[], startCash = 100_000, startIndex = 0) {
+  constructor(candles: Candle[], startCash = 100_000, startIndex = 0, ticksPerCandle = TICKS_PER_CANDLE) {
     if (candles.length === 0) throw new Error("Engine needs at least one candle");
     this.candles = candles;
     this.startCash = startCash;
+    this.ticksPerCandle = ticksPerCandle;
     // startIndex = the first LIVE candle: everything before it is history,
     // and the replay opens with it forming tick-by-tick.
     this.startIndex = Math.max(0, Math.min(startIndex, candles.length - 1));
@@ -168,7 +171,7 @@ export class ReplayEngine {
 
   /** 0..1 progress of the currently forming candle (0 when idle). */
   get formationProgress(): number {
-    return this.forming ? (this.forming.pos + 1) / TICKS_PER_CANDLE : 0;
+    return this.forming ? (this.forming.pos + 1) / this.ticksPerCandle : 0;
   }
 
   get atEnd(): boolean {
@@ -244,7 +247,7 @@ export class ReplayEngine {
     this.fillPendingOrders(tick);
 
     let finalized = false;
-    if (f.pos >= TICKS_PER_CANDLE - 1) {
+    if (f.pos >= this.ticksPerCandle - 1) {
       this.index += 1;
       this.forming = null;
       finalized = true;
@@ -427,7 +430,7 @@ export class ReplayEngine {
 
   private beginForming(): void {
     const target = this.candles[this.index + 1];
-    const { ticks, volFrac } = makeTicks(target);
+    const { ticks, volFrac } = makeTicks(target, this.ticksPerCandle);
     this.forming = {
       ticks,
       volFrac,
@@ -525,8 +528,7 @@ export class ReplayEngine {
  * the true high and low once (no visual snap at finalize), and volume
  * accumulates in bursts proportional to price movement, as in real markets.
  */
-function makeTicks(c: Candle): { ticks: number[]; volFrac: number[] } {
-  const n = TICKS_PER_CANDLE;
+function makeTicks(c: Candle, n: number = TICKS_PER_CANDLE): { ticks: number[]; volFrac: number[] } {
   const rand = mulberry32(hashSeed(c.t, c.o, c.h, c.l, c.c, c.v));
   const zn = () => (rand() + rand() + rand() - 1.5) * 2; // ~N(0,1)
 

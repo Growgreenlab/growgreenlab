@@ -70,8 +70,16 @@ export interface FlowParams {
  * speed: faster speed = more intense flow, just like a real active market.
  * Still tick-driven (deterministic), not wall-clock.
  */
-export const FLOW_UPDATES_PER_CANDLE = 60;
-export const TICKS_PER_FLOW_UPDATE = 360 / FLOW_UPDATES_PER_CANDLE; // 6
+/** Drill pacing: fewer ticks per candle than the main simulator for snappier formation. */
+export const DRILL_TICKS_PER_CANDLE = 120;
+
+/**
+ * Order-flow cadence: moderate pace — alive like a real terminal but
+ * readable. Tied to tick position (deterministic), not wall-clock.
+ * At 8x drill speed this yields ~5 book updates/sec.
+ */
+export const FLOW_UPDATES_PER_CANDLE = 12;
+export const TICKS_PER_FLOW_UPDATE = DRILL_TICKS_PER_CANDLE / FLOW_UPDATES_PER_CANDLE; // 10
 
 /**
  * Deterministic timestamp for a flow update: derived from the candle's

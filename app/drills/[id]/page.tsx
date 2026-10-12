@@ -17,10 +17,10 @@ import { getScenario, HOD_SCENARIOS } from "../../../lib/drills/scenarios";
 import { gradeAnswer, type DrillAnswer, type BreakoutClassification } from "../../../lib/drills/types";
 import {
   generateBook, generatePrints, phaseForCandle, flowTimestamp,
-  FLOW_UPDATES_PER_CANDLE, TICKS_PER_FLOW_UPDATE,
+  FLOW_UPDATES_PER_CANDLE, TICKS_PER_FLOW_UPDATE, DRILL_TICKS_PER_CANDLE,
   type OrderBookSnapshot, type TradePrint, type FlowBehavior,
 } from "../../../lib/drills/orderflow";
-import { ReplayEngine, TICKS_PER_CANDLE } from "../../../lib/engine";
+import { ReplayEngine } from "../../../lib/engine";
 import LwcChart from "../../../components/LwcChart";
 import Level2Panel from "../../../components/Level2Panel";
 import TimeSalesPanel from "../../../components/TimeSalesPanel";
@@ -56,7 +56,7 @@ export default function DrillRunner() {
   const scenario = getScenario(id);
 
   const [phase, setPhase] = useState<DrillPhase>("intro");
-  const [speed, setSpeed] = useState(16);
+  const [speed, setSpeed] = useState(8);
   const [tickVersion, setTickVersion] = useState(0); // re-render trigger
   const [answer, setAnswer] = useState<DrillAnswer | null>(null);
   const [confidence, setConfidence] = useState<number | null>(null);
@@ -77,7 +77,7 @@ export default function DrillRunner() {
   const startDrill = useCallback(() => {
     if (!scenario) return;
     const historyCount = Math.max(2, Math.floor(scenario.checkpointIndex * 0.4));
-    engineRef.current = new ReplayEngine(scenario.candles, 100_000, historyCount);
+    engineRef.current = new ReplayEngine(scenario.candles, 100_000, historyCount, DRILL_TICKS_PER_CANDLE);
     tickCountRef.current = 0;
     ticksThisCandleRef.current = 0;
     lastCandleIndexRef.current = historyCount - 1;
@@ -101,7 +101,7 @@ export default function DrillRunner() {
     const engine = engineRef.current;
     if (!engine || !scenario) return;
 
-    const tickMs = 1000 / ((TICKS_PER_CANDLE / 60) * speed);
+    const tickMs = 1000 / ((DRILL_TICKS_PER_CANDLE / 60) * speed);
     timerRef.current = setInterval(() => {
       const eng = engineRef.current;
       if (!eng) return;

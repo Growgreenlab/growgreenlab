@@ -4,8 +4,8 @@
  */
 import { HOD_SCENARIOS } from "./scenarios";
 import { gradeAnswer, type DrillAnswer } from "./types";
-import { generateBook, generatePrints, phaseForCandle, type FlowBehavior } from "./orderflow";
-import { ReplayEngine, TICKS_PER_CANDLE } from "../engine";
+import { generateBook, generatePrints, phaseForCandle, type FlowBehavior, DRILL_TICKS_PER_CANDLE } from "./orderflow";
+import { ReplayEngine } from "../engine";
 
 let pass = 0, fail = 0;
 function check(name: string, cond: boolean) {
@@ -25,9 +25,9 @@ for (const s of HOD_SCENARIOS) {
   const fp = { seed: s.seed, level: s.hod, behavior };
 
   // --- Phase: running — tick until checkpoint ---
-  const eng = new ReplayEngine(s.candles, 100_000, 0);
+  const eng = new ReplayEngine(s.candles, 100_000, 0, DRILL_TICKS_PER_CANDLE);
   let ticks = 0;
-  const maxTicks = (s.checkpointIndex + 1) * TICKS_PER_CANDLE + 10;
+  const maxTicks = (s.checkpointIndex + 1) * DRILL_TICKS_PER_CANDLE + 10;
   while (eng.index < s.checkpointIndex && ticks < maxTicks) {
     eng.tick();
     ticks++;
@@ -60,7 +60,7 @@ for (const s of HOD_SCENARIOS) {
 
   // --- Resolving: tick to end ---
   let endTicks = 0;
-  while (!eng.atEnd && endTicks < s.candles.length * TICKS_PER_CANDLE + 100) {
+  while (!eng.atEnd && endTicks < s.candles.length * DRILL_TICKS_PER_CANDLE + 100) {
     eng.tick();
     endTicks++;
     const flowPhase = phaseForCandle(eng.index, s.checkpointIndex);
@@ -79,7 +79,7 @@ for (const s of HOD_SCENARIOS) {
   check("alternative outcome present", !!s.teaching.alternativeOutcome);
 
   // --- Determinism of full journey: re-run and compare final price ---
-  const eng2 = new ReplayEngine(s.candles, 100_000, 0);
+  const eng2 = new ReplayEngine(s.candles, 100_000, 0, DRILL_TICKS_PER_CANDLE);
   while (!eng2.atEnd) eng2.tick();
   check("full journey deterministic", eng2.displayPrice === eng.displayPrice);
 }

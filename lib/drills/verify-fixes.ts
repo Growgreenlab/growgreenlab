@@ -6,9 +6,8 @@ import { HOD_SCENARIOS } from "./scenarios";
 import {
   generateBook, generatePrints, flowTimestamp,
   FLOW_UPDATES_PER_CANDLE, TICKS_PER_FLOW_UPDATE,
-  type FlowBehavior,
-} from "./orderflow";
-import { ReplayEngine, TICKS_PER_CANDLE } from "../engine";
+  type FlowBehavior, DRILL_TICKS_PER_CANDLE } from "./orderflow";
+import { ReplayEngine } from "../engine";
 
 let pass = 0, fail = 0;
 function check(name: string, cond: boolean) {
@@ -22,8 +21,8 @@ const BEHAVIOR_FOR: Record<string, FlowBehavior> = {
   "hod-ambiguous-001": "ambiguous",
 };
 
-check("60 flow updates per candle", FLOW_UPDATES_PER_CANDLE === 60);
-check("6 ticks per flow update", TICKS_PER_FLOW_UPDATE === 6);
+check("12 flow updates per candle", FLOW_UPDATES_PER_CANDLE === 12);
+check("10 ticks per flow update", TICKS_PER_FLOW_UPDATE === 10);
 
 for (const s of HOD_SCENARIOS) {
   console.log(`\n=== ${s.id} ===`);
@@ -32,7 +31,7 @@ for (const s of HOD_SCENARIOS) {
 
   // Historical context: engine starts with history revealed
   const historyCount = Math.max(2, Math.floor(s.checkpointIndex * 0.4));
-  const eng = new ReplayEngine(s.candles, 100_000, historyCount);
+  const eng = new ReplayEngine(s.candles, 100_000, historyCount, DRILL_TICKS_PER_CANDLE);
   check("history revealed at start", eng.revealed.length === historyCount);
   check("history < checkpoint", historyCount < s.checkpointIndex);
   check("no future beyond history", eng.revealed.every((c) => s.candles.indexOf(c) < historyCount));
@@ -48,7 +47,7 @@ for (const s of HOD_SCENARIOS) {
   // Throttled flow: simulate the runner's cadence for one candle
   // and verify exactly 8 updates happen, all deterministic
   const updates: string[] = [];
-  for (let tick = 1; tick <= TICKS_PER_CANDLE; tick++) {
+  for (let tick = 1; tick <= DRILL_TICKS_PER_CANDLE; tick++) {
     if (tick % TICKS_PER_FLOW_UPDATE === 0) {
       const updateIndex = Math.min(FLOW_UPDATES_PER_CANDLE - 1, Math.floor(tick / TICKS_PER_FLOW_UPDATE));
       const flowTick = 5 * 1000 + updateIndex;
@@ -56,11 +55,11 @@ for (const s of HOD_SCENARIOS) {
       updates.push(JSON.stringify(book));
     }
   }
-  check("exactly 60 flow updates per candle", updates.length === 60);
+  check("exactly 12 flow updates per candle", updates.length === 12);
 
   // Same cadence re-run → identical
   const updates2: string[] = [];
-  for (let tick = 1; tick <= TICKS_PER_CANDLE; tick++) {
+  for (let tick = 1; tick <= DRILL_TICKS_PER_CANDLE; tick++) {
     if (tick % TICKS_PER_FLOW_UPDATE === 0) {
       const updateIndex = Math.min(FLOW_UPDATES_PER_CANDLE - 1, Math.floor(tick / TICKS_PER_FLOW_UPDATE));
       const flowTick = 5 * 1000 + updateIndex;

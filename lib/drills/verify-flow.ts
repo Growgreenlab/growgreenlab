@@ -6,8 +6,8 @@ import { HOD_SCENARIOS } from "./scenarios";
 import {
   generateBook, generatePrints, phaseForCandle,
   type FlowBehavior, type FlowParams,
-} from "./orderflow";
-import { ReplayEngine, TICKS_PER_CANDLE } from "../engine";
+  DRILL_TICKS_PER_CANDLE } from "./orderflow";
+import { ReplayEngine } from "../engine";
 
 let pass = 0, fail = 0;
 function check(name: string, cond: boolean) {
@@ -82,7 +82,7 @@ for (const s of HOD_SCENARIOS) {
   check("phase resolution after", phaseForCandle(s.candles.length - 1, s.checkpointIndex) === "resolution");
 
   // 9. Sync with engine: book price tracks tick price
-  const eng = new ReplayEngine(s.candles, 100_000, 0);
+  const eng = new ReplayEngine(s.candles, 100_000, 0, DRILL_TICKS_PER_CANDLE);
   let synced = true;
   for (let i = 0; i < 50; i++) {
     eng.tick();
