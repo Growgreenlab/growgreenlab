@@ -547,6 +547,9 @@ export default function CommunityRoomPage() {
     grouped.push({ msg: m, showHeader, showDate });
   });
 
+  // Admin-only rooms (e.g. Announcements): signed-in non-mods can read but not post.
+  const postingLocked = !!room.admin_only_posting && signedIn && !isMod;
+
   return (
     <div className="community-room-container" style={{
       maxWidth: 760, margin: "0 auto",
@@ -580,7 +583,7 @@ export default function CommunityRoomPage() {
         {reconnecting && (
           <span style={{ fontSize: 11, color: "#fbbf24" }}>Reconnecting…</span>
         )}
-        {signedIn && (
+        {signedIn && !postingLocked && (
           <button
             onClick={() => setShowDiscussionModal(true)}
             style={{
@@ -816,6 +819,15 @@ export default function CommunityRoomPage() {
           </div>
         )}
         {error && <div style={{ color: "#f87171", fontSize: 12, marginBottom: 8 }}>{error}</div>}
+        {postingLocked ? (
+          <div style={{
+            textAlign: "center", padding: "10px 16px", borderRadius: 12,
+            border: "1px solid rgba(255,255,255,0.08)", background: "rgba(255,255,255,0.03)",
+            color: "var(--ggl-muted)", fontSize: 13,
+          }}>
+            📢 This room is for official announcements — only admins can post here.
+          </div>
+        ) : (
         <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
           <textarea
             ref={textareaRef}
@@ -858,6 +870,7 @@ export default function CommunityRoomPage() {
             <IconSend />
           </button>
         </div>
+        )}
       </div>
 
       {/* Start Discussion modal */}

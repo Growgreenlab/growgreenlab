@@ -11,6 +11,8 @@ export interface CommunityRoom {
   is_public: boolean;
   message_preview: boolean;
   category: string;
+  /** When true, only moderators/admins may post (e.g. Announcements). */
+  admin_only_posting?: boolean;
   created_at: string;
 }
 
