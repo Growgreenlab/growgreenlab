@@ -65,6 +65,22 @@ export interface FlowParams {
 }
 
 /**
+ * Order-flow cadence: the book and prints update this many times per candle,
+ * tied to tick position (deterministic), not wall-clock time. This keeps the
+ * flow readable at any playback speed and preserves deterministic replay.
+ */
+export const FLOW_UPDATES_PER_CANDLE = 8;
+export const TICKS_PER_FLOW_UPDATE = 360 / FLOW_UPDATES_PER_CANDLE; // 45
+
+/**
+ * Deterministic timestamp for a flow update: derived from the candle's
+ * timestamp, never Date.now(). Same scenario + same tick = same timestamps.
+ */
+export function flowTimestamp(candleT: number, updateIndex: number): number {
+  return candleT + Math.round((updateIndex / FLOW_UPDATES_PER_CANDLE) * 60_000);
+}
+
+/**
  * Generate a Level 2 snapshot for a given tick.
  *
  * @param p flow params

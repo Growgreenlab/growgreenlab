@@ -16,7 +16,8 @@ import Link from "next/link";
 import { getScenario, HOD_SCENARIOS } from "../../../lib/drills/scenarios";
 import { gradeAnswer, type DrillAnswer, type BreakoutClassification } from "../../../lib/drills/types";
 import {
-  generateBook, generatePrints, phaseForCandle,
+  generateBook, generatePrints, phaseForCandle, flowTimestamp,
+  FLOW_UPDATES_PER_CANDLE, TICKS_PER_FLOW_UPDATE,
   type OrderBookSnapshot, type TradePrint, type FlowBehavior,
 } from "../../../lib/drills/orderflow";
 import { ReplayEngine, TICKS_PER_CANDLE } from "../../../lib/engine";
@@ -65,21 +66,32 @@ export default function DrillRunner() {
 
   const engineRef = useRef<ReplayEngine | null>(null);
   const tickCountRef = useRef(0);
+  const ticksThisCandleRef = useRef(0);
+  const lastCandleIndexRef = useRef(-1);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const answeredRef = useRef(false);
   const prevPriceRef = useRef<number>(0);
 
-  // Init engine when starting
+  // Init engine when starting — reveal historical context so the user
+  // sees the approach/consolidation structure before live formation.
   const startDrill = useCallback(() => {
     if (!scenario) return;
-    engineRef.current = new ReplayEngine(scenario.candles, 100_000, 0);
+    const historyCount = Math.max(2, Math.floor(scenario.checkpointIndex * 0.4));
+    engineRef.current = new ReplayEngine(scenario.candles, 100_000, historyCount);
     tickCountRef.current = 0;
+    ticksThisCandleRef.current = 0;
+    lastCandleIndexRef.current = historyCount - 1;
     answeredRef.current = false;
-    prevPriceRef.current = scenario.candles[0].o;
+    prevPriceRef.current = scenario.candles[historyCount].o;
     setAnswer(null);
     setConfidence(null);
-    setBook(null);
-    setPrints([]);
+    // Seed the order-flow panels with the last history candle's state
+    // so Level 2 / Time & Sales aren't empty at drill start.
+    const fp0 = { seed: scenario.seed, level: scenario.hod, behavior: BEHAVIOR_FOR[scenario.id] };
+    const histCandle = scenario.candles[historyCount - 1];
+    const histPhase = phaseForCandle(historyCount - 1, scenario.checkpointIndex);
+    setBook(generateBook(fp0, 0, histCandle.c, histPhase, flowTimestamp(histCandle.t, FLOW_UPDATES_PER_CANDLE - 1)));
+    setPrints(generatePrints(fp0, 0, histCandle.c, Math.max(1, Math.round(histCandle.v / FLOW_UPDATES_PER_CANDLE)), histPhase, flowTimestamp(histCandle.t, FLOW_UPDATES_PER_CANDLE - 1), 0).reverse());
     setPhase("running");
   }, [scenario]);
 
@@ -99,19 +111,34 @@ export default function DrillRunner() {
       const dir: 1 | -1 | 0 = price > prevPrice ? 1 : price < prevPrice ? -1 : 0;
       prevPriceRef.current = price;
       tickCountRef.current += 1;
-      const t = tickCountRef.current;
 
-      // Order flow from the same tick state
-      const flowPhase = phaseForCandle(eng.index, scenario.checkpointIndex);
-      const fp = { seed: scenario.seed, level: scenario.hod, behavior: BEHAVIOR_FOR[scenario.id] };
-      const newBook = generateBook(fp, t, price, flowPhase, Date.now());
-      // Approximate tick volume from forming state
-      const candle = scenario.candles[Math.min(eng.index + 1, scenario.candles.length - 1)];
-      const tickVol = Math.max(1, Math.round(candle.v / TICKS_PER_CANDLE));
-      const newPrints = generatePrints(fp, t, price, tickVol, flowPhase, Date.now(), dir);
+      // Reset per-candle tick counter when a new candle starts forming
+      const formingIdx = eng.index + 1;
+      if (formingIdx !== lastCandleIndexRef.current) {
+        lastCandleIndexRef.current = formingIdx;
+        ticksThisCandleRef.current = 0;
+      }
+      ticksThisCandleRef.current += 1;
+      const ticksThisCandle = ticksThisCandleRef.current;
 
-      setBook(newBook);
-      setPrints((prev) => [...newPrints.reverse(), ...prev].slice(0, 120));
+      // Order flow updates at a controlled, deterministic cadence:
+      // 8 updates per candle, tied to tick position — readable at any speed.
+      if (ticksThisCandle % TICKS_PER_FLOW_UPDATE === 0) {
+        const updateIndex = Math.min(
+          FLOW_UPDATES_PER_CANDLE - 1,
+          Math.floor(ticksThisCandle / TICKS_PER_FLOW_UPDATE)
+        );
+        const flowPhase = phaseForCandle(eng.index, scenario.checkpointIndex);
+        const fp = { seed: scenario.seed, level: scenario.hod, behavior: BEHAVIOR_FOR[scenario.id] };
+        const candle = scenario.candles[Math.min(formingIdx, scenario.candles.length - 1)];
+        const ts = flowTimestamp(candle.t, updateIndex);
+        const flowTick = formingIdx * 1000 + updateIndex; // deterministic per update
+        const newBook = generateBook(fp, flowTick, price, flowPhase, ts);
+        const tickVol = Math.max(1, Math.round(candle.v / FLOW_UPDATES_PER_CANDLE));
+        const newPrints = generatePrints(fp, flowTick, price, tickVol, flowPhase, ts, dir);
+        setBook(newBook);
+        setPrints((prev) => [...newPrints.reverse(), ...prev].slice(0, 60));
+      }
       setTickVersion((v) => v + 1);
 
       // Checkpoint: pause when the checkpoint candle is finalized
@@ -212,6 +239,7 @@ export default function DrillRunner() {
                 countdown={null}
                 lastPrice={engine.displayPrice}
                 brackets={{ plannedSL: null, plannedTP: null, activeSL: null, activeTP: null }}
+                referenceLevels={[{ price: scenario.hod, label: "HOD", color: "#f0b429" }]}
                 onPlannedDrag={() => {}}
                 onActiveDrag={() => {}}
                 drawings={[]}
