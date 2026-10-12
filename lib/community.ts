@@ -51,7 +51,10 @@ export async function getDisplayName(userId: string): Promise<string> {
   return "Trader";
 }
 
-/** Check if current user is mod/admin of a room */
+/** Global admin scope: membership rows with this room_id apply to every room. */
+export const GLOBAL_ROOM_ID = "00000000-0000-0000-0000-000000000000";
+
+/** Check if current user is mod/admin of a room (per-room role OR global admin scope) */
 export async function isRoomMod(roomId: string): Promise<boolean> {
   const supabase = createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -60,7 +63,6 @@ export async function isRoomMod(roomId: string): Promise<boolean> {
     .from("community_members")
     .select("role")
     .eq("user_id", user.id)
-    .eq("room_id", roomId)
-    .single();
-  return data?.role === "moderator" || data?.role === "admin";
+    .in("room_id", [roomId, GLOBAL_ROOM_ID]);
+  return (data ?? []).some((r) => r.role === "moderator" || r.role === "admin");
 }
