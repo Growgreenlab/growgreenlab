@@ -257,6 +257,7 @@ export default function DrillRunner() {
                 lastPrice={engine.displayPrice}
                 brackets={{ plannedSL: null, plannedTP: null, activeSL: null, activeTP: null }}
                 referenceLevels={[{ price: scenario.hod, label: "HOD", color: "#f0b429" }]}
+                fitOnLoad={true}
                 onPlannedDrag={() => {}}
                 onActiveDrag={() => {}}
                 drawings={[]}

@@ -58,6 +58,8 @@ interface Props {
   brackets: BracketLevels;
   /** Optional reference levels (HOD etc.). Omit = no lines (replay page). */
   referenceLevels?: ChartReferenceLevel[];
+  /** If true, fit the time scale to content on initial data load (drills). */
+  fitOnLoad?: boolean;
   onPlannedDrag: (sl: number | null, tp: number | null) => void;
   onActiveDrag: (sl: number | null, tp: number | null) => void;
   drawings: Drawing[];
@@ -66,7 +68,7 @@ interface Props {
   onDrawingToolChange: (tool: DrawingTool) => void;
 }
 
-export default function LwcChart({ candles, revealedCount, sessionKey, countdown, lastPrice, brackets, referenceLevels, onPlannedDrag, onActiveDrag, drawings, onDrawingsChange, drawingTool, onDrawingToolChange }: Props) {
+export default function LwcChart({ candles, revealedCount, sessionKey, countdown, lastPrice, brackets, referenceLevels, fitOnLoad, onPlannedDrag, onActiveDrag, drawings, onDrawingsChange, drawingTool, onDrawingToolChange }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const elRef = useRef<HTMLDivElement>(null);
   const countdownRef = useRef<HTMLDivElement>(null);
@@ -350,6 +352,11 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
         cs.setData(bars);
         vs.setData(vols);
         pushedRef.current = { key: sessionKey, n };
+        // For drills: fit the viewport to the revealed data so history
+        // fills the chart instead of clustering on the right.
+        if (fitOnLoad && chartRef.current) {
+          chartRef.current.timeScale().fitContent();
+        }
       } else if (n === prev.n) {
         // Same bars; only the forming (last) candle changed: efficient update.
         const c = candles[n - 1];
