@@ -213,7 +213,8 @@ export function generatePrints(
   // the tape is genuinely active. At 60 updates/candle this streams
   // like a real terminal without flooding.
   const nPrints = phase === "breakout" && rng() > 0.5 ? 2 : 1;
-  let remaining = Math.max(1, Math.round(tickVolume));
+  // Add natural size variation so prints don't look robotic
+  let remaining = Math.max(1, Math.round(tickVolume * (0.4 + rng() * 1.2)));
   for (let i = 0; i < nPrints; i++) {
     const isLast = i === nPrints - 1;
     const size = isLast ? remaining : Math.max(1, Math.round(remaining * (0.2 + rng() * 0.5)));
