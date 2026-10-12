@@ -65,12 +65,13 @@ export interface FlowParams {
 }
 
 /**
- * Order-flow cadence: the book and prints update this many times per candle,
- * tied to tick position (deterministic), not wall-clock time. This keeps the
- * flow readable at any playback speed and preserves deterministic replay.
+ * Order-flow cadence: the book and prints update frequently, like a real
+ * trading terminal — every few ticks. This feels alive at any playback
+ * speed: faster speed = more intense flow, just like a real active market.
+ * Still tick-driven (deterministic), not wall-clock.
  */
-export const FLOW_UPDATES_PER_CANDLE = 8;
-export const TICKS_PER_FLOW_UPDATE = 360 / FLOW_UPDATES_PER_CANDLE; // 45
+export const FLOW_UPDATES_PER_CANDLE = 60;
+export const TICKS_PER_FLOW_UPDATE = 360 / FLOW_UPDATES_PER_CANDLE; // 6
 
 /**
  * Deterministic timestamp for a flow update: derived from the candle's
@@ -200,8 +201,10 @@ export function generatePrints(
   const rng = mulberry32(p.seed * 104729 + tickIndex * 7919 + 77);
   const prints: TradePrint[] = [];
 
-  // Split tick volume into 1-2 prints (readable pace, no flooding)
-  const nPrints = 1 + Math.floor(rng() * 2);
+  // One print per update normally; two during the breakout phase when
+  // the tape is genuinely active. At 60 updates/candle this streams
+  // like a real terminal without flooding.
+  const nPrints = phase === "breakout" && rng() > 0.5 ? 2 : 1;
   let remaining = Math.max(1, Math.round(tickVolume));
   for (let i = 0; i < nPrints; i++) {
     const isLast = i === nPrints - 1;

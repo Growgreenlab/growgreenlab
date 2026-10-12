@@ -22,8 +22,8 @@ const BEHAVIOR_FOR: Record<string, FlowBehavior> = {
   "hod-ambiguous-001": "ambiguous",
 };
 
-check("8 flow updates per candle", FLOW_UPDATES_PER_CANDLE === 8);
-check("45 ticks per flow update", TICKS_PER_FLOW_UPDATE === 45);
+check("60 flow updates per candle", FLOW_UPDATES_PER_CANDLE === 60);
+check("6 ticks per flow update", TICKS_PER_FLOW_UPDATE === 6);
 
 for (const s of HOD_SCENARIOS) {
   console.log(`\n=== ${s.id} ===`);
@@ -56,7 +56,7 @@ for (const s of HOD_SCENARIOS) {
       updates.push(JSON.stringify(book));
     }
   }
-  check("exactly 8 flow updates per candle", updates.length === 8);
+  check("exactly 60 flow updates per candle", updates.length === 60);
 
   // Same cadence re-run → identical
   const updates2: string[] = [];
