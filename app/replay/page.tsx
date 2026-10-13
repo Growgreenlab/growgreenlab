@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 import CandleChart from "../../components/CandleChart";
 import LwcChart from "../../components/LwcChart";
 import DiagPanel from "../../components/DiagPanel";
+import CandleParityPanel from "../../components/CandleParityPanel";
 import DataSourcePanel from "../../components/DataSourcePanel";
 import ReplayControls from "../../components/ReplayControls";
 import TradingPanel from "../../components/TradingPanel";
@@ -194,6 +195,10 @@ function ReplayPageInner() {
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
   const [loadingSession, setLoadingSession] = useState(false);
   const [dataOpen, setDataOpen] = useState(false);
+  // Dev-only candle parity diagnostics (?diag=parity): captures the exact
+  // bars LwcChart delivers to its series. Null cost when the flag is absent.
+  const parityDiag = searchParams.get("diag") === "parity";
+  const chartBarsRef = useRef<Candle[]>([]);
   const [premarketNoticeDismissed, setPremarketNoticeDismissed] = useState(false);
   const bump = useCallback(() => setVersion((v) => v + 1), []);
 
@@ -1005,6 +1010,7 @@ function ReplayPageInner() {
                     onDrawingsChange={setDrawings}
                     drawingTool={drawingTool}
                     onDrawingToolChange={setDrawingTool}
+                    onBarsPushed={parityDiag ? (bars) => { chartBarsRef.current = bars; } : undefined}
                   />
                 )}
               </div>
@@ -1203,6 +1209,19 @@ function ReplayPageInner() {
               candleIndex={eng.index}
               formationProgress={eng.formationProgress}
               speed={speed}
+            />
+          )}
+          {parityDiag && eng && meta && candles && (
+            <CandleParityPanel
+              meta={meta}
+              candles={candles}
+              getEngine={() => engineRef.current}
+              getChartBars={() =>
+                searchParams.get("chart") === "canvas"
+                  ? (engineRef.current?.displayCandles ?? [])
+                  : chartBarsRef.current
+              }
+              chartKind={searchParams.get("chart") === "canvas" ? "canvas" : "lwc"}
             />
           )}
         </>

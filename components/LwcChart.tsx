@@ -54,9 +54,15 @@ interface Props {
   onDrawingsChange: (drawings: Drawing[]) => void;
   drawingTool: DrawingTool;
   onDrawingToolChange: (tool: DrawingTool) => void;
+  /**
+   * Dev-only diagnostic hook (candle parity panel, ?diag=parity): called
+   * after each push with the exact bars delivered to the series. Absent in
+   * normal use — zero behavior change when not provided.
+   */
+  onBarsPushed?: (bars: Candle[]) => void;
 }
 
-export default function LwcChart({ candles, revealedCount, sessionKey, countdown, lastPrice, brackets, onPlannedDrag, onActiveDrag, drawings, onDrawingsChange, drawingTool, onDrawingToolChange }: Props) {
+export default function LwcChart({ candles, revealedCount, sessionKey, countdown, lastPrice, brackets, onPlannedDrag, onActiveDrag, drawings, onDrawingsChange, drawingTool, onDrawingToolChange, onBarsPushed }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const elRef = useRef<HTMLDivElement>(null);
   const countdownRef = useRef<HTMLDivElement>(null);
@@ -65,6 +71,9 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
   const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   // Tracks what we've pushed so we can use update() instead of setData().
   const pushedRef = useRef<BarPushState | null>(null);
+  // Latest diagnostic callback (ref so the push effect deps never change).
+  const onBarsPushedRef = useRef(onBarsPushed);
+  onBarsPushedRef.current = onBarsPushed;
   // Bracket price lines: planned (dashed) vs active (solid, engine-linked).
   const plannedSLRef = useRef<IPriceLine | null>(null);
   const plannedTPRef = useRef<IPriceLine | null>(null);
@@ -353,6 +362,10 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
           vs.update(toVol(candles[i]));
         }
         pushedRef.current = plan.state;
+      }
+      // Dev-only parity diagnostics: report the exact bars just delivered.
+      if (plan && onBarsPushedRef.current) {
+        onBarsPushedRef.current(candles.slice(0, n));
       }
       // Diagnostics: track chart update health.
       diag.chartUpdates++;
