@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Candle, Fill } from "../lib/types";
 import { formatEtTime } from "../lib/marketData";
+import { yToPrice, xToIndex, indexToCenterX } from "../lib/crosshairMath";
 
 // Webull-style palette: bright green/red on deep dark
 const UP = "#2ebd85";
@@ -50,6 +51,8 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef({ slot: DEFAULT_SLOT, scrollX: 0, priceShift: 0 });
+  // Crosshair hover position in canvas CSS pixels (null = hidden).
+  const hoverRef = useRef<{ x: number; y: number } | null>(null);
   const userZoomedRef = useRef(false);
   const prevNRef = useRef(0);
   const prevKeyRef = useRef("");
@@ -355,6 +358,51 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
           ctx.beginPath(); ctx.moveTo(cx, yy); ctx.lineTo(cx - 5, yy - 8); ctx.lineTo(cx + 5, yy - 8); ctx.closePath(); ctx.fill();
         }
       }
+
+      // Webull-style crosshair — drawn last, on top of everything. Uses
+      // the same lo/hi/slot values this frame was rendered with, read
+      // back through the tested inverses in lib/crosshairMath, so the
+      // price/time tags always describe the cursor's true position and
+      // stay correct through pan/zoom (draw() recomputes per frame).
+      const hov = hoverRef.current;
+      if (hov && hov.x >= 0 && hov.x <= pw && hov.y >= PAD_T && hov.y <= volTop + volH) {
+        const ts = { scrollX: v.scrollX, slot };
+        const idx = Math.max(0, Math.min(n - 1, xToIndex(hov.x, ts)));
+        ctx.strokeStyle = "rgba(255,255,255,0.35)";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([5, 5]);
+        // Vertical guide, centered on the hovered candle's slot.
+        const cxPx = Math.round(indexToCenterX(idx, ts)) + 0.5;
+        ctx.beginPath(); ctx.moveTo(cxPx, PAD_T); ctx.lineTo(cxPx, volTop + volH); ctx.stroke();
+        // Horizontal guide + price tag — only over the price pane (over
+        // the volume pane a price readout would be meaningless).
+        if (hov.y <= PAD_T + priceH) {
+          const cyPx = Math.round(hov.y) + 0.5;
+          ctx.beginPath(); ctx.moveTo(0, cyPx); ctx.lineTo(pw, cyPx); ctx.stroke();
+          const price = yToPrice(hov.y, { padTop: PAD_T, priceH, lo, hi });
+          ctx.setLineDash([]);
+          ctx.font = "700 11.5px ui-monospace, monospace";
+          const ph = 22;
+          const py = Math.max(2, Math.min(h - ph - 2, hov.y - ph / 2));
+          ctx.fillStyle = "#334155";
+          ctx.beginPath(); ctx.roundRect(pw + 2, py, PAD_R - 5, ph, 5); ctx.fill();
+          ctx.fillStyle = "#ffffff";
+          ctx.fillText(price.toFixed(dec), pw + 9, py + 15);
+          ctx.setLineDash([5, 5]);
+        }
+        ctx.setLineDash([]);
+        // Time tag on the bottom axis, centered on the hovered candle.
+        const tLabel = formatEtTime(data[idx].t);
+        ctx.font = "11px ui-monospace, monospace";
+        const tw = ctx.measureText(tLabel).width + 14;
+        const tx = Math.max(0, Math.min(pw - tw, indexToCenterX(idx, ts) - tw / 2));
+        ctx.fillStyle = "#334155";
+        ctx.beginPath(); ctx.roundRect(tx, h - PAD_B + 2, tw, PAD_B - 4, 4); ctx.fill();
+        ctx.fillStyle = "#e2e8f0";
+        ctx.textAlign = "center";
+        ctx.fillText(tLabel, tx + tw / 2, h - 8);
+        ctx.textAlign = "left";
+      }
     };
     drawRef.current = draw;
 
@@ -380,6 +428,20 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
         drawRef.current();
       });
     };
+    // Crosshair tracking: every pointermove (hover or drag) records the
+    // cursor position; draw() renders the guides from it. Redraws ride
+    // the same rAF coalescing as drags, so hover costs one draw/frame.
+    const onHoverMove = (e: PointerEvent) => {
+      const rect = canvas.getBoundingClientRect();
+      hoverRef.current = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      queueDraw();
+    };
+    const onHoverLeave = () => {
+      if (hoverRef.current) { hoverRef.current = null; queueDraw(); }
+    };
+    canvas.addEventListener("pointermove", onHoverMove);
+    canvas.addEventListener("pointerleave", onHoverLeave);
+
     // Momentum (flick) animation state.
     let momentumId: number | null = null;
     const stopMomentum = () => {
@@ -450,6 +512,13 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
       }
     };
     const endPointer = (e: PointerEvent) => {
+      // Touch: the crosshair follows the finger while it drags; when the
+      // finger lifts there is no hover anymore — hide it (mouse hover
+      // legitimately persists after pointerup).
+      if (e.pointerType === "touch" && hoverRef.current) {
+        hoverRef.current = null;
+        queueDraw();
+      }
       pointers.delete(e.pointerId);
       if (pointers.size < 2) pinch = null;
       if (pointers.size === 0) {
@@ -513,6 +582,8 @@ export default function CandleChart({ candles, revealedCount, overlays, height, 
       canvas.removeEventListener("pointermove", onPointerMove);
       canvas.removeEventListener("pointerup", endPointer);
       canvas.removeEventListener("pointercancel", endPointer);
+      canvas.removeEventListener("pointermove", onHoverMove);
+      canvas.removeEventListener("pointerleave", onHoverLeave);
       canvas.removeEventListener("dblclick", onDblClick);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
