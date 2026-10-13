@@ -3,8 +3,9 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
-import { groupFillsIntoTrades, calcMetrics, calcRealTrade, parseBrokerCsv, parseWithMapping, autoMapColumns, MAPPABLE_FIELDS, groupImportedFills, fmtPnl, fmtPct, type GroupedTrade, type RawFill, type RealFill, type RealTradeCalc, type BrokerParseResult, type ImportedTrade } from "../../lib/journal";
+import { groupFillsIntoTrades, calcMetrics, calcRealTrade, validateRealFills, parseBrokerCsv, parseWithMapping, autoMapColumns, MAPPABLE_FIELDS, groupImportedFills, fmtPnl, fmtPct, type GroupedTrade, type RawFill, type RealFill, type RealTradeCalc, type BrokerParseResult, type ImportedTrade } from "../../lib/journal";
 import { breakdown, riskMetrics, edgeInsights, dailyPnl, type AnalyticsTrade, type BreakdownDimension, type Insight } from "../../lib/journalAnalytics";
+import { listScreenshots, removeScreenshots, uploadScreenshots, validateScreenshotFile } from "../../lib/journalAttachments";
 
 type Tab = "overview" | "trades" | "review" | "calendar" | "analytics";
 type Period = "today" | "week" | "month" | "30d" | "90d" | "ytd" | "all";
@@ -97,6 +98,13 @@ export default function JournalPage() {
   const [fWinLoss, setFWinLoss] = useState("");
   const [showRealForm, setShowRealForm] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  // Real-trade edit/delete + page-level notice (e.g. attachment failures
+  // reported after an otherwise successful save)
+  const [editingReal, setEditingReal] = useState<{ trade: RealTrade; meta: TradeMeta | null } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<UnifiedTrade | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const load = async () => {
     if (!isSupabaseConfigured()) { setError("Supabase is not configured."); setLoading(false); return; }
@@ -284,6 +292,69 @@ export default function JournalPage() {
   const selectedMeta = selectedKey ? metas[selectedKey] : null;
   const isRealSelected = selectedKey?.startsWith("real:") ?? false;
 
+  // Period-agnostic counts for the CURRENT source filter — the Overview
+  // empty states key off these (not the both-sources total), so a user
+  // with simulator trades still gets the real-market empty state + the
+  // Add Real Trade action when they have no real trades.
+  const sourceTotalCount = useMemo(
+    () => unified.filter((t) => sourceFilter === "all" || t.source === sourceFilter).length,
+    [unified, sourceFilter],
+  );
+  const sourceClosedCount = useMemo(
+    () => unified.filter((t) => (sourceFilter === "all" || t.source === sourceFilter) && !t.isOpen).length,
+    [unified, sourceFilter],
+  );
+
+  const startEditReal = (key: string) => {
+    const rt = realTrades.find((t) => `real:${t.id}` === key);
+    if (!rt) return;
+    setEditingReal({ trade: rt, meta: metas[key] ?? null });
+    setShowRealForm(true);
+    setTab("trades");
+  };
+  const cancelEdit = () => { setEditingReal(null); setShowRealForm(false); };
+  const startDeleteReal = (key: string) => {
+    const t = unified.find((u) => u.key === key);
+    if (!t || t.source !== "real") return;
+    setDeleteError(null);
+    setDeleteTarget(t);
+  };
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true); setDeleteError(null);
+    try {
+      const supabase = createClient();
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error("Not signed in.");
+      const key = deleteTarget.key;
+      const tradeId = key.replace(/^real:/, "");
+      // Screenshots first (best-effort), then meta, fills, and the trade
+      // itself — every delete is scoped to this user.
+      const shots = await listScreenshots(supabase, user.id, key);
+      await removeScreenshots(supabase, shots.map((s) => s.path));
+      const { error: mErr } = await supabase.from("journal_trade_meta").delete().eq("trade_key", key).eq("user_id", user.id);
+      if (mErr) throw new Error(mErr.message);
+      const { error: fErr } = await supabase.from("journal_real_fills").delete().eq("trade_id", tradeId).eq("user_id", user.id);
+      if (fErr) throw new Error(fErr.message);
+      const { error: tErr } = await supabase.from("journal_real_trades").delete().eq("id", tradeId).eq("user_id", user.id);
+      if (tErr) throw new Error(tErr.message);
+      setDeleteTarget(null);
+      if (selectedKey === key) setSelectedKey(null);
+      if (editingReal && `real:${editingReal.trade.id}` === key) setEditingReal(null);
+      setTab("trades");
+      load();
+    } catch (e) {
+      setDeleteError(e instanceof Error ? e.message : "Delete failed.");
+    } finally {
+      setDeleting(false);
+    }
+  };
+  const handleRealTradeSaved = (noticeText?: string) => {
+    setEditingReal(null);
+    if (noticeText) setNotice(noticeText);
+    load();
+  };
+
   if (loading) return <div className="wrap" style={{ padding: 40 }}><p className="hint">Loading journal…</p></div>;
   if (error) return <div className="wrap" style={{ padding: 40 }}><div className="err">{error}</div><p style={{ marginTop: 12 }}><Link href="/replay">← Back to simulator</Link></p></div>;
 
@@ -314,11 +385,47 @@ export default function JournalPage() {
         ))}
       </div>
 
-      {tab === "overview" && <OverviewTab metrics={metrics} simMetrics={simMetrics} realMetrics={realMetrics} cumPnl={cumPnl} trades={filtered} totalCount={unified.length} period={period} setPeriod={setPeriod} sourceFilter={sourceFilter} avgR={analyticsRisk.avgR} maxDrawdown={analyticsRisk.maxDrawdownUSD} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} onAddRealTrade={() => { setTab("trades"); setShowRealForm(true); }} onImportBroker={() => { setTab("trades"); setShowImport(true); }} />}
-      {tab === "trades" && <TradesTab trades={filtered} metas={metas} fTicker={fTicker} setFTicker={setFTicker} fSetup={fSetup} setFSetup={setFSetup} fWinLoss={fWinLoss} setFWinLoss={setFWinLoss} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} onRealTradeSaved={load} showRealForm={showRealForm} setShowRealForm={setShowRealForm} showImport={showImport} setShowImport={setShowImport} />}
-      {tab === "review" && <ReviewTab tradeKey={selectedKey} simTrade={!isRealSelected ? (selected as GroupedTrade | null) : null} realTrade={isRealSelected ? (selected as RealTrade | null) : null} meta={selectedMeta} onSaved={load} />}
+      {notice && (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, padding: "10px 14px", marginBottom: 16, borderRadius: 8, background: "rgba(251,191,36,0.1)", border: "1px solid rgba(251,191,36,0.4)", fontSize: 13 }}>
+          <span>{notice}</span>
+          <button onClick={() => setNotice(null)} aria-label="Dismiss" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 15, lineHeight: 1, padding: 0 }}>×</button>
+        </div>
+      )}
+
+      {tab === "overview" && <OverviewTab metrics={metrics} simMetrics={simMetrics} realMetrics={realMetrics} cumPnl={cumPnl} trades={filtered} sourceTotalCount={sourceTotalCount} sourceClosedCount={sourceClosedCount} period={period} setPeriod={setPeriod} sourceFilter={sourceFilter} avgR={analyticsRisk.avgR} maxDrawdown={analyticsRisk.maxDrawdownUSD} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} onAddRealTrade={() => { setEditingReal(null); setTab("trades"); setShowRealForm(true); }} onImportBroker={() => { setTab("trades"); setShowImport(true); }} />}
+      {tab === "trades" && <TradesTab trades={filtered} metas={metas} fTicker={fTicker} setFTicker={setFTicker} fSetup={fSetup} setFSetup={setFSetup} fWinLoss={fWinLoss} setFWinLoss={setFWinLoss} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} onRealTradeSaved={handleRealTradeSaved} showRealForm={showRealForm} setShowRealForm={setShowRealForm} showImport={showImport} setShowImport={setShowImport} sourceFilter={sourceFilter} editingReal={editingReal} onEditReal={startEditReal} onDeleteReal={startDeleteReal} onCancelEdit={cancelEdit} />}
+      {tab === "review" && <ReviewTab tradeKey={selectedKey} simTrade={!isRealSelected ? (selected as GroupedTrade | null) : null} realTrade={isRealSelected ? (selected as RealTrade | null) : null} meta={selectedMeta} onSaved={load} onEditReal={startEditReal} onDeleteReal={startDeleteReal} />}
       {tab === "calendar" && <CalendarTab trades={closedFiltered} metas={metas} selectedDay={selectedCalDay} onSelectDay={setSelectedCalDay} onSelectTrade={(k) => { setSelectedKey(k); setTab("review"); }} />}
       {tab === "analytics" && <AnalyticsTab trades={analyticsTrades} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} />}
+
+      {deleteTarget && (
+        <div
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 60, padding: 16 }}
+          onClick={() => { if (!deleting) { setDeleteTarget(null); setDeleteError(null); } }}
+        >
+          <div className="card" style={{ padding: 20, maxWidth: 440, width: "100%" }} onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ margin: "0 0 8px" }}>Delete {deleteTarget.ticker} ({deleteTarget.tradeDate})?</h3>
+            <p style={{ margin: "0 0 6px", fontSize: 13 }}>
+              {deleteTarget.direction} · Net P&L{" "}
+              <b className="num" style={{ color: deleteTarget.realizedPnl > 0 ? "var(--emerald-bright)" : deleteTarget.realizedPnl < 0 ? "#f6465d" : "var(--muted)" }}>
+                {fmtPnl(deleteTarget.realizedPnl)}
+              </b>
+              {deleteTarget.isOpen && <span style={{ color: "#fbbf24" }}> · still open</span>}
+            </p>
+            <p className="hint" style={{ margin: "0 0 16px" }}>
+              This permanently deletes the trade, its fills, its review notes, and its screenshots. This cannot be undone.
+            </p>
+            {deleteError && <div className="err" style={{ marginBottom: 12 }}>{deleteError}</div>}
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button className="btn" onClick={() => { setDeleteTarget(null); setDeleteError(null); }} disabled={deleting}>Cancel</button>
+              <button className="btn" onClick={confirmDelete} disabled={deleting}
+                style={{ background: "rgba(246,70,93,0.15)", borderColor: "rgba(246,70,93,0.5)", color: "#f6465d" }}>
+                {deleting ? "Deleting…" : "Delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -336,13 +443,16 @@ function SourceBadge({ source }: { source: "simulator" | "real" }) {
   );
 }
 
-function OverviewTab({ metrics, simMetrics, realMetrics, cumPnl, trades, totalCount, period, setPeriod, sourceFilter, avgR, maxDrawdown, onSelect, onAddRealTrade, onImportBroker }: {
+function OverviewTab({ metrics, simMetrics, realMetrics, cumPnl, trades, sourceTotalCount, sourceClosedCount, period, setPeriod, sourceFilter, avgR, maxDrawdown, onSelect, onAddRealTrade, onImportBroker }: {
   metrics: ReturnType<typeof calcMetrics>;
   simMetrics: ReturnType<typeof calcMetrics>;
   realMetrics: ReturnType<typeof calcMetrics>;
   cumPnl: number[];
   trades: UnifiedTrade[];
-  totalCount: number;
+  /** All trades (open + closed) matching the source filter, any period */
+  sourceTotalCount: number;
+  /** Closed trades matching the source filter, any period */
+  sourceClosedCount: number;
   period: Period;
   setPeriod: (p: Period) => void;
   sourceFilter: SourceFilter;
@@ -383,7 +493,7 @@ function OverviewTab({ metrics, simMetrics, realMetrics, cumPnl, trades, totalCo
       </div>
 
       {m.totalTrades === 0 ? (
-        totalCount === 0 ? (
+        sourceTotalCount === 0 ? (
           <div className="card" style={{ padding: 32, textAlign: "center" }}>
             <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>No trades yet</div>
             {sourceFilter === "real" ? (
@@ -407,14 +517,24 @@ function OverviewTab({ metrics, simMetrics, realMetrics, cumPnl, trades, totalCo
           </div>
         ) : (
           <div className="card" style={{ padding: 32, textAlign: "center" }}>
-            <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>No trades in this period</div>
-            <p className="hint">Try a wider date range or a different source filter.</p>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginTop: 16, textAlign: "left" }}>
-              {stat("Net P&L", fmtPnl(0), 0)}
-              {stat("Win Rate", "—")}
-              {stat("Total Trades", "0")}
-              {stat("Profit Factor", "—")}
+            <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>
+              {sourceClosedCount > 0 ? "No closed trades in this period" : "No closed trades yet"}
             </div>
+            <p className="hint">
+              {sourceClosedCount > 0
+                ? "Try a wider date range or a different source filter."
+                : "Your trades for this source are still open — closed trades and their statistics will appear here."}
+            </p>
+            {sourceFilter === "real" && (
+              <div style={{ display: "flex", gap: 10, justifyContent: "center", marginTop: 12, flexWrap: "wrap" }}>
+                <button className="btn primary" onClick={onAddRealTrade}>
+                  + Add Real Trade
+                </button>
+                <button className="btn" onClick={onImportBroker}>
+                  ⭳ Import from Broker
+                </button>
+              </div>
+            )}
           </div>
         )
       ) : (
@@ -485,15 +605,20 @@ function OverviewTab({ metrics, simMetrics, realMetrics, cumPnl, trades, totalCo
 }
 
 /* ---------------- All Trades ---------------- */
-function TradesTab({ trades, metas, fTicker, setFTicker, fSetup, setFSetup, fWinLoss, setFWinLoss, onSelect, onRealTradeSaved, showRealForm, setShowRealForm, showImport, setShowImport }: {
+function TradesTab({ trades, metas, fTicker, setFTicker, fSetup, setFSetup, fWinLoss, setFWinLoss, onSelect, onRealTradeSaved, showRealForm, setShowRealForm, showImport, setShowImport, sourceFilter, editingReal, onEditReal, onDeleteReal, onCancelEdit }: {
   trades: UnifiedTrade[]; metas: Record<string, TradeMeta>;
   fTicker: string; setFTicker: (v: string) => void;
   fSetup: string; setFSetup: (v: string) => void;
   fWinLoss: string; setFWinLoss: (v: string) => void;
   onSelect: (k: string) => void;
-  onRealTradeSaved: () => void;
+  onRealTradeSaved: (notice?: string) => void;
   showRealForm: boolean; setShowRealForm: (v: boolean | ((p: boolean) => boolean)) => void;
   showImport: boolean; setShowImport: (v: boolean | ((p: boolean) => boolean)) => void;
+  sourceFilter: SourceFilter;
+  editingReal: { trade: RealTrade; meta: TradeMeta | null } | null;
+  onEditReal: (k: string) => void;
+  onDeleteReal: (k: string) => void;
+  onCancelEdit: () => void;
 }) {
   return (
     <div>
@@ -508,20 +633,31 @@ function TradesTab({ trades, metas, fTicker, setFTicker, fSetup, setFSetup, fWin
           <option value="win">Winners</option>
           <option value="loss">Losers</option>
         </select>
-        <button className="btn primary" onClick={() => setShowRealForm((v) => !v)} style={{ marginLeft: "auto" }}>
-          {showRealForm ? "Cancel" : "+ Add Real Trade"}
-        </button>
-        <button className="btn" onClick={() => setShowImport((v) => !v)}>
-          {showImport ? "Cancel" : "⭳ Import from Broker"}
-        </button>
+        {sourceFilter !== "simulator" && (
+          <>
+            <button className="btn primary" onClick={() => { if (editingReal) onCancelEdit(); else setShowRealForm((v) => !v); }} style={{ marginLeft: "auto" }}>
+              {editingReal ? "Cancel edit" : showRealForm ? "Cancel" : "+ Add Real Trade"}
+            </button>
+            <button className="btn" onClick={() => setShowImport((v) => !v)}>
+              {showImport ? "Cancel" : "⭳ Import from Broker"}
+            </button>
+          </>
+        )}
       </div>
-      {showRealForm && <RealTradeForm onSaved={() => { setShowRealForm(false); onRealTradeSaved(); }} />}
+      {showRealForm && (
+        <RealTradeForm
+          key={editingReal ? `edit-${editingReal.trade.id}` : "add"}
+          editing={editingReal}
+          onCancel={onCancelEdit}
+          onSaved={(notice) => { setShowRealForm(false); onRealTradeSaved(notice); }}
+        />
+      )}
       {showImport && <BrokerImportForm onSaved={() => { setShowImport(false); onRealTradeSaved(); }} />}
       <div className="card" style={{ padding: 0, overflowX: "auto" }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
           <thead>
             <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)", textAlign: "left" }}>
-              {["Date", "Symbol", "Src", "Dir", "Entry", "Qty", "P&L", "Setup", "Grade"].map((h) => (
+              {["Date", "Symbol", "Src", "Dir", "Entry", "Qty", "P&L", "Setup", "Grade", "Actions"].map((h) => (
                 <th key={h} style={{ padding: "10px 12px", color: "var(--muted)", fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>{h}</th>
               ))}
             </tr>
@@ -541,6 +677,18 @@ function TradesTab({ trades, metas, fTicker, setFTicker, fSetup, setFSetup, fWin
                   <td className="num" style={{ padding: "10px 12px", fontWeight: 700, color: t.realizedPnl > 0 ? "var(--emerald-bright)" : t.realizedPnl < 0 ? "#f6465d" : "var(--muted)" }}>{fmtPnl(t.realizedPnl)}</td>
                   <td style={{ padding: "10px 12px" }}>{meta?.setup_tag ?? "—"}</td>
                   <td style={{ padding: "10px 12px" }}>{meta?.exec_grade ?? "—"}</td>
+                  <td style={{ padding: "10px 12px", whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>
+                    {t.source === "real" ? (
+                      <>
+                        <button className="btn" style={{ padding: "3px 10px", fontSize: 12, marginRight: 6 }}
+                          onClick={(e) => { e.stopPropagation(); onEditReal(t.key); }}>Edit</button>
+                        <button className="btn" style={{ padding: "3px 10px", fontSize: 12, color: "#f6465d", borderColor: "rgba(246,70,93,0.4)" }}
+                          onClick={(e) => { e.stopPropagation(); onDeleteReal(t.key); }}>Delete</button>
+                      </>
+                    ) : (
+                      <span className="hint">—</span>
+                    )}
+                  </td>
                 </tr>
               );
             })}
@@ -553,12 +701,47 @@ function TradesTab({ trades, metas, fTicker, setFTicker, fSetup, setFSetup, fWin
 }
 
 /* ---------------- Trade Review ---------------- */
-function ReviewTab({ tradeKey, simTrade, realTrade, meta, onSaved }: {
+/** Saved screenshots for the trade being reviewed (real trades only).
+ *  Loads fresh signed URLs on mount / trade switch; renders nothing
+ *  when the trade has no screenshots. */
+function ReviewScreenshots({ tradeKey }: { tradeKey: string }) {
+  const [shots, setShots] = useState<{ path: string; url: string }[]>([]);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const supabase = createClient();
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) { if (alive) setShots([]); return; }
+      const list = await listScreenshots(supabase, user.id, tradeKey);
+      if (alive) setShots(list);
+    })();
+    return () => { alive = false; };
+  }, [tradeKey]);
+
+  if (shots.length === 0) return null;
+  return (
+    <div className="card" style={{ padding: 16 }}>
+      <h4 style={{ margin: "0 0 12px" }}>Screenshots</h4>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        {shots.map((s) => (
+          <a key={s.path} href={s.url} target="_blank" rel="noreferrer" title="Open full size">
+            <img src={s.url} alt="Trade screenshot" style={{ maxHeight: 200, maxWidth: 280, borderRadius: 8, border: "1px solid rgba(255,255,255,0.1)", objectFit: "cover", display: "block" }} />
+          </a>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ReviewTab({ tradeKey, simTrade, realTrade, meta, onSaved, onEditReal, onDeleteReal }: {
   tradeKey: string | null;
   simTrade: GroupedTrade | null;
   realTrade: RealTrade | null;
   meta: TradeMeta | null | undefined;
   onSaved: () => void;
+  onEditReal?: (k: string) => void;
+  onDeleteReal?: (k: string) => void;
 }) {
   const [form, setForm] = useState<Partial<TradeMeta>>({});
   const [saving, setSaving] = useState(false);
@@ -682,7 +865,16 @@ function ReviewTab({ tradeKey, simTrade, realTrade, meta, onSaved }: {
         {!isReal && simTrade!.sessionId && (
           <p style={{ marginTop: 12 }}><Link href={`/replay?session=${simTrade!.sessionId}`} style={{ fontSize: 13 }}>↩ Open replay session</Link></p>
         )}
+        {isReal && (
+          <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+            <button className="btn" onClick={() => onEditReal?.(tradeKeyVal)}>Edit trade</button>
+            <button className="btn" onClick={() => onDeleteReal?.(tradeKeyVal)}
+              style={{ color: "#f6465d", borderColor: "rgba(246,70,93,0.4)" }}>Delete trade</button>
+          </div>
+        )}
       </div>
+
+      {isReal && <ReviewScreenshots tradeKey={tradeKeyVal} />}
 
       <div className="card" style={{ padding: 16 }}>
         <h4 style={{ margin: "0 0 12px" }}>Trade DNA</h4>
@@ -995,33 +1187,106 @@ function BrokerImportForm({ onSaved }: { onSaved: () => void }) {
 }
 
 /* ---------------- Real Trade Form ---------------- */
-function RealTradeForm({ onSaved }: { onSaved: () => void }) {
-  const [ticker, setTicker] = useState("");
-  const [company, setCompany] = useState("");
-  const [broker, setBroker] = useState("Webull");
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
-  const [direction, setDirection] = useState<"long" | "short">("long");
-  const [strategy, setStrategy] = useState("");
-  // Fills: start with one entry fill
-  const [fills, setFills] = useState<{ side: "buy" | "sell"; qty: string; price: string; fees: string; time: string }[]>([
-    { side: "buy", qty: "", price: "", fees: "", time: "" },
-  ]);
-  const [stopLoss, setStopLoss] = useState("");
-  const [target, setTarget] = useState("");
-  const [floatShares, setFloatShares] = useState("");
-  const [rvol, setRvol] = useState("");
-  const [marketCond, setMarketCond] = useState("");
-  const [l2tas, setL2Tas] = useState("");
-  const [setup, setSetup] = useState("");
-  const [hodClass, setHodClass] = useState("");
-  const [grade, setGrade] = useState("");
-  const [entryReason, setEntryReason] = useState("");
-  const [notes, setNotes] = useState("");
-  const [lessons, setLessons] = useState("");
-  const [emotions, setEmotions] = useState<string[]>([]);
-  const [mistakes, setMistakes] = useState<string[]>([]);
+/** ISO timestamp → local "HH:MM" for the fill time inputs (edit prefill). */
+function fillTimeToInput(iso: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+function RealTradeForm({ onSaved, editing, onCancel }: {
+  /** Called after a successful save; `notice` carries non-fatal issues
+   *  (e.g. screenshot upload failures) for the page to surface. */
+  onSaved: (notice?: string) => void;
+  editing?: { trade: RealTrade; meta: TradeMeta | null } | null;
+  onCancel?: () => void;
+}) {
+  const et = editing?.trade ?? null;
+  const em = editing?.meta ?? null;
+  const [ticker, setTicker] = useState(et?.ticker ?? "");
+  const [company, setCompany] = useState(et?.company_name ?? "");
+  const [broker, setBroker] = useState(et?.broker ?? "Webull");
+  const [date, setDate] = useState(et?.trade_date ?? new Date().toISOString().slice(0, 10));
+  const [direction, setDirection] = useState<"long" | "short">(et?.direction ?? "long");
+  const [strategy, setStrategy] = useState(et?.strategy ?? "");
+  // Fills: edit mode prefills from the saved fills; add mode starts with
+  // one blank entry fill
+  const [fills, setFills] = useState<{ side: "buy" | "sell"; qty: string; price: string; fees: string; time: string }[]>(() =>
+    et && et.fills.length > 0
+      ? et.fills.map((f) => ({
+          side: f.side,
+          qty: String(f.qty),
+          price: String(f.price),
+          fees: String(f.fees ?? 0),
+          time: fillTimeToInput(f.fill_time),
+        }))
+      : [{ side: "buy", qty: "", price: "", fees: "", time: "" }],
+  );
+  const [stopLoss, setStopLoss] = useState(et?.stop_loss != null ? String(et.stop_loss) : "");
+  const [target, setTarget] = useState(et?.target != null ? String(et.target) : "");
+  const [floatShares, setFloatShares] = useState(et?.float_shares != null ? String(et.float_shares) : "");
+  const [rvol, setRvol] = useState(et?.relative_volume != null ? String(et.relative_volume) : "");
+  const [marketCond, setMarketCond] = useState(et?.market_conditions ?? "");
+  const [l2tas, setL2Tas] = useState(et?.level2_tas_notes ?? "");
+  const [setup, setSetup] = useState(em?.setup_tag ?? "");
+  const [hodClass, setHodClass] = useState(em?.hod_class ?? "");
+  const [grade, setGrade] = useState(em?.exec_grade ?? "");
+  const [entryReason, setEntryReason] = useState(em?.entry_reasoning ?? "");
+  const [notes, setNotes] = useState(em?.notes ?? "");
+  const [lessons, setLessons] = useState(em?.lessons ?? "");
+  const [emotions, setEmotions] = useState<string[]>(em?.emotional_tags ?? []);
+  const [mistakes, setMistakes] = useState<string[]>(em?.mistakes ?? []);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  // Screenshots: newly staged files (object-URL previews), screenshots
+  // already saved for the trade being edited, and saved ones the user
+  // marked for removal (deletion is applied on save)
+  const [staged, setStaged] = useState<{ file: File; url: string }[]>([]);
+  const [stageError, setStageError] = useState<string | null>(null);
+  const [existingShots, setExistingShots] = useState<{ path: string; url: string }[]>([]);
+  const [removedPaths, setRemovedPaths] = useState<string[]>([]);
+  const shotInputRef = useRef<HTMLInputElement>(null);
+
+  // Edit mode: load the trade's saved screenshots for display/removal
+  useEffect(() => {
+    if (!et) return;
+    let alive = true;
+    (async () => {
+      const supabase = createClient();
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user || !alive) return;
+      const list = await listScreenshots(supabase, user.id, `real:${et.id}`);
+      if (alive) setExistingShots(list);
+    })();
+    return () => { alive = false; };
+    // Mount-only: the page remounts this form per edit target (key prop)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const stageFiles = (list: FileList | null) => {
+    if (!list) return;
+    const errs: string[] = [];
+    const next: { file: File; url: string }[] = [];
+    for (const file of Array.from(list)) {
+      const invalid = validateScreenshotFile(file);
+      if (invalid) { errs.push(invalid); continue; }
+      next.push({ file, url: URL.createObjectURL(file) });
+    }
+    if (next.length > 0) setStaged((s) => [...s, ...next]);
+    setStageError(errs.length > 0 ? errs.join(" ") : null);
+  };
+  const unstage = (idx: number) =>
+    setStaged((s) => {
+      const copy = [...s];
+      const [rm] = copy.splice(idx, 1);
+      if (rm) URL.revokeObjectURL(rm.url);
+      return copy;
+    });
+  const removeExisting = (path: string) => {
+    setExistingShots((s) => s.filter((x) => x.path !== path));
+    setRemovedPaths((r) => [...r, path]);
+  };
 
   const addFill = (side: "buy" | "sell") =>
     setFills([...fills, { side, qty: "", price: "", fees: "", time: "" }]);
@@ -1039,19 +1304,22 @@ function RealTradeForm({ onSaved }: { onSaved: () => void }) {
   const preview = previewFills.length > 0
     ? calcRealTrade(previewFills, direction, stopLoss ? Number(stopLoss) : null, target ? Number(target) : null)
     : null;
+  // Same validation at save time and live: an invalid fill set (e.g.
+  // exits beyond the position size) blocks saving instead of silently
+  // writing bad accounting.
+  const fillsError = previewFills.length > 0 ? validateRealFills(direction, previewFills) : null;
 
   const save = async () => {
     if (!ticker.trim()) { setMsg("Ticker is required."); return; }
-    const validFills = fills.filter((f) => f.qty && f.price && Number(f.qty) > 0 && Number(f.price) > 0);
-    if (validFills.length === 0) { setMsg("Add at least one fill with quantity and price."); return; }
+    if (previewFills.length === 0) { setMsg("Add at least one fill with quantity and price."); return; }
+    if (fillsError) { setMsg(fillsError); return; }
     setSaving(true); setMsg(null);
     try {
       const supabase = createClient();
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Not signed in.");
 
-      const { data: trade, error: tErr } = await supabase.from("journal_real_trades").insert({
-        user_id: user.id,
+      const tradeFields = {
         ticker: ticker.trim().toUpperCase(),
         company_name: company.trim() || null,
         broker: broker.trim() || null,
@@ -1064,24 +1332,46 @@ function RealTradeForm({ onSaved }: { onSaved: () => void }) {
         relative_volume: rvol ? Number(rvol) : null,
         market_conditions: marketCond.trim() || null,
         level2_tas_notes: l2tas.trim() || null,
-      }).select("id").single();
-      if (tErr) throw new Error(tErr.message);
+      };
 
-      const fillRows = validFills.map((f) => ({
-        trade_id: trade.id,
+      let tradeId: string;
+      if (et) {
+        // Edit: update the existing record in place — never a duplicate
+        const { error: uErr } = await supabase.from("journal_real_trades")
+          .update(tradeFields)
+          .eq("id", et.id)
+          .eq("user_id", user.id);
+        if (uErr) throw new Error(uErr.message);
+        tradeId = et.id;
+        const { error: dErr } = await supabase.from("journal_real_fills")
+          .delete()
+          .eq("trade_id", tradeId)
+          .eq("user_id", user.id);
+        if (dErr) throw new Error(dErr.message);
+      } else {
+        const { data: trade, error: tErr } = await supabase.from("journal_real_trades").insert({
+          user_id: user.id,
+          ...tradeFields,
+        }).select("id").single();
+        if (tErr) throw new Error(tErr.message);
+        tradeId = trade.id;
+      }
+
+      const fillRows = previewFills.map((f) => ({
+        trade_id: tradeId,
         user_id: user.id,
         side: f.side,
-        qty: Number(f.qty),
-        price: Number(f.price),
-        fees: f.fees ? Number(f.fees) : 0,
-        fill_time: f.time ? new Date(`${date}T${f.time}`).toISOString() : null,
+        qty: f.qty,
+        price: f.price,
+        fees: f.fees,
+        fill_time: f.fill_time ? new Date(`${date}T${f.fill_time}`).toISOString() : null,
         note: null,
       }));
       const { error: fErr } = await supabase.from("journal_real_fills").insert(fillRows);
       if (fErr) throw new Error(fErr.message);
 
       // Save Trade DNA annotations via shared meta table
-      const tradeKey = `real:${trade.id}`;
+      const tradeKey = `real:${tradeId}`;
       const { error: mErr } = await supabase.from("journal_trade_meta").upsert({
         user_id: user.id,
         session_id: null,
@@ -1098,8 +1388,22 @@ function RealTradeForm({ onSaved }: { onSaved: () => void }) {
       }, { onConflict: "user_id,trade_key" });
       if (mErr) throw new Error(mErr.message);
 
+      // Screenshots last: a storage failure must not fail the trade
+      // save — failures are reported back as a page notice instead.
+      const attachErrors: string[] = [];
+      if (staged.length > 0) {
+        const res = await uploadScreenshots(supabase, user.id, tradeKey, staged.map((s) => s.file));
+        attachErrors.push(...res.errors);
+      }
+      if (removedPaths.length > 0) {
+        await removeScreenshots(supabase, removedPaths);
+      }
+      const attachNote = attachErrors.length > 0
+        ? `Trade saved, but ${attachErrors.length} screenshot${attachErrors.length === 1 ? "" : "s"} failed to upload — ${attachErrors.join("; ")} — re-add via Edit.`
+        : undefined;
+
       setMsg("Saved.");
-      onSaved();
+      onSaved(attachNote);
     } catch (e) {
       setMsg(e instanceof Error ? e.message : "Save failed.");
     } finally {
@@ -1125,8 +1429,12 @@ function RealTradeForm({ onSaved }: { onSaved: () => void }) {
 
   return (
     <div className="card" style={{ padding: 16, marginBottom: 16 }}>
-      <h4 style={{ margin: "0 0 4px" }}>Add Real Trade</h4>
-      <p className="hint" style={{ margin: "0 0 16px" }}>From your broker — never touches the simulator.</p>
+      <h4 style={{ margin: "0 0 4px" }}>{et ? "Edit Real Trade" : "Add Real Trade"}</h4>
+      <p className="hint" style={{ margin: "0 0 16px" }}>
+        {et
+          ? "Editing updates this trade in place — P&L, R and analytics recalculate from the saved fills."
+          : "From your broker — never touches the simulator."}
+      </p>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 12, marginBottom: 16 }}>
         <div className="field" style={field}><label>Ticker *</label><input className="input mono" value={ticker} onChange={(e) => setTicker(e.target.value.toUpperCase())} placeholder="AAPL" /></div>
@@ -1161,14 +1469,50 @@ function RealTradeForm({ onSaved }: { onSaved: () => void }) {
           <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Live Preview</div>
           <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 13 }}>
             <span>Avg entry <b className="num">{preview.avgEntry != null ? `$${preview.avgEntry.toFixed(2)}` : "—"}</b></span>
+            <span>Avg exit <b className="num">{preview.avgExit != null ? `$${preview.avgExit.toFixed(2)}` : "—"}</b></span>
             <span>Gross <b className="num" style={{ color: preview.grossRealized >= 0 ? "var(--emerald-bright)" : "#f6465d" }}>{fmtPnl(preview.grossRealized)}</b></span>
             <span>Fees <b className="num">{fmtPnl(-preview.totalFees)}</b></span>
             <span>Net <b className="num" style={{ color: preview.netRealized >= 0 ? "var(--emerald-bright)" : "#f6465d" }}>{fmtPnl(preview.netRealized)}</b></span>
             {preview.openQty > 0 && <span style={{ color: "#fbbf24" }}>Open: {preview.openQty} shares</span>}
             {preview.rMultiple != null && <span>R <b className="num">{preview.rMultiple.toFixed(2)}</b></span>}
           </div>
+          {fillsError && <div style={{ color: "#f6465d", fontSize: 12, marginTop: 8 }}>{fillsError}</div>}
         </div>
       )}
+
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>
+          Screenshots <span className="hint">(optional — stored permanently with this trade)</span>
+        </div>
+        <input ref={shotInputRef} type="file" accept="image/*" multiple style={{ display: "none" }}
+          onChange={(e) => { stageFiles(e.target.files); e.target.value = ""; }} />
+        <button className="btn" type="button" onClick={() => shotInputRef.current?.click()}>📎 Attach Screenshot</button>
+        <span className="hint" style={{ marginLeft: 10 }}>PNG, JPEG, WebP or GIF, up to 5 MB each</span>
+        {stageError && <p style={{ color: "#f6465d", fontSize: 12, margin: "8px 0 0" }}>{stageError}</p>}
+        {(existingShots.length > 0 || staged.length > 0) && (
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
+            {existingShots.map((s) => (
+              <div key={s.path} style={{ position: "relative" }}>
+                <img src={s.url} alt="Saved screenshot" style={{ height: 72, width: 108, objectFit: "cover", borderRadius: 8, border: "1px solid rgba(255,255,255,0.12)", display: "block" }} />
+                <button type="button" title="Remove screenshot" onClick={() => removeExisting(s.path)}
+                  style={{ position: "absolute", top: -6, right: -6, width: 20, height: 20, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.25)", background: "#1a2229", color: "#fff", cursor: "pointer", fontSize: 12, lineHeight: 1, padding: 0 }}>×</button>
+              </div>
+            ))}
+            {staged.map((s, i) => (
+              <div key={s.url} style={{ position: "relative" }}>
+                <img src={s.url} alt="New screenshot" style={{ height: 72, width: 108, objectFit: "cover", borderRadius: 8, border: "1px solid rgba(16,185,129,0.45)", display: "block" }} />
+                <button type="button" title="Remove screenshot" onClick={() => unstage(i)}
+                  style={{ position: "absolute", top: -6, right: -6, width: 20, height: 20, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.25)", background: "#1a2229", color: "#fff", cursor: "pointer", fontSize: 12, lineHeight: 1, padding: 0 }}>×</button>
+              </div>
+            ))}
+          </div>
+        )}
+        {removedPaths.length > 0 && (
+          <p className="hint" style={{ margin: "8px 0 0" }}>
+            {removedPaths.length} saved screenshot{removedPaths.length === 1 ? "" : "s"} will be removed when you save.
+          </p>
+        )}
+      </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 12, marginBottom: 16 }}>
         <div className="field" style={field}><label>Stop Loss</label><input className="input num" type="number" step="any" value={stopLoss} onChange={(e) => setStopLoss(e.target.value)} /></div>
@@ -1197,7 +1541,12 @@ function RealTradeForm({ onSaved }: { onSaved: () => void }) {
       </div>
 
       <div>
-        <button className="btn primary big" onClick={save} disabled={saving}>{saving ? "Saving…" : "Save Real Trade"}</button>
+        <button className="btn primary big" onClick={save} disabled={saving || !!fillsError}>
+          {saving ? "Saving…" : et ? "Save Changes" : "Save Real Trade"}
+        </button>
+        {onCancel && (
+          <button className="btn big" onClick={onCancel} disabled={saving} style={{ marginLeft: 8 }}>Cancel</button>
+        )}
         {msg && <span style={{ marginLeft: 12, fontSize: 13 }}>{msg}</span>}
       </div>
     </div>
