@@ -3,7 +3,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
-import { groupFillsIntoTrades, calcMetrics, calcRealTrade, parseBrokerCsv, parseWithMapping, autoMapColumns, MAPPABLE_FIELDS, groupImportedFills, fmtPnl, fmtPct, type GroupedTrade, type RawFill, type RealFill, type RealTradeCalc, type BrokerParseResult, type ImportedTrade } from "../../lib/journal";
+import { groupFillsIntoTrades, calcMetrics, calcRealTrade, quickPnl, quickFills, parseBrokerCsv, parseWithMapping, autoMapColumns, MAPPABLE_FIELDS, groupImportedFills, fmtPnl, fmtPct, type GroupedTrade, type RawFill, type RealFill, type RealTradeCalc, type BrokerParseResult, type ImportedTrade } from "../../lib/journal";
 import { breakdown, riskMetrics, edgeInsights, dailyPnl, type AnalyticsTrade, type BreakdownDimension, type Insight } from "../../lib/journalAnalytics";
 
 type Tab = "overview" | "trades" | "review" | "calendar" | "analytics";
@@ -1006,6 +1006,23 @@ function RealTradeForm({ onSaved }: { onSaved: () => void }) {
   const [fills, setFills] = useState<{ side: "buy" | "sell"; qty: string; price: string; fees: string; time: string }[]>([
     { side: "buy", qty: "", price: "", fees: "", time: "" },
   ]);
+  // Quick entry (single entry/exit): computes live P&L and builds the
+  // standard fills below — calcRealTrade stays the only P&L engine.
+  const [qEntry, setQEntry] = useState("");
+  const [qExit, setQExit] = useState("");
+  const [qQty, setQQty] = useState("");
+  const [qFees, setQFees] = useState("");
+  const qEntryN = Number(qEntry);
+  const qQtyN = Number(qQty);
+  const qFeesN = Number(qFees || 0);
+  const qExitN = qExit.trim() === "" ? null : Number(qExit);
+  const qValidBase = qEntryN > 0 && qQtyN > 0 && qFeesN >= 0 && (qExitN == null || qExitN > 0);
+  const qResult = qValidBase ? quickPnl(direction, qEntryN, qExitN, qQtyN, qFeesN) : null;
+  const applyQuick = () => {
+    const built = quickFills(direction, qEntryN, qExitN, qQtyN, qFeesN);
+    if (built.length === 0) return;
+    setFills(built.map((f) => ({ side: f.side, qty: String(f.qty), price: String(f.price), fees: f.fees ? String(f.fees) : "", time: "" })));
+  };
   const [stopLoss, setStopLoss] = useState("");
   const [target, setTarget] = useState("");
   const [floatShares, setFloatShares] = useState("");
@@ -1137,6 +1154,27 @@ function RealTradeForm({ onSaved }: { onSaved: () => void }) {
         <div className="field" style={field}><label>Strategy</label><input className="input" value={strategy} onChange={(e) => setStrategy(e.target.value)} placeholder="HOD breakout…" /></div>
       </div>
 
+      <div style={{ border: "1px solid rgba(255,255,255,0.08)", borderRadius: 10, padding: 12, marginBottom: 16 }}>
+        <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 2 }}>Quick entry <span className="hint">(single entry &amp; exit)</span></div>
+        <p className="hint" style={{ margin: "0 0 10px" }}>Type the two prices and build the fills automatically. Leave Exit Price blank for an open trade — no P&amp;L is calculated until it closes. Partial exits or multiple entries? Build them in Fills below instead.</p>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 12, marginBottom: 10 }}>
+          <div className="field" style={field}><label>Entry Price ($)</label><input className="input num" type="number" step="any" value={qEntry} onChange={(e) => setQEntry(e.target.value)} placeholder="3.30" /></div>
+          <div className="field" style={field}><label>Exit Price ($)</label><input className="input num" type="number" step="any" value={qExit} onChange={(e) => setQExit(e.target.value)} placeholder="Open if blank" /></div>
+          <div className="field" style={field}><label>Quantity</label><input className="input num" type="number" step="any" value={qQty} onChange={(e) => setQQty(e.target.value)} placeholder="100" /></div>
+          <div className="field" style={field}><label>Total Fees ($)</label><input className="input num" type="number" step="any" value={qFees} onChange={(e) => setQFees(e.target.value)} placeholder="0" /></div>
+        </div>
+        <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap", fontSize: 13 }}>
+          <button className="btn" onClick={applyQuick} disabled={!qValidBase}>Build fills from these prices</button>
+          {qResult ? (
+            <span>Gross <b className="num" style={{ color: qResult.gross > 0 ? "var(--emerald-bright)" : qResult.gross < 0 ? "#f6465d" : "var(--muted)" }}>{fmtPnl(qResult.gross)}</b> · Net <b className="num" style={{ color: qResult.net > 0 ? "var(--emerald-bright)" : qResult.net < 0 ? "#f6465d" : "var(--muted)" }}>{fmtPnl(qResult.net)}</b></span>
+          ) : qValidBase ? (
+            <span style={{ color: "#fbbf24" }}>Open trade — no realized P&amp;L yet.</span>
+          ) : (
+            <span className="hint">Enter a valid entry price and quantity to preview P&amp;L.</span>
+          )}
+        </div>
+      </div>
+
       <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>Fills <span className="hint">(multiple entries & partial exits)</span></div>
       {fills.map((f, i) => (
         <div key={i} className="fill-row" style={{ display: "grid", gridTemplateColumns: "80px 1fr 1fr 1fr 110px 32px", gap: 8, marginBottom: 8, alignItems: "end" }}>
@@ -1145,7 +1183,7 @@ function RealTradeForm({ onSaved }: { onSaved: () => void }) {
               <option value="buy">Buy</option><option value="sell">Sell</option>
             </select></div>
           <div className="field" style={field}><label>Qty *</label><input className="input num" type="number" step="any" value={f.qty} onChange={(e) => updateFill(i, "qty", e.target.value)} /></div>
-          <div className="field" style={field}><label>Price *</label><input className="input num" type="number" step="any" value={f.price} onChange={(e) => updateFill(i, "price", e.target.value)} /></div>
+          <div className="field" style={field}><label>{f.side === (direction === "long" ? "buy" : "sell") ? "Entry Price *" : "Exit Price *"}</label><input className="input num" type="number" step="any" value={f.price} onChange={(e) => updateFill(i, "price", e.target.value)} /></div>
           <div className="field" style={field}><label>Fees $</label><input className="input num" type="number" step="any" value={f.fees} onChange={(e) => updateFill(i, "fees", e.target.value)} placeholder="0" /></div>
           <div className="field" style={field}><label>Time</label><input className="input" type="time" value={f.time} onChange={(e) => updateFill(i, "time", e.target.value)} /></div>
           <button className="btn" onClick={() => removeFill(i)} disabled={fills.length === 1} style={{ height: 38 }}>×</button>

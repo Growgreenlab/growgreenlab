@@ -561,3 +561,67 @@ export function calcRealTrade(
     isClosed,
   };
 }
+
+/* ================= Quick entry (single entry/exit) =================
+ * The Add Real Trade form's simple path: entry price, optional exit
+ * price, quantity, total fees. It does NOT create a second P&L system —
+ * quickFills() converts the values into ordinary fills and calcRealTrade
+ * remains the single source of truth for realized P&L, so Overview,
+ * Analytics, Daily P&L and breakdowns stay consistent automatically.
+ * The recorded stop loss is a separate input and is never derived from
+ * the exit price; R-multiples keep using initial risk as before. */
+
+/**
+ * Live quick-entry P&L. Returns null when the trade is not complete
+ * (no exit price) or any input is invalid — an open trade has no
+ * realized P&L yet, and a missing exit is never fabricated.
+ *   LONG:  gross = (exit − entry) × qty
+ *   SHORT: gross = (entry − exit) × qty
+ *   net = gross − totalFees
+ */
+export function quickPnl(
+  direction: "long" | "short",
+  entryPrice: number,
+  exitPrice: number | null,
+  qty: number,
+  totalFees: number,
+): { gross: number; net: number } | null {
+  if (exitPrice == null) return null;
+  if (!(entryPrice > 0) || !(exitPrice > 0) || !(qty > 0) || !(totalFees >= 0)) return null;
+  const gross = (direction === "long" ? exitPrice - entryPrice : entryPrice - exitPrice) * qty;
+  return { gross, net: gross - totalFees };
+}
+
+export interface QuickFill {
+  side: "buy" | "sell";
+  qty: number;
+  price: number;
+  fees: number;
+}
+
+/**
+ * Convert quick-entry values into fills for calcRealTrade:
+ *  - entry fill on the opening side (long → buy, short → sell),
+ *    carrying the total fees so the net matches quickPnl exactly;
+ *  - when an exit price is present, one closing fill on the opposite
+ *    side for the full quantity (partial exits are built with the
+ *    detailed fills editor, not here);
+ *  - when the exit price is absent, only the entry fill — the trade
+ *    stays open with no realized P&L.
+ * Returns [] for invalid entry/qty/fees.
+ */
+export function quickFills(
+  direction: "long" | "short",
+  entryPrice: number,
+  exitPrice: number | null,
+  qty: number,
+  totalFees: number,
+): QuickFill[] {
+  if (!(entryPrice > 0) || !(qty > 0) || !(totalFees >= 0)) return [];
+  if (exitPrice != null && !(exitPrice > 0)) return [];
+  const entrySide: "buy" | "sell" = direction === "long" ? "buy" : "sell";
+  const exitSide: "buy" | "sell" = direction === "long" ? "sell" : "buy";
+  const fills: QuickFill[] = [{ side: entrySide, qty, price: entryPrice, fees: totalFees }];
+  if (exitPrice != null) fills.push({ side: exitSide, qty, price: exitPrice, fees: 0 });
+  return fills;
+}
