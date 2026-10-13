@@ -357,6 +357,53 @@ export function dailyPnl(trades: AnalyticsTrade[]): { date: string; pnl: number;
     .sort((a, b) => a.date.localeCompare(b.date));
 }
 
+/* ---------------- daily P&L chart geometry ---------------- */
+
+export interface DailyBar {
+  date: string;
+  pnl: number;
+  count: number;
+  /** Bar rectangle (SVG user units). */
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Slot center — anchor for date/value labels. */
+  cx: number;
+  sign: "pos" | "neg" | "zero";
+}
+
+/**
+ * Bar layout for the Daily P&L chart. Bars NEVER stretch to fill their
+ * slot: width is capped at 48 units and each bar is centered in its
+ * slot, so a single trading day renders as one centered bar — not a
+ * full-width slab (the pre-fix geometry divided the whole chart width
+ * by the day count). The bottom `labelBand` units are reserved for date
+ * labels; bars rise above / hang below the zero line in the plot area.
+ * A zero-P&L day is a 2-unit neutral tick straddling the zero line.
+ */
+export function dailyBarLayout(
+  days: { date: string; pnl: number; count: number }[],
+  width = 620,
+  height = 150,
+  labelBand = 16,
+): { bars: DailyBar[]; zeroY: number; plotH: number; maxAbs: number } {
+  const plotH = height - labelBand;
+  const zeroY = plotH / 2;
+  const maxAbs = Math.max(1, ...days.map((d) => Math.abs(d.pnl)));
+  const n = days.length;
+  const slotW = n > 0 ? width / n : width;
+  const w = Math.min(48, slotW * 0.62);
+  const bars: DailyBar[] = days.map((d, i) => {
+    const cx = slotW * i + slotW / 2;
+    const sign: DailyBar["sign"] = d.pnl > 0 ? "pos" : d.pnl < 0 ? "neg" : "zero";
+    const h = sign === "zero" ? 2 : Math.max(2, (Math.abs(d.pnl) / maxAbs) * (plotH / 2 - 14));
+    const y = sign === "pos" ? zeroY - h : sign === "neg" ? zeroY : zeroY - 1;
+    return { date: d.date, pnl: d.pnl, count: d.count, x: cx - w / 2, y, w, h, cx, sign };
+  });
+  return { bars, zeroY, plotH, maxAbs };
+}
+
 /* ---------------- edge finder ---------------- */
 
 export interface InsightStat {

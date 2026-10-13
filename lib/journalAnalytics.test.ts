@@ -4,7 +4,7 @@
  * Every expected value below was calculated by hand from the fixture data.
  */
 import {
-  breakdown, riskMetrics, edgeInsights, dailyPnl,
+  breakdown, riskMetrics, edgeInsights, dailyPnl, dailyBarLayout,
   etMinutesOfDay, sessionBucket, timeOfDayBucket, holdBucket, holdMinutes,
   type AnalyticsTrade,
 } from "./journalAnalytics";
@@ -241,6 +241,54 @@ approx("J delta from unrounded sums", trendJ.netPnlDelta, 41.238);
 check("J fmtPnl(current) = +$46.02", fmtPnl(trendJ.current!.netPnl) === "+$46.02");
 check("J fmtPnl(prior) = +$4.79", fmtPnl(trendJ.prior!.netPnl) === "+$4.79");
 check("J fmtPnl(delta) = +$41.24", fmtPnl(trendJ.netPnlDelta!) === "+$41.24");
+
+/* ============ Set K: daily P&L aggregation + chart geometry =========
+ * Regression for the 2026-10-13 production bug: with ONE trading day
+ * the old geometry set bar width = chartWidth / dayCount, rendering a
+ * single full-width solid slab. Aggregation itself was always correct. */
+const aggK = dailyPnl([
+  T({ tradeDate: "2026-10-09", realizedPnl: 5 }),
+  T({ tradeDate: "2026-10-08", realizedPnl: 50 }),
+  T({ tradeDate: "2026-10-08", realizedPnl: -20 }),
+  T({ tradeDate: "2026-10-09", realizedPnl: -5 }),
+]);
+check("K aggregation: 2 days, sorted ascending", aggK.length === 2 && aggK[0].date === "2026-10-08" && aggK[1].date === "2026-10-09");
+approx("K aggregation: same-day trades sum (50 − 20 = 30)", aggK[0].pnl, 30);
+check("K aggregation: same-day count = 2", aggK[0].count === 2);
+approx("K aggregation: zero-net day retained at 0", aggK[1].pnl, 0);
+check("K aggregation: zero-net day count = 2", aggK[1].count === 2);
+
+// Single day (the reported bug): one centered, width-capped bar.
+const lay1 = dailyBarLayout([{ date: "2026-10-09", pnl: 2006.94, count: 3 }], 620, 150);
+check("K single day: exactly one bar", lay1.bars.length === 1);
+check("K single day: bar width capped at 48 (NOT ~618)", lay1.bars[0].w <= 48);
+approx("K single day: bar centered (cx = 310)", lay1.bars[0].cx, 310);
+approx("K single day: bar bottom sits on zero line", lay1.bars[0].y + lay1.bars[0].h, lay1.zeroY);
+
+// Mixed signs + a zero day.
+const lay3 = dailyBarLayout([
+  { date: "2026-10-07", pnl: 100, count: 2 },
+  { date: "2026-10-08", pnl: -50, count: 1 },
+  { date: "2026-10-09", pnl: 0, count: 1 },
+], 620, 150);
+check("K mixed: signs classified", lay3.bars[0].sign === "pos" && lay3.bars[1].sign === "neg" && lay3.bars[2].sign === "zero");
+approx("K mixed: positive bar rises to zero line", lay3.bars[0].y + lay3.bars[0].h, lay3.zeroY);
+approx("K mixed: negative bar hangs from zero line", lay3.bars[1].y, lay3.zeroY);
+approx("K mixed: negative height is half of max (50/100)", lay3.bars[1].h, lay3.bars[0].h / 2);
+check("K mixed: zero day is a 2-unit tick straddling the line", lay3.bars[2].h === 2 && lay3.bars[2].y === lay3.zeroY - 1);
+check("K mixed: visible gaps between bars", lay3.bars[1].x > lay3.bars[0].x + lay3.bars[0].w && lay3.bars[2].x > lay3.bars[1].x + lay3.bars[1].w);
+check("K mixed: all bars inside the chart", lay3.bars.every((b) => b.x >= 0 && b.x + b.w <= 620));
+
+// Many days: bars shrink with the slot and never touch.
+const manyK = Array.from({ length: 40 }, (_, i) => ({ date: `2026-09-${String(1 + (i % 28)).padStart(2, "0")}`, pnl: i % 2 === 0 ? 25 : -25, count: 1 }));
+const lay40 = dailyBarLayout(manyK, 620, 150);
+check("K 40 days: bar narrower than its slot", lay40.bars.every((b) => b.w < 620 / 40));
+check("K 40 days: no overlapping bars", lay40.bars.every((b, i) => i === 0 || b.x >= lay40.bars[i - 1].x + lay40.bars[i - 1].w));
+
+// Empty input: no bars, sane zero line.
+const lay0 = dailyBarLayout([], 620, 150);
+check("K empty: no bars", lay0.bars.length === 0);
+approx("K empty: zeroY at plot middle (67)", lay0.zeroY, 67);
 
 console.log(`journalAnalytics tests: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

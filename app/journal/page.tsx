@@ -4,7 +4,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
 import { groupFillsIntoTrades, calcMetrics, calcRealTrade, parseBrokerCsv, parseWithMapping, autoMapColumns, MAPPABLE_FIELDS, groupImportedFills, fmtPnl, fmtPct, type GroupedTrade, type RawFill, type RealFill, type RealTradeCalc, type BrokerParseResult, type ImportedTrade } from "../../lib/journal";
-import { breakdown, riskMetrics, edgeInsights, dailyPnl, type AnalyticsTrade, type BreakdownDimension, type Insight } from "../../lib/journalAnalytics";
+import { breakdown, riskMetrics, edgeInsights, dailyPnl, dailyBarLayout, type AnalyticsTrade, type BreakdownDimension, type Insight } from "../../lib/journalAnalytics";
 
 type Tab = "overview" | "trades" | "review" | "calendar" | "analytics";
 type Period = "today" | "week" | "month" | "30d" | "90d" | "ytd" | "all";
@@ -1401,10 +1401,15 @@ function AnalyticsTab({ trades, onSelect }: { trades: AnalyticsTrade[]; onSelect
 
   // R-distribution chart geometry
   const rMax = Math.max(1, ...risk.rDistribution.map((b) => b.count));
-  // Daily P&L chart geometry
-  const dMax = Math.max(1, ...days.map((d) => Math.abs(d.pnl)));
-  const DW = 620, DH = 130, zeroY = DH / 2;
-  const barW = days.length > 0 ? Math.max(2, Math.floor(DW / days.length) - 2) : 0;
+  // Daily P&L chart geometry — bars are width-capped and slot-centered
+  // (see dailyBarLayout in lib/journalAnalytics); a single trading day
+  // must render as one centered bar, never a full-width slab.
+  const DW = 620, DH = 150;
+  const dayLayout = dailyBarLayout(days, DW, DH);
+  const showDayValues = days.length <= 8;
+  const dayLabelEvery = Math.max(1, Math.ceil(days.length / 12));
+  const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const dayLabel = (iso: string) => `${MON[Number(iso.slice(5, 7)) - 1]} ${Number(iso.slice(8, 10))}`;
 
   return (
     <div style={{ display: "grid", gap: 20 }}>
@@ -1445,15 +1450,28 @@ function AnalyticsTab({ trades, onSelect }: { trades: AnalyticsTrade[]; onSelect
           </div>
           <div className="card" style={{ padding: 16 }}>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Daily P&amp;L</div>
-            <svg viewBox={`0 0 ${DW} ${DH}`} style={{ width: "100%" }}>
-              <line x1={0} y1={zeroY} x2={DW} y2={zeroY} stroke="rgba(255,255,255,0.15)" strokeDasharray="4 3" />
-              {days.map((d, i) => {
-                const h = (Math.abs(d.pnl) / dMax) * (DH / 2 - 8);
-                const x = i * (DW / Math.max(1, days.length)) + 1;
-                return <rect key={d.date} x={x} y={d.pnl >= 0 ? zeroY - h : zeroY} width={barW} height={Math.max(1, h)} fill={d.pnl >= 0 ? "var(--emerald)" : "#f6465d"} opacity={0.9} />;
-              })}
-            </svg>
-            <div className="hint" style={{ fontSize: 11 }}>{days.length} trading day{days.length === 1 ? "" : "s"} · best {fmtPnl(Math.max(...days.map((d) => d.pnl)))} · worst {fmtPnl(Math.min(...days.map((d) => d.pnl)))}</div>
+            {days.length === 0 ? (
+              <p className="hint" style={{ margin: 0 }}>No trading days in the current selection.</p>
+            ) : (
+              <>
+                <svg viewBox={`0 0 ${DW} ${DH}`} style={{ width: "100%" }} role="img" aria-label="Daily profit and loss by trading day">
+                  <line x1={0} y1={dayLayout.zeroY} x2={DW} y2={dayLayout.zeroY} stroke="rgba(255,255,255,0.25)" strokeWidth={1} />
+                  {dayLayout.bars.map((b, i) => (
+                    <g key={b.date}>
+                      <title>{`${b.date} · ${fmtPnl(b.pnl)} · ${b.count} trade${b.count === 1 ? "" : "s"}`}</title>
+                      <rect x={b.x} y={b.y} width={b.w} height={b.h} rx={2} fill={b.sign === "pos" ? "var(--emerald)" : b.sign === "neg" ? "#f6465d" : "rgba(255,255,255,0.4)"} opacity={0.92} />
+                      {showDayValues && b.sign !== "zero" && (
+                        <text x={b.cx} y={b.sign === "pos" ? b.y - 3 : b.y + b.h + 10} textAnchor="middle" fontSize={10} fill="var(--muted)">{fmtPnl(b.pnl)}</text>
+                      )}
+                      {i % dayLabelEvery === 0 && (
+                        <text x={b.cx} y={DH - 3} textAnchor="middle" fontSize={9.5} fill="var(--muted)">{dayLabel(b.date)}</text>
+                      )}
+                    </g>
+                  ))}
+                </svg>
+                <div className="hint" style={{ fontSize: 11 }}>{days.length} trading day{days.length === 1 ? "" : "s"} · best {fmtPnl(Math.max(...days.map((d) => d.pnl)))} · worst {fmtPnl(Math.min(...days.map((d) => d.pnl)))}</div>
+              </>
+            )}
           </div>
         </div>
       </section>
