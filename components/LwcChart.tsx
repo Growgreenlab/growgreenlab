@@ -19,6 +19,7 @@ import {
   type UTCTimestamp,
 } from "lightweight-charts";
 import type { Candle } from "../lib/types";
+import { planBarPush, type BarPushState } from "../lib/chartPush";
 import { diag } from "../lib/diag";
 import { normalizePrice, formatPrice } from "../lib/price";
 import type { Drawing, DrawingTool, DrawingType, DrawingInteractionState } from "../lib/drawings";
@@ -61,7 +62,7 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   // Tracks what we've pushed so we can use update() instead of setData().
-  const pushedRef = useRef<{ key: string; n: number } | null>(null);
+  const pushedRef = useRef<BarPushState | null>(null);
   // Bracket price lines: planned (dashed) vs active (solid, engine-linked).
   const plannedSLRef = useRef<IPriceLine | null>(null);
   const plannedTPRef = useRef<IPriceLine | null>(null);
@@ -294,9 +295,13 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       color: c.c >= c.o ? UP_VOL : DOWN_VOL,
     });
 
-    const prev = pushedRef.current;
     try {
-      if (!prev || prev.key !== sessionKey || n < prev.n) {
+      // Push planning lives in lib/chartPush (pure + unit-tested). The key
+      // property: when the array grows, the previously-last bar is re-pushed
+      // FIRST — it was the forming candle and may have finalized mid-batch,
+      // so without this its partial forming OHLCV would stay on the chart.
+      const plan = planBarPush(pushedRef.current, sessionKey, n);
+      if (plan?.mode === "full") {
         // New session, reset, or dataset shrank: full replace.
         const bars = [];
         const vols = [];
@@ -306,19 +311,16 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
         }
         cs.setData(bars);
         vs.setData(vols);
-        pushedRef.current = { key: sessionKey, n };
-      } else if (n === prev.n) {
-        // Same bars; only the forming (last) candle changed: efficient update.
-        const c = candles[n - 1];
-        cs.update(toBar(c));
-        vs.update(toVol(c));
-      } else {
-        // New candle(s) appended: update() appends when the time is newer.
-        for (let i = prev.n; i < n; i++) {
+        pushedRef.current = plan.state;
+      } else if (plan) {
+        // Incremental: re-push from plan.from (the possibly-just-finalized
+        // previous bar, or only the forming bar when length is unchanged),
+        // then any appended bars. update() replaces same-time bars.
+        for (let i = plan.from; i < plan.n; i++) {
           cs.update(toBar(candles[i]));
           vs.update(toVol(candles[i]));
         }
-        pushedRef.current = { key: sessionKey, n };
+        pushedRef.current = plan.state;
       }
       // Diagnostics: track chart update health.
       diag.chartUpdates++;
