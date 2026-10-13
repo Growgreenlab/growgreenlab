@@ -608,3 +608,148 @@ export function validateRealFills(
   }
   return null;
 }
+
+// ─── Per-exit realized P&L (FIFO, gross) ──────────────────────────
+export interface ExitPnl {
+  /** The exit fill's id, as passed in. */
+  fillId: string;
+  /** Quantity of this exit that matched open entries. */
+  qty: number;
+  /** This exit's price. */
+  price: number;
+  /** Gross realized P&L of the matched portion (fees excluded —
+   *  fees are accounted globally, exactly as in calcRealTrade, so
+   *  sum(perExitPnl.grossPnl) === calcRealTrade(fills).grossRealized). */
+  grossPnl: number;
+}
+
+/**
+ * Realized P&L for EACH exit fill, using the same FIFO walk as
+ * calcRealTrade so the per-exit numbers reconcile with the totals.
+ */
+export function perExitPnl(fills: RealFill[], direction: "long" | "short"): ExitPnl[] {
+  const sorted = [...fills].sort((a, b) =>
+    new Date(a.fill_time ?? 0).getTime() - new Date(b.fill_time ?? 0).getTime()
+  );
+  const isEntry = (f: RealFill) =>
+    direction === "long" ? f.side === "buy" : f.side === "sell";
+  const lots: { qty: number; price: number }[] = [];
+  const out: ExitPnl[] = [];
+  for (const f of sorted) {
+    const q = Number(f.qty), p = Number(f.price);
+    if (isEntry(f)) { lots.push({ qty: q, price: p }); continue; }
+    let remaining = q, matchedQty = 0, pnl = 0;
+    while (remaining > 1e-9 && lots.length > 0) {
+      const lot = lots[0];
+      const matched = Math.min(remaining, lot.qty);
+      pnl += (direction === "long" ? p - lot.price : lot.price - p) * matched;
+      matchedQty += matched;
+      lot.qty -= matched;
+      remaining -= matched;
+      if (lot.qty < 1e-9) lots.shift();
+    }
+    if (matchedQty > 0) out.push({ fillId: f.id, qty: matchedQty, price: p, grossPnl: pnl });
+  }
+  return out;
+}
+
+// ─── Key levels & trade context (Trade DNA) ───────────────────────
+export interface KeyLevel {
+  price: number;
+  type: string;
+  interaction: string | null;
+  notes: string | null;
+}
+
+export const KEY_LEVEL_TYPES = [
+  "HOD / High of Day", "Premarket High", "Support", "Resistance", "VWAP",
+  "EMA", "Previous Day High", "Previous Day Low", "Other",
+] as const;
+
+export const KEY_LEVEL_INTERACTIONS = [
+  "Breakout", "Breakdown", "Support bounce", "Resistance rejection",
+  "Retest", "Failed breakout", "Failed breakdown", "Anticipation", "Other",
+] as const;
+
+/** Sanitize an unknown stored value (jsonb) into KeyLevel[]. */
+export function parseKeyLevels(raw: unknown): KeyLevel[] {
+  if (!Array.isArray(raw)) return [];
+  const out: KeyLevel[] = [];
+  for (const r of raw) {
+    if (!r || typeof r !== "object") continue;
+    const o = r as Record<string, unknown>;
+    const price = Number(o.price);
+    const type = typeof o.type === "string" ? o.type.trim() : "";
+    if (!Number.isFinite(price) || price <= 0 || !type) continue;
+    out.push({
+      price,
+      type,
+      interaction: typeof o.interaction === "string" && o.interaction.trim() ? o.interaction.trim() : null,
+      notes: typeof o.notes === "string" && o.notes.trim() ? o.notes.trim() : null,
+    });
+  }
+  return out;
+}
+
+/** Validate form rows for key levels. Rows are {price: string, type: string}. */
+export function validateKeyLevels(
+  rows: { price: string; type: string }[],
+): string | null {
+  for (let i = 0; i < rows.length; i++) {
+    const priceEmpty = !rows[i].price.trim();
+    const typeEmpty = !rows[i].type.trim();
+    if (priceEmpty && typeEmpty) continue; // untouched row — ignored
+    if (priceEmpty) return `Key level ${i + 1} needs a price.`;
+    if (!(Number(rows[i].price) > 0)) return `Key level ${i + 1} price must be greater than 0.`;
+    if (typeEmpty) return `Key level ${i + 1} needs a level type.`;
+  }
+  return null;
+}
+
+// ─── Original plan preservation ───────────────────────────────────
+export interface PlanChange {
+  at: string;
+  field: "stop_loss" | "target";
+  from: number | null;
+  to: number | null;
+}
+
+export interface PlanState {
+  original_stop_loss: number | null;
+  original_target: number | null;
+  plan_history: PlanChange[];
+}
+
+/**
+ * Compute the plan-preservation fields for a trade save.
+ * Originals are SET-ONCE: the first recorded plan (at creation, or the
+ * pre-edit values on the first tracked edit) becomes the original and
+ * is never overwritten. Later stop/target changes append to
+ * plan_history instead. Trades with no plan data anywhere keep null
+ * originals — unavailable, never invented.
+ */
+export function computePlanUpdate(
+  existing: { original_stop_loss?: number | null; original_target?: number | null; plan_history?: unknown } | null,
+  prevStop: number | null,
+  prevTarget: number | null,
+  nextStop: number | null,
+  nextTarget: number | null,
+  atIso: string,
+): PlanState {
+  const history: PlanChange[] = Array.isArray(existing?.plan_history)
+    ? (existing.plan_history as PlanChange[]).filter(
+        (c) => c && typeof c === "object" && (c.field === "stop_loss" || c.field === "target"),
+      )
+    : [];
+  const original_stop_loss = existing?.original_stop_loss ?? prevStop ?? nextStop;
+  const original_target = existing?.original_target ?? prevTarget ?? nextTarget;
+  // Log changes only against a previously recorded value — the first
+  // recording of a plan IS the original, not a "change".
+  if (prevStop != null && prevStop !== nextStop) {
+    history.push({ at: atIso, field: "stop_loss", from: prevStop, to: nextStop });
+  }
+  if (prevTarget != null && prevTarget !== nextTarget) {
+    history.push({ at: atIso, field: "target", from: prevTarget, to: nextTarget });
+  }
+  return { original_stop_loss, original_target, plan_history: history };
+}

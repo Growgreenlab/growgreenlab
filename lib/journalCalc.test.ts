@@ -7,7 +7,7 @@
  * outputs (avgEntry, gross/net realized, fees, openQty) so changes to
  * the FIFO walk can't silently alter them.
  */
-import { calcRealTrade, validateRealFills, type RealFill } from "./journal";
+import { calcRealTrade, validateRealFills, perExitPnl, parseKeyLevels, validateKeyLevels, computePlanUpdate, type RealFill } from "./journal";
 
 let passed = 0, failed = 0;
 function check(name: string, cond: boolean) {
@@ -110,6 +110,76 @@ check("exit > entry rejected (long)", overErr !== null);
 check("exit > entry message format", overErr === "Exit quantity (150) exceeds position size (100)");
 const overErrShort = validateRealFills("short", [F("sell", 100, 3.50), F("buy", 120, 3.30)]);
 check("exit > entry message format (short)", overErrShort === "Exit quantity (120) exceeds position size (100)");
+
+
+/* ============ per-exit P&L: multiple entries + multiple exits ============
+ * buy 100@3.00, buy 100@3.20, sell 120@3.50, sell 80@3.40.
+ * Exit 1 FIFO: 100x(3.50-3.00) + 20x(3.50-3.20) = 56. Exit 2: 80x(3.40-3.20) = 16. */
+{
+  const fills: RealFill[] = [
+    { id: "a", side: "buy", qty: 100, price: 3.00, fees: 1, fill_time: "2026-10-12T13:30:00Z" },
+    { id: "b", side: "buy", qty: 100, price: 3.20, fees: 1, fill_time: "2026-10-12T13:31:00Z" },
+    { id: "c", side: "sell", qty: 120, price: 3.50, fees: 1, fill_time: "2026-10-12T13:35:00Z" },
+    { id: "d", side: "sell", qty: 80, price: 3.40, fees: 1, fill_time: "2026-10-12T13:40:00Z" },
+  ];
+  const px = perExitPnl(fills, "long");
+  check("perExit: two exits reported", px.length === 2);
+  approx("perExit: first exit FIFO gross = 56", px[0]?.grossPnl, 56);
+  approx("perExit: second exit FIFO gross = 16", px[1]?.grossPnl, 16);
+  const total = calcRealTrade(fills, "long", null, null);
+  approx("perExit: reconciles with gross", (px[0]?.grossPnl ?? 0) + (px[1]?.grossPnl ?? 0), total.grossRealized);
+  approx("multi in/out: fully closed", total.openQty, 0);
+  approx("multi in/out: weighted avg entry", total.avgEntry, 3.10);
+}
+/* Short per-exit: sell 100@5.00, buy 40@4.80 (+8), buy 60@4.90 (+6) */
+{
+  const fills: RealFill[] = [
+    { id: "a", side: "sell", qty: 100, price: 5.00, fees: 0, fill_time: "2026-10-12T13:30:00Z" },
+    { id: "b", side: "buy", qty: 40, price: 4.80, fees: 0, fill_time: "2026-10-12T13:31:00Z" },
+    { id: "c", side: "buy", qty: 60, price: 4.90, fees: 0, fill_time: "2026-10-12T13:32:00Z" },
+  ];
+  const px = perExitPnl(fills, "short");
+  approx("perExit short: first exit +8", px[0]?.grossPnl, 8);
+  approx("perExit short: second exit +6", px[1]?.grossPnl, 6);
+}
+
+/* ============ key levels ============ */
+{
+  const parsed = parseKeyLevels([
+    { price: 4.2, type: "HOD / High of Day", interaction: "Breakout", notes: "  held twice " },
+    { price: -1, type: "Support" },
+    { price: "x", type: "Support" },
+    { price: 3.9, type: "" },
+    "garbage",
+    { price: 3.95, type: "Support", interaction: "", notes: "" },
+  ]);
+  check("keyLevels: only valid entries survive", parsed.length === 2);
+  check("keyLevels: notes trimmed", parsed[0]?.notes === "held twice");
+  check("keyLevels: empty interaction -> null", parsed[1]?.interaction === null);
+  check("keyLevels: null -> []", parseKeyLevels(null).length === 0);
+  check("keyLevels: untouched row ok", validateKeyLevels([{ price: "", type: "" }]) === null);
+  check("keyLevels: type without price rejected", (validateKeyLevels([{ price: "", type: "Support" }]) ?? "").includes("needs a price"));
+  check("keyLevels: price without type rejected", (validateKeyLevels([{ price: "4.20", type: "" }]) ?? "").includes("needs a level type"));
+  check("keyLevels: negative price rejected", (validateKeyLevels([{ price: "-2", type: "Support" }]) ?? "").includes("greater than 0"));
+  check("keyLevels: valid row ok", validateKeyLevels([{ price: "4.20", type: "Support" }]) === null);
+}
+
+/* ============ plan preservation ============ */
+{
+  const c = computePlanUpdate(null, null, null, 3.90, 4.50, "2026-10-12T14:00:00Z");
+  approx("plan: create captures original stop", c.original_stop_loss, 3.90);
+  check("plan: create logs no change", c.plan_history.length === 0);
+  const e1 = computePlanUpdate(null, 3.90, 4.50, 4.00, 4.50, "2026-10-13T14:00:00Z");
+  approx("plan: old trade original = pre-edit stop", e1.original_stop_loss, 3.90);
+  check("plan: stop change logged", e1.plan_history.length === 1);
+  approx("plan: change records new value", e1.plan_history[0]?.to, 4.00);
+  const e2 = computePlanUpdate(e1, 4.00, 4.50, 4.05, null, "2026-10-14T14:00:00Z");
+  approx("plan: original stop is set-once", e2.original_stop_loss, 3.90);
+  approx("plan: original target survives clear", e2.original_target, 4.50);
+  check("plan: history appends (stop + target-clear)", e2.plan_history.length === 3);
+  const n = computePlanUpdate(null, null, null, null, null, "2026-10-12T14:00:00Z");
+  check("plan: no data -> null original", n.original_stop_loss === null);
+}
 
 console.log(`journalCalc tests: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
