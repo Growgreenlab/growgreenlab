@@ -13,6 +13,8 @@ import {
   createChart,
   CandlestickSeries,
   HistogramSeries,
+  CrosshairMode,
+  LineStyle,
   type IChartApi,
   type ISeriesApi,
   type IPriceLine,
@@ -194,9 +196,26 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
             hour12: false,
           }),
       },
+      // Webull-style crosshair: free-moving (Normal — the LWC default,
+      // Magnet, snaps the horizontal line to the hovered bar's close and
+      // shows THAT price on the axis instead of the cursor's price),
+      // dashed 1px lines, axis labels on both scales.
       crosshair: {
-        vertLine: { color: "rgba(255,255,255,0.25)", labelBackgroundColor: "#334155" },
-        horzLine: { color: "rgba(255,255,255,0.25)", labelBackgroundColor: "#334155" },
+        mode: CrosshairMode.Normal,
+        vertLine: {
+          color: "rgba(255,255,255,0.35)",
+          width: 1,
+          style: LineStyle.Dashed,
+          labelVisible: true,
+          labelBackgroundColor: "#334155",
+        },
+        horzLine: {
+          color: "rgba(255,255,255,0.35)",
+          width: 1,
+          style: LineStyle.Dashed,
+          labelVisible: true,
+          labelBackgroundColor: "#334155",
+        },
       },
     });
     const candleSeries = chart.addSeries(CandlestickSeries, {
