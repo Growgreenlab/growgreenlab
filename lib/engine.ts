@@ -161,6 +161,9 @@ export class ReplayEngine {
         l: this.forming.l,
         c: this.forming.c,
         v: this.forming.v,
+        // Preserve the source candle's flags: dropping `syn` here made
+        // downstream timeframe aggregation mis-mark the whole period.
+        ...(t.syn ? { syn: true } : {}),
       });
     }
     return out;
