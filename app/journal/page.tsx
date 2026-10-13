@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
 import { groupFillsIntoTrades, calcMetrics, calcRealTrade, parseBrokerCsv, parseWithMapping, autoMapColumns, MAPPABLE_FIELDS, groupImportedFills, fmtPnl, fmtPct, type GroupedTrade, type RawFill, type RealFill, type RealTradeCalc, type BrokerParseResult, type ImportedTrade } from "../../lib/journal";
+import { breakdown, riskMetrics, edgeInsights, dailyPnl, type AnalyticsTrade, type BreakdownDimension, type Insight } from "../../lib/journalAnalytics";
 
-type Tab = "overview" | "trades" | "review" | "calendar";
+type Tab = "overview" | "trades" | "review" | "calendar" | "analytics";
 type Period = "today" | "week" | "month" | "30d" | "90d" | "ytd" | "all";
 type SourceFilter = "all" | "simulator" | "real";
 
@@ -88,6 +89,7 @@ export default function JournalPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [selectedCalDay, setSelectedCalDay] = useState<string | null>(null);
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   // Filters
   const [fTicker, setFTicker] = useState("");
@@ -225,6 +227,48 @@ export default function JournalPage() {
   const simMetrics = useMemo(() => calcMetrics(closedFiltered.filter((t) => t.source === "simulator")), [closedFiltered]);
   const realMetrics = useMemo(() => calcMetrics(closedFiltered.filter((t) => t.source === "real")), [closedFiltered]);
 
+  // Enriched view for Analytics: the SAME filtered closed set, joined with
+  // Trade DNA annotations and the underlying records (timestamps, stop, risk).
+  const analyticsTrades: AnalyticsTrade[] = useMemo(() => {
+    const simByKey = new Map(trades.map((t) => [t.tradeKey, t]));
+    const realById = new Map(realTrades.map((t) => [`real:${t.id}`, t]));
+    return closedFiltered.map((t) => {
+      const meta = metas[t.key];
+      let entryTime: string | null = null;
+      let exitTime: string | null = null;
+      let stopLoss: number | null = null;
+      let initialRisk: number | null = null;
+      if (t.source === "simulator") {
+        const g = simByKey.get(t.key);
+        entryTime = g?.entryTime ?? null;
+        exitTime = g?.exitTime ?? null;
+      } else {
+        const rt = realById.get(t.key);
+        if (rt) {
+          const isEntry = (f: RealFill) => (rt.direction === "long" ? f.side === "buy" : f.side === "sell");
+          const entries = rt.fills.filter(isEntry);
+          const exits = rt.fills.filter((f) => !isEntry(f));
+          entryTime = entries.length > 0 ? entries[0].fill_time : null;
+          exitTime = exits.length > 0 ? exits[exits.length - 1].fill_time : null;
+          stopLoss = rt.stop_loss;
+          initialRisk = rt.calc.initialRisk;
+        }
+      }
+      return {
+        key: t.key, source: t.source, ticker: t.ticker, tradeDate: t.tradeDate,
+        direction: t.direction, entryPrice: t.entryPrice, exitPrice: t.exitPrice,
+        qty: t.qty, realizedPnl: t.realizedPnl, rMultiple: t.rMultiple, isOpen: t.isOpen,
+        setupTag: meta?.setup_tag ?? null,
+        hodClass: meta?.hod_class ?? null,
+        followedPlan: meta?.followed_plan ?? null,
+        emotionalTags: meta?.emotional_tags ?? [],
+        mistakes: meta?.mistakes ?? [],
+        entryTime, exitTime, stopLoss, initialRisk,
+      };
+    });
+  }, [closedFiltered, trades, realTrades, metas]);
+  const analyticsRisk = useMemo(() => riskMetrics(analyticsTrades), [analyticsTrades]);
+
   // Cumulative P&L for chart (simple SVG)
   const cumPnl = useMemo(() => {
     const sorted = [...closedFiltered].sort((a, b) => new Date(a.tradeDate).getTime() - new Date(b.tradeDate).getTime());
@@ -249,9 +293,9 @@ export default function JournalPage() {
       <p className="hint" style={{ margin: "0 0 16px" }}>Your Trade DNA — every trade, graded and reviewed.</p>
 
       <div className="tabs" style={{ marginBottom: 12 }}>
-        {(["overview", "trades", "review", "calendar"] as Tab[]).map((t) => (
+        {(["overview", "trades", "review", "calendar", "analytics"] as Tab[]).map((t) => (
           <button key={t} className={`tab ${tab === t ? "active" : ""}`} onClick={() => setTab(t)}>
-            {t === "overview" ? "Overview" : t === "trades" ? "All Trades" : t === "review" ? "Trade Review" : "Calendar"}
+            {t === "overview" ? "Overview" : t === "trades" ? "All Trades" : t === "review" ? "Trade Review" : t === "calendar" ? "Calendar" : "Analytics"}
           </button>
         ))}
       </div>
@@ -270,10 +314,11 @@ export default function JournalPage() {
         ))}
       </div>
 
-      {tab === "overview" && <OverviewTab metrics={metrics} simMetrics={simMetrics} realMetrics={realMetrics} cumPnl={cumPnl} trades={filtered} totalCount={unified.length} period={period} setPeriod={setPeriod} sourceFilter={sourceFilter} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} onAddRealTrade={() => { setTab("trades"); setShowRealForm(true); }} onImportBroker={() => { setTab("trades"); setShowImport(true); }} />}
+      {tab === "overview" && <OverviewTab metrics={metrics} simMetrics={simMetrics} realMetrics={realMetrics} cumPnl={cumPnl} trades={filtered} totalCount={unified.length} period={period} setPeriod={setPeriod} sourceFilter={sourceFilter} avgR={analyticsRisk.avgR} maxDrawdown={analyticsRisk.maxDrawdownUSD} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} onAddRealTrade={() => { setTab("trades"); setShowRealForm(true); }} onImportBroker={() => { setTab("trades"); setShowImport(true); }} />}
       {tab === "trades" && <TradesTab trades={filtered} metas={metas} fTicker={fTicker} setFTicker={setFTicker} fSetup={fSetup} setFSetup={setFSetup} fWinLoss={fWinLoss} setFWinLoss={setFWinLoss} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} onRealTradeSaved={load} showRealForm={showRealForm} setShowRealForm={setShowRealForm} showImport={showImport} setShowImport={setShowImport} />}
       {tab === "review" && <ReviewTab tradeKey={selectedKey} simTrade={!isRealSelected ? (selected as GroupedTrade | null) : null} realTrade={isRealSelected ? (selected as RealTrade | null) : null} meta={selectedMeta} onSaved={load} />}
-      {tab === "calendar" && <CalendarTab trades={closedFiltered} onSelectDay={() => {}} />}
+      {tab === "calendar" && <CalendarTab trades={closedFiltered} metas={metas} selectedDay={selectedCalDay} onSelectDay={setSelectedCalDay} onSelectTrade={(k) => { setSelectedKey(k); setTab("review"); }} />}
+      {tab === "analytics" && <AnalyticsTab trades={analyticsTrades} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} />}
     </div>
   );
 }
@@ -291,7 +336,7 @@ function SourceBadge({ source }: { source: "simulator" | "real" }) {
   );
 }
 
-function OverviewTab({ metrics, simMetrics, realMetrics, cumPnl, trades, totalCount, period, setPeriod, sourceFilter, onSelect, onAddRealTrade, onImportBroker }: {
+function OverviewTab({ metrics, simMetrics, realMetrics, cumPnl, trades, totalCount, period, setPeriod, sourceFilter, avgR, maxDrawdown, onSelect, onAddRealTrade, onImportBroker }: {
   metrics: ReturnType<typeof calcMetrics>;
   simMetrics: ReturnType<typeof calcMetrics>;
   realMetrics: ReturnType<typeof calcMetrics>;
@@ -301,6 +346,8 @@ function OverviewTab({ metrics, simMetrics, realMetrics, cumPnl, trades, totalCo
   period: Period;
   setPeriod: (p: Period) => void;
   sourceFilter: SourceFilter;
+  avgR: number | null;
+  maxDrawdown: number;
   onSelect: (k: string) => void;
   onAddRealTrade: () => void;
   onImportBroker: () => void;
@@ -381,6 +428,8 @@ function OverviewTab({ metrics, simMetrics, realMetrics, cumPnl, trades, totalCo
             {stat("Avg Loss", fmtPnl(m.avgLoss), m.avgLoss)}
             {stat("Expectancy", fmtPnl(m.expectancy), m.expectancy)}
             {stat("Largest Win", fmtPnl(m.largestWin), m.largestWin)}
+            {stat("Avg R", avgR == null ? "—" : `${avgR.toFixed(2)}R`)}
+            {stat("Max Drawdown", maxDrawdown > 0 ? fmtPnl(-maxDrawdown) : fmtPnl(0), maxDrawdown > 0 ? -maxDrawdown : 0)}
           </div>
 
           {cumPnl.length > 1 && (
@@ -1156,8 +1205,18 @@ function RealTradeForm({ onSaved }: { onSaved: () => void }) {
 }
 
 /* ---------------- Calendar ---------------- */
-function CalendarTab({ trades, onSelectDay }: { trades: UnifiedTrade[]; onSelectDay: (d: string) => void }) {
+function CalendarTab({ trades, metas, selectedDay, onSelectDay, onSelectTrade }: {
+  trades: UnifiedTrade[];
+  metas: Record<string, TradeMeta>;
+  selectedDay: string | null;
+  onSelectDay: (d: string) => void;
+  onSelectTrade: (k: string) => void;
+}) {
   const [month, setMonth] = useState(() => { const d = new Date(); return { y: d.getFullYear(), m: d.getMonth() }; });
+  const dayTrades = useMemo(
+    () => (selectedDay ? trades.filter((t) => t.tradeDate === selectedDay) : []),
+    [trades, selectedDay]
+  );
 
   const byDay = useMemo(() => {
     const map: Record<string, { pnl: number; wins: number; losses: number }> = {};
@@ -1195,12 +1254,15 @@ function CalendarTab({ trades, onSelectDay }: { trades: UnifiedTrade[]; onSelect
           if (d == null) return <div key={i} />;
           const key = `${month.y}-${String(month.m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
           const info = byDay[key];
+          const isSelected = selectedDay === key;
           return (
             <div key={i} className="card"
               style={{
                 padding: 8, minHeight: 64, cursor: info ? "pointer" : "default",
                 background: info ? (info.pnl > 0 ? "rgba(16,185,129,0.08)" : info.pnl < 0 ? "rgba(246,70,93,0.08)" : undefined) : undefined,
-                border: info ? (info.pnl > 0 ? "1px solid rgba(16,185,129,0.25)" : info.pnl < 0 ? "1px solid rgba(246,70,93,0.25)" : undefined) : undefined,
+                border: isSelected
+                  ? "1px solid var(--emerald-bright)"
+                  : info ? (info.pnl > 0 ? "1px solid rgba(16,185,129,0.25)" : info.pnl < 0 ? "1px solid rgba(246,70,93,0.25)" : undefined) : undefined,
               }}
               onClick={() => info && onSelectDay(key)}>
               <div style={{ fontSize: 12, color: "var(--muted)" }}>{d}</div>
@@ -1209,6 +1271,316 @@ function CalendarTab({ trades, onSelectDay }: { trades: UnifiedTrade[]; onSelect
           );
         })}
       </div>
+
+      {selectedDay && (
+        <div className="card" style={{ padding: 16, marginTop: 16 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
+            {selectedDay} — {dayTrades.length} closed trade{dayTrades.length === 1 ? "" : "s"}
+            {dayTrades.length > 0 && (
+              <span className="num" style={{ marginLeft: 10, color: dayTrades.reduce((s, t) => s + t.realizedPnl, 0) > 0 ? "var(--emerald-bright)" : dayTrades.reduce((s, t) => s + t.realizedPnl, 0) < 0 ? "#f6465d" : "var(--muted)" }}>
+                {fmtPnl(dayTrades.reduce((s, t) => s + t.realizedPnl, 0))}
+              </span>
+            )}
+          </div>
+          <p className="hint" style={{ margin: "0 0 8px" }}>Click a trade to open it in Trade Review.</p>
+          {dayTrades.map((t) => (
+            <div key={t.key} onClick={() => onSelectTrade(t.key)}
+              style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: "1px solid rgba(255,255,255,0.06)", cursor: "pointer" }}>
+              <span>
+                <b>{t.ticker}</b>{" "}
+                <span className="hint">{t.direction} · {metas[t.key]?.setup_tag ?? "No setup tagged"}</span>{" "}
+                <SourceBadge source={t.source} />
+              </span>
+              <span style={{ display: "flex", gap: 14, alignItems: "center" }}>
+                <span className="hint num">{t.rMultiple != null ? `${t.rMultiple.toFixed(2)}R` : "—"}</span>
+                <span className="num" style={{ fontWeight: 600, color: t.realizedPnl > 0 ? "var(--emerald-bright)" : t.realizedPnl < 0 ? "#f6465d" : "var(--muted)" }}>{fmtPnl(t.realizedPnl)}</span>
+              </span>
+            </div>
+          ))}
+          {dayTrades.length === 0 && <p className="hint" style={{ margin: 0 }}>No closed trades on this day in the current filter selection.</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Analytics (Batch A) ---------------- */
+
+const DIMENSION_OPTIONS: { key: BreakdownDimension; label: string }[] = [
+  { key: "setup", label: "Setup" },
+  { key: "symbol", label: "Symbol" },
+  { key: "mistake", label: "Mistake" },
+  { key: "emotion", label: "Emotion" },
+  { key: "plan", label: "Plan Adherence" },
+  { key: "session", label: "Session" },
+  { key: "timeOfDay", label: "Time of Day" },
+  { key: "hold", label: "Hold Time" },
+  { key: "source", label: "Source" },
+  { key: "side", label: "Side" },
+  { key: "hodClass", label: "HOD Class" },
+];
+
+function fmtR(v: number | null): string {
+  return v == null ? "—" : `${v.toFixed(2)}R`;
+}
+function fmtHold(min: number | null): string {
+  if (min == null) return "—";
+  if (min < 60) return `${Math.round(min)}m`;
+  return `${(min / 60).toFixed(1)}h`;
+}
+function fmtPf(v: number | null): string {
+  if (v == null) return "—";
+  if (!isFinite(v)) return "∞";
+  return v.toFixed(2);
+}
+function pnlColor(v: number): string {
+  return v > 0 ? "var(--emerald-bright)" : v < 0 ? "#f6465d" : "var(--muted)";
+}
+
+function SmallSampleBadge() {
+  return (
+    <span style={{
+      fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 20,
+      background: "rgba(251,191,36,0.12)", border: "1px solid rgba(251,191,36,0.45)", color: "#fbbf24",
+    }}>Small sample — interpret with care</span>
+  );
+}
+
+function InsightCard({ title, insight }: { title: string; insight: Insight }) {
+  return (
+    <div className="card" style={{ padding: 16 }}>
+      <div style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4, color: "var(--muted)", marginBottom: 6 }}>{title}</div>
+      {insight.stat ? (
+        <>
+          <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 6 }}>{insight.stat.label}</div>
+          <div style={{ fontSize: 13, display: "grid", gap: 2 }}>
+            <div>Net P&L <span className="num" style={{ fontWeight: 700, color: pnlColor(insight.stat.netPnl) }}>{fmtPnl(insight.stat.netPnl)}</span></div>
+            <div className="hint">Expectancy <span className="num" style={{ color: "var(--foreground)" }}>{fmtPnl(insight.stat.expectancy ?? 0)}</span> · Avg R <span className="num" style={{ color: "var(--foreground)" }}>{fmtR(insight.stat.avgR)}</span> · Win rate <span className="num" style={{ color: "var(--foreground)" }}>{insight.stat.winRate == null ? "—" : fmtPct(insight.stat.winRate)}</span></div>
+            <div className="hint">Based on {insight.sampleSize} trade{insight.sampleSize === 1 ? "" : "s"}</div>
+          </div>
+          {insight.smallSample && <div style={{ marginTop: 8 }}><SmallSampleBadge /></div>}
+        </>
+      ) : (
+        <p className="hint" style={{ margin: 0 }}>{insight.reason ?? "No data."}</p>
+      )}
+    </div>
+  );
+}
+
+function AnalyticsTab({ trades, onSelect }: { trades: AnalyticsTrade[]; onSelect: (k: string) => void }) {
+  const [dim, setDim] = useState<BreakdownDimension>("setup");
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  const risk = useMemo(() => riskMetrics(trades), [trades]);
+  const insights = useMemo(() => edgeInsights(trades), [trades]);
+  const rows = useMemo(() => breakdown(trades, dim), [trades, dim]);
+  const days = useMemo(() => dailyPnl(trades), [trades]);
+
+  if (trades.length === 0) {
+    return (
+      <div className="card" style={{ padding: 32, textAlign: "center" }}>
+        <p className="hint" style={{ margin: 0 }}>No data — analytics need closed trades in the current filter selection. Adjust the source/period filters above, or log and close some trades first.</p>
+      </div>
+    );
+  }
+
+  const tile = (label: string, value: string, sub?: string, color?: string) => (
+    <div key={label} style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 10, padding: "12px 14px" }}>
+      <div className="hint" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.4 }}>{label}</div>
+      <div className="num" style={{ fontSize: 20, fontWeight: 700, marginTop: 4, color: color ?? "var(--foreground)" }}>{value}</div>
+      {sub && <div className="hint" style={{ fontSize: 11, marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
+
+  // R-distribution chart geometry
+  const rMax = Math.max(1, ...risk.rDistribution.map((b) => b.count));
+  // Daily P&L chart geometry
+  const dMax = Math.max(1, ...days.map((d) => Math.abs(d.pnl)));
+  const DW = 620, DH = 130, zeroY = DH / 2;
+  const barW = days.length > 0 ? Math.max(2, Math.floor(DW / days.length) - 2) : 0;
+
+  return (
+    <div style={{ display: "grid", gap: 20 }}>
+      {/* ---- Risk & Consistency ---- */}
+      <section>
+        <h3 style={{ margin: "0 0 10px" }}>Risk &amp; Consistency</h3>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 10 }}>
+          {tile("Max Drawdown", risk.maxDrawdownUSD > 0 ? fmtPnl(-risk.maxDrawdownUSD) : fmtPnl(0), risk.maxDrawdownPct != null ? `${risk.maxDrawdownPct.toFixed(1)}% of peak cumulative P&L` : "of peak cumulative P&L", risk.maxDrawdownUSD > 0 ? "#f6465d" : undefined)}
+          {tile("Average R", fmtR(risk.avgR), `over ${risk.tradesWithR} trades with a recorded stop`)}
+          {tile("Win / Loss Ratio", risk.winLossRatio == null ? "—" : risk.winLossRatio.toFixed(2), "avg win ÷ avg loss")}
+          {tile("Avg Risk / Trade", risk.avgRiskPerTrade == null ? "—" : fmtPnl(risk.avgRiskPerTrade), risk.avgRiskPerTrade == null ? "no stops recorded" : `over ${risk.tradesWithRisk} trades with known risk`)}
+          {tile("Win Streak", `${risk.currentWinStreak} current`, `longest ${risk.maxWinStreak}`)}
+          {tile("Loss Streak", `${risk.currentLossStreak} current`, `longest ${risk.maxLossStreak}`)}
+          {tile("Losing Days", risk.losingDayFrequency == null ? "—" : fmtPct(risk.losingDayFrequency), `${risk.losingDays} of ${risk.tradingDays} trading days`)}
+        </div>
+        <p className="hint" style={{ margin: "8px 0 0" }}>Breakeven trades neither extend nor break a streak. Drawdown % is measured against the peak cumulative realized P&L (the journal has no account-equity baseline).</p>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 12, marginTop: 12 }}>
+          <div className="card" style={{ padding: 16 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>R Distribution</div>
+            {risk.tradesWithR === 0 ? (
+              <p className="hint" style={{ margin: 0 }}>No data — R requires a recorded stop loss. Real trades with a stop get an R automatically; simulator trades need a stop recorded.</p>
+            ) : (
+              <svg viewBox={`0 0 320 140`} style={{ width: "100%" }}>
+                {risk.rDistribution.map((b, i) => {
+                  const bh = (b.count / rMax) * 84;
+                  const x = 12 + i * 62;
+                  return (
+                    <g key={b.label}>
+                      <rect x={x} y={104 - bh} width={44} height={bh} rx={3} fill={i < 2 ? "#f6465d" : i === 2 ? "rgba(255,255,255,0.35)" : "var(--emerald)"} opacity={0.9} />
+                      <text x={x + 22} y={98 - bh} textAnchor="middle" fontSize={12} fill="var(--foreground)">{b.count}</text>
+                      <text x={x + 22} y={122} textAnchor="middle" fontSize={10} fill="var(--muted)">{b.label}</text>
+                    </g>
+                  );
+                })}
+              </svg>
+            )}
+          </div>
+          <div className="card" style={{ padding: 16 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Daily P&amp;L</div>
+            <svg viewBox={`0 0 ${DW} ${DH}`} style={{ width: "100%" }}>
+              <line x1={0} y1={zeroY} x2={DW} y2={zeroY} stroke="rgba(255,255,255,0.15)" strokeDasharray="4 3" />
+              {days.map((d, i) => {
+                const h = (Math.abs(d.pnl) / dMax) * (DH / 2 - 8);
+                const x = i * (DW / Math.max(1, days.length)) + 1;
+                return <rect key={d.date} x={x} y={d.pnl >= 0 ? zeroY - h : zeroY} width={barW} height={Math.max(1, h)} fill={d.pnl >= 0 ? "var(--emerald)" : "#f6465d"} opacity={0.9} />;
+              })}
+            </svg>
+            <div className="hint" style={{ fontSize: 11 }}>{days.length} trading day{days.length === 1 ? "" : "s"} · best {fmtPnl(Math.max(...days.map((d) => d.pnl)))} · worst {fmtPnl(Math.min(...days.map((d) => d.pnl)))}</div>
+          </div>
+        </div>
+      </section>
+
+      {/* ---- Performance Breakdowns ---- */}
+      <section>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
+          <h3 style={{ margin: 0 }}>Performance Breakdowns</h3>
+          <select className="input" style={{ width: "auto" }} value={dim} onChange={(e) => { setDim(e.target.value as BreakdownDimension); setExpanded(null); }}>
+            {DIMENSION_OPTIONS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+          </select>
+        </div>
+        <div className="card" style={{ padding: 0, overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)", textAlign: "left" }}>
+                {[DIMENSION_OPTIONS.find((o) => o.key === dim)?.label ?? "Bucket", "Trades", "Win %", "Net P&L", "Avg Win", "Avg Loss", "Avg R", "Expectancy", "Profit Factor", "Avg Hold"].map((h) => (
+                  <th key={h} style={{ padding: "10px 12px", color: "var(--muted)", fontWeight: 600, fontSize: 11, textTransform: "uppercase", whiteSpace: "nowrap" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <Fragment key={r.key}>
+                  <tr onClick={() => setExpanded(expanded === r.key ? null : r.key)}
+                    style={{ borderBottom: "1px solid rgba(255,255,255,0.05)", cursor: "pointer", background: expanded === r.key ? "rgba(255,255,255,0.03)" : undefined }}>
+                    <td style={{ padding: "10px 12px", fontWeight: 600 }}>{expanded === r.key ? "▾ " : "▸ "}{r.label}</td>
+                    <td className="num" style={{ padding: "10px 12px" }}>{r.count}</td>
+                    <td className="num" style={{ padding: "10px 12px" }}>{r.winRate == null ? "—" : fmtPct(r.winRate)}</td>
+                    <td className="num" style={{ padding: "10px 12px", fontWeight: 700, color: pnlColor(r.netPnl) }}>{fmtPnl(r.netPnl)}</td>
+                    <td className="num" style={{ padding: "10px 12px" }}>{r.avgWin == null ? "—" : fmtPnl(r.avgWin)}</td>
+                    <td className="num" style={{ padding: "10px 12px" }}>{r.avgLoss == null ? "—" : fmtPnl(r.avgLoss)}</td>
+                    <td className="num" style={{ padding: "10px 12px" }}>{fmtR(r.avgR)}</td>
+                    <td className="num" style={{ padding: "10px 12px" }}>{r.expectancy == null ? "—" : fmtPnl(r.expectancy)}</td>
+                    <td className="num" style={{ padding: "10px 12px" }}>{fmtPf(r.profitFactor)}</td>
+                    <td className="num" style={{ padding: "10px 12px" }}>{fmtHold(r.avgHoldMinutes)}</td>
+                  </tr>
+                  {expanded === r.key && (
+                    <tr key={`${r.key}-detail`}>
+                      <td colSpan={10} style={{ padding: "4px 12px 12px 28px", background: "rgba(255,255,255,0.02)" }}>
+                        {r.trades.map((t) => (
+                          <div key={t.key} onClick={() => onSelect(t.key)}
+                            style={{ display: "flex", justifyContent: "space-between", padding: "5px 0", borderBottom: "1px solid rgba(255,255,255,0.04)", cursor: "pointer", fontSize: 12.5 }}>
+                            <span>{t.tradeDate} · <b>{t.ticker}</b> <span className="hint">{t.direction}</span></span>
+                            <span style={{ display: "flex", gap: 14 }}>
+                              <span className="hint num">{fmtR(t.rMultiple)}</span>
+                              <span className="num" style={{ fontWeight: 600, color: pnlColor(t.realizedPnl) }}>{fmtPnl(t.realizedPnl)}</span>
+                            </span>
+                          </div>
+                        ))}
+                        <div className="hint" style={{ fontSize: 11, marginTop: 4 }}>Click a trade to open it in Trade Review.</div>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              ))}
+              {rows.length === 0 && (
+                <tr><td colSpan={10} style={{ padding: 20, textAlign: "center" }} className="hint">No data for this breakdown — nothing has been tagged yet.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        {(dim === "mistake" || dim === "emotion") && (
+          <p className="hint" style={{ margin: "8px 0 0" }}>A trade counts under each of its tags, so rows can add up to more than the total number of trades. Trades with no tags recorded appear in no row.</p>
+        )}
+        <p className="hint" style={{ margin: "8px 0 0" }}>Win % here excludes breakeven trades from the denominator. Net P&L for single-value breakdowns sums exactly to the Overview total for the same filters.</p>
+      </section>
+
+      {/* ---- Edge Finder ---- */}
+      <section>
+        <h3 style={{ margin: "0 0 4px" }}>Edge Finder</h3>
+        <p className="hint" style={{ margin: "0 0 12px" }}>Patterns in your own logged trades — descriptions of what happened, not predictions. Small samples are flagged; never treat a handful of trades as an edge.</p>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 12 }}>
+          <InsightCard title="Best setup (by expectancy)" insight={insights.bestSetup} />
+          <InsightCard title="Best HOD classification" insight={insights.bestHodClass} />
+          <InsightCard title="Costliest mistake" insight={insights.costliestMistake} />
+          <InsightCard title="Worst emotion (by net P&L)" insight={insights.worstEmotion} />
+          <InsightCard title="Best time window (by expectancy)" insight={insights.bestTimeWindow} />
+        </div>
+
+        <div className="card" style={{ padding: 16, marginTop: 12 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Plan adherence</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
+            {([["Followed plan", insights.planAdherence.followed], ["Did not follow", insights.planAdherence.notFollowed]] as const).map(([label, s]) => (
+              <div key={label} style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 10, padding: "12px 14px" }}>
+                <div className="hint" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.4 }}>{label}</div>
+                {s ? (
+                  <>
+                    <div className="num" style={{ fontSize: 20, fontWeight: 700, marginTop: 4, color: pnlColor(s.netPnl) }}>{fmtPnl(s.netPnl)}</div>
+                    <div className="hint">{s.count} trade{s.count === 1 ? "" : "s"} · expectancy {fmtPnl(s.expectancy ?? 0)} · avg R {fmtR(s.avgR)}</div>
+                    {s.count < 10 && <div style={{ marginTop: 6 }}><SmallSampleBadge /></div>}
+                  </>
+                ) : (
+                  <p className="hint" style={{ margin: "6px 0 0" }}>No trades recorded with this plan status.</p>
+                )}
+              </div>
+            ))}
+          </div>
+          {insights.planAdherence.notRecordedCount > 0 && (
+            <p className="hint" style={{ margin: "10px 0 0" }}>{insights.planAdherence.notRecordedCount} trade{insights.planAdherence.notRecordedCount === 1 ? "" : "s"} have no plan status recorded — they are counted separately, never assumed to have followed or broken the plan.</p>
+          )}
+        </div>
+
+        <div className="card" style={{ padding: 16, marginTop: 12 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Improvement trend — recent window vs the equal window before it</div>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr style={{ textAlign: "left", borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
+                {["Window", "Recent Net P&L", "Prior Net P&L", "Δ Net P&L", "Δ Expectancy"].map((h) => (
+                  <th key={h} style={{ padding: "8px 10px", color: "var(--muted)", fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {insights.trends.map((w) => (
+                <tr key={w.days} style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+                  <td style={{ padding: "8px 10px", fontWeight: 600 }}>Last {w.days} days</td>
+                  {w.current && w.prior ? (
+                    <>
+                      <td className="num" style={{ padding: "8px 10px" }}>{fmtPnl(w.current.netPnl)} <span className="hint">({w.current.count})</span></td>
+                      <td className="num" style={{ padding: "8px 10px" }}>{fmtPnl(w.prior.netPnl)} <span className="hint">({w.prior.count})</span></td>
+                      <td className="num" style={{ padding: "8px 10px", fontWeight: 700, color: pnlColor(w.netPnlDelta ?? 0) }}>{w.netPnlDelta == null ? "—" : fmtPnl(w.netPnlDelta)}</td>
+                      <td className="num" style={{ padding: "8px 10px", color: pnlColor(w.expectancyDelta ?? 0) }}>{w.expectancyDelta == null ? "—" : fmtPnl(w.expectancyDelta)}</td>
+                    </>
+                  ) : (
+                    <td colSpan={4} className="hint" style={{ padding: "8px 10px" }}>{w.current ? `${fmtPnl(w.current.netPnl)} recent (${w.current.count} trades) — ` : ""}{w.reason ?? "Not enough history."}</td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="hint" style={{ margin: "8px 0 0" }}>Windows are anchored to your most recent trade date in the current selection. Trade counts are shown in parentheses.</p>
+        </div>
+      </section>
     </div>
   );
 }
