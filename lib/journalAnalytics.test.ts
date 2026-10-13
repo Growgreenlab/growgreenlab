@@ -27,7 +27,7 @@ function T(p: Partial<AnalyticsTrade>): AnalyticsTrade {
     realizedPnl: 0, rMultiple: null, isOpen: false,
     setupTag: null, hodClass: null, followedPlan: null,
     emotionalTags: [], mistakes: [], entryTime: null, exitTime: null,
-    stopLoss: null, initialRisk: null, ...p,
+    stopLoss: null, initialRisk: null, keyLevelType: null, keyLevelInteraction: null, ...p,
   };
 }
 
@@ -242,5 +242,23 @@ check("J fmtPnl(current) = +$46.02", fmtPnl(trendJ.current!.netPnl) === "+$46.02
 check("J fmtPnl(prior) = +$4.79", fmtPnl(trendJ.prior!.netPnl) === "+$4.79");
 check("J fmtPnl(delta) = +$41.24", fmtPnl(trendJ.netPnlDelta!) === "+$41.24");
 
+// ─── key level breakdown dimensions ──────────────────────────────
+{
+  const rows = breakdown([
+    T({ keyLevelType: "HOD / High of Day", keyLevelInteraction: "Breakout", realizedPnl: 50, rMultiple: 1 }),
+    T({ keyLevelType: "HOD / High of Day", keyLevelInteraction: "Failed breakout", realizedPnl: -20, rMultiple: -0.5 }),
+    T({ realizedPnl: 10 }),
+  ], "keyLevel");
+  const hod = rows.find((r) => r.label === "HOD / High of Day");
+  check("keyLevel dim: HOD row groups 2 trades", (hod?.trades.length ?? 0) === 2);
+  check("keyLevel dim: unrecorded trades land in Not recorded", rows.some((r) => r.label === "Not recorded" && r.trades.length === 1));
+  const iRows = breakdown([
+    T({ keyLevelInteraction: "Retest", realizedPnl: 5 }),
+    T({ keyLevelInteraction: "Retest", realizedPnl: 7 }),
+  ], "interaction");
+  check("interaction dim: Retest row groups both", iRows.length === 1 && iRows[0].trades.length === 2 && iRows[0].netPnl === 12);
+}
+
 console.log(`journalAnalytics tests: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
+
