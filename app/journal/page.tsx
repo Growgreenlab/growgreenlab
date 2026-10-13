@@ -1402,7 +1402,7 @@ function AnalyticsTab({ trades, onSelect }: { trades: AnalyticsTrade[]; onSelect
   return (
     <div style={{ display: "grid", gap: 20 }}>
       {/* ---- Risk & Consistency ---- */}
-      <section>
+      <section style={{ minWidth: 0 }}>
         <h3 style={{ margin: "0 0 10px" }}>Risk &amp; Consistency</h3>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 10 }}>
           {tile("Max Drawdown", risk.maxDrawdownUSD > 0 ? fmtPnl(-risk.maxDrawdownUSD) : fmtPnl(0), risk.maxDrawdownPct != null ? `${risk.maxDrawdownPct.toFixed(1)}% of peak cumulative P&L` : "of peak cumulative P&L", risk.maxDrawdownUSD > 0 ? "#f6465d" : undefined)}
@@ -1415,7 +1415,7 @@ function AnalyticsTab({ trades, onSelect }: { trades: AnalyticsTrade[]; onSelect
         </div>
         <p className="hint" style={{ margin: "8px 0 0" }}>Breakeven trades neither extend nor break a streak. Drawdown % is measured against the peak cumulative realized P&L (the journal has no account-equity baseline).</p>
 
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 12, marginTop: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(300px, 100%), 1fr))", gap: 12, marginTop: 12 }}>
           <div className="card" style={{ padding: 16 }}>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>R Distribution</div>
             {risk.tradesWithR === 0 ? (
@@ -1452,7 +1452,7 @@ function AnalyticsTab({ trades, onSelect }: { trades: AnalyticsTrade[]; onSelect
       </section>
 
       {/* ---- Performance Breakdowns ---- */}
-      <section>
+      <section style={{ minWidth: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
           <h3 style={{ margin: 0 }}>Performance Breakdowns</h3>
           <select className="input" style={{ width: "auto" }} value={dim} onChange={(e) => { setDim(e.target.value as BreakdownDimension); setExpanded(null); }}>
@@ -1516,7 +1516,7 @@ function AnalyticsTab({ trades, onSelect }: { trades: AnalyticsTrade[]; onSelect
       </section>
 
       {/* ---- Edge Finder ---- */}
-      <section>
+      <section style={{ minWidth: 0 }}>
         <h3 style={{ margin: "0 0 4px" }}>Edge Finder</h3>
         <p className="hint" style={{ margin: "0 0 12px" }}>Patterns in your own logged trades — descriptions of what happened, not predictions. Small samples are flagged; never treat a handful of trades as an edge.</p>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 12 }}>
@@ -1550,7 +1550,7 @@ function AnalyticsTab({ trades, onSelect }: { trades: AnalyticsTrade[]; onSelect
           )}
         </div>
 
-        <div className="card" style={{ padding: 16, marginTop: 12 }}>
+        <div className="card" style={{ padding: 16, marginTop: 12, overflowX: "auto" }}>
           <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Improvement trend — recent window vs the equal window before it</div>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
             <thead>
