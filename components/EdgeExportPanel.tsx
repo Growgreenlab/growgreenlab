@@ -191,9 +191,15 @@ export default function EdgeExportPanel({ input }: { input: ExportSnapshotInput 
           <span>Eligible trades: <b className="num">{snapshot.counts.total}</b> <span className="hint">({snapshot.counts.closed} closed, {snapshot.counts.open} open)</span></span>
           <span className="hint">Real {snapshot.counts.real} · Simulator {snapshot.counts.simulator}</span>
           <span className="hint">
-            Screenshots: {!includeScreenshots ? "off" : realInRange === 0 ? "none (real trades only)" : shotInfo.state === "loading" ? "checking…" : shotInfo.state === "done" ? `${shotInfo.files} file${shotInfo.files === 1 ? "" : "s"} across ${shotInfo.tradesWith} trade${shotInfo.tradesWith === 1 ? "" : "s"}` : shotInfo.state === "skipped" ? `checked when you generate (large selection)` : "unknown — will be checked when you generate"}
+            Screenshots: {!includeScreenshots ? "off" : realInRange === 0 ? "none (real trades only)" : shotInfo.state === "loading" ? "checking…" : shotInfo.state === "done" ? `${shotInfo.files} file${shotInfo.files === 1 ? "" : "s"} across ${shotInfo.tradesWith} trade${shotInfo.tradesWith === 1 ? "" : "s"}` : shotInfo.state === "skipped" ? `checked when you generate (selection exceeds the ${MAX_AUTO_SCREENSHOT_TRADES}-trade auto-count cap)` : "unknown — will be checked when you generate"}
           </span>
           <span className="hint">Trades missing screenshots: {includeScreenshots && shotInfo.state === "done" ? Math.max(0, realInRange - shotInfo.tradesWith) : "—"}</span>
+        </div>
+      )}
+
+      {includeScreenshots && shotInfo.state === "skipped" && (
+        <div style={{ marginTop: 10, padding: "9px 12px", borderRadius: 8, background: "rgba(56,189,248,0.07)", border: "1px solid rgba(56,189,248,0.3)", fontSize: 12.5 }}>
+          Screenshot count is an estimate — auto-count covers up to {MAX_AUTO_SCREENSHOT_TRADES} real trades, and this selection has more. The exact count is calculated during generation and printed in the package summary, analytics.json and screenshots-manifest.json.
         </div>
       )}
 
