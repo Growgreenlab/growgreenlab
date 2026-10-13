@@ -1370,11 +1370,18 @@ function InsightCard({ title, insight }: { title: string; insight: Insight }) {
 function AnalyticsTab({ trades, onSelect }: { trades: AnalyticsTrade[]; onSelect: (k: string) => void }) {
   const [dim, setDim] = useState<BreakdownDimension>("setup");
   const [expanded, setExpanded] = useState<string | null>(null);
+  // Breakdown-table scroll affordance: show a right-edge fade while more
+  // columns remain off-screen to the right.
+  const bdRef = useRef<HTMLDivElement | null>(null);
+  const [bdMore, setBdMore] = useState(false);
+  const updateBdMore = () => { const el = bdRef.current; setBdMore(!!el && el.scrollWidth - el.scrollLeft - el.clientWidth > 4); };
 
   const risk = useMemo(() => riskMetrics(trades), [trades]);
   const insights = useMemo(() => edgeInsights(trades), [trades]);
   const rows = useMemo(() => breakdown(trades, dim), [trades, dim]);
   const days = useMemo(() => dailyPnl(trades), [trades]);
+
+  useEffect(() => { updateBdMore(); window.addEventListener("resize", updateBdMore); return () => window.removeEventListener("resize", updateBdMore); }, [rows, dim, trades]);
 
   if (trades.length === 0) {
     return (
@@ -1458,13 +1465,15 @@ function AnalyticsTab({ trades, onSelect }: { trades: AnalyticsTrade[]; onSelect
           <select className="input" style={{ width: "auto" }} value={dim} onChange={(e) => { setDim(e.target.value as BreakdownDimension); setExpanded(null); }}>
             {DIMENSION_OPTIONS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
           </select>
+          <span className="hint" style={{ marginLeft: "auto", fontSize: 11.5 }}>Scroll the table sideways for Avg R, Expectancy, Profit Factor →</span>
         </div>
-        <div className="card" style={{ padding: 0, overflowX: "auto" }}>
+        <div style={{ position: "relative" }}>
+        <div ref={bdRef} onScroll={updateBdMore} className="card tablescroll" style={{ padding: 0, overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
             <thead>
               <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)", textAlign: "left" }}>
-                {[DIMENSION_OPTIONS.find((o) => o.key === dim)?.label ?? "Bucket", "Trades", "Win %", "Net P&L", "Avg Win", "Avg Loss", "Avg R", "Expectancy", "Profit Factor", "Avg Hold"].map((h) => (
-                  <th key={h} style={{ padding: "10px 12px", color: "var(--muted)", fontWeight: 600, fontSize: 11, textTransform: "uppercase", whiteSpace: "nowrap" }}>{h}</th>
+                {[DIMENSION_OPTIONS.find((o) => o.key === dim)?.label ?? "Bucket", "Trades", "Win %", "Net P&L", "Avg Win", "Avg Loss", "Avg R", "Expectancy", "Profit Factor", "Avg Hold"].map((h, i) => (
+                  <th key={h} style={{ padding: "10px 12px", color: "var(--muted)", fontWeight: 600, fontSize: 11, textTransform: "uppercase", whiteSpace: "nowrap", ...(i === 0 ? { position: "sticky" as const, left: 0, background: "var(--bg2)", zIndex: 2, boxShadow: "1px 0 0 rgba(255,255,255,0.08)" } : {}) }}>{h}</th>
                 ))}
               </tr>
             </thead>
@@ -1473,7 +1482,7 @@ function AnalyticsTab({ trades, onSelect }: { trades: AnalyticsTrade[]; onSelect
                 <Fragment key={r.key}>
                   <tr onClick={() => setExpanded(expanded === r.key ? null : r.key)}
                     style={{ borderBottom: "1px solid rgba(255,255,255,0.05)", cursor: "pointer", background: expanded === r.key ? "rgba(255,255,255,0.03)" : undefined }}>
-                    <td style={{ padding: "10px 12px", fontWeight: 600 }}>{expanded === r.key ? "▾ " : "▸ "}{r.label}</td>
+                    <td style={{ padding: "10px 12px", fontWeight: 600, position: "sticky", left: 0, background: "var(--bg2)", zIndex: 1, boxShadow: "1px 0 0 rgba(255,255,255,0.08)" }}>{expanded === r.key ? "▾ " : "▸ "}{r.label}</td>
                     <td className="num" style={{ padding: "10px 12px" }}>{r.count}</td>
                     <td className="num" style={{ padding: "10px 12px" }}>{r.winRate == null ? "—" : fmtPct(r.winRate)}</td>
                     <td className="num" style={{ padding: "10px 12px", fontWeight: 700, color: pnlColor(r.netPnl) }}>{fmtPnl(r.netPnl)}</td>
@@ -1508,6 +1517,10 @@ function AnalyticsTab({ trades, onSelect }: { trades: AnalyticsTrade[]; onSelect
               )}
             </tbody>
           </table>
+        </div>
+        {bdMore && (
+          <div aria-hidden style={{ position: "absolute", top: 0, right: 0, bottom: 0, width: 46, pointerEvents: "none", background: "linear-gradient(to right, rgba(9,14,17,0), rgba(9,14,17,0.88))", display: "flex", alignItems: "center", justifyContent: "flex-end", paddingRight: 6, color: "var(--muted)", fontSize: 20 }}>›</div>
+        )}
         </div>
         {(dim === "mistake" || dim === "emotion") && (
           <p className="hint" style={{ margin: "8px 0 0" }}>A trade counts under each of its tags, so rows can add up to more than the total number of trades. Trades with no tags recorded appear in no row.</p>
@@ -1578,7 +1591,7 @@ function AnalyticsTab({ trades, onSelect }: { trades: AnalyticsTrade[]; onSelect
               ))}
             </tbody>
           </table>
-          <p className="hint" style={{ margin: "8px 0 0" }}>Windows are anchored to your most recent trade date in the current selection. Trade counts are shown in parentheses.</p>
+          <p className="hint" style={{ margin: "8px 0 0" }}>Windows are anchored to your most recent trade date in the current selection. Trade counts are shown in parentheses. Deltas are calculated from unrounded totals, so a displayed change can differ by a cent from subtracting the rounded totals.</p>
         </div>
       </section>
     </div>

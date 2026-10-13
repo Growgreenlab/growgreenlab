@@ -147,6 +147,10 @@ button { font-family: inherit; }
   transition: border-color .25s ease, box-shadow .25s ease, transform .25s ease;
 }
 .card:hover { border-color: var(--border); }
+.tablescroll { scrollbar-width: thin; }
+.tablescroll::-webkit-scrollbar { height: 6px; }
+.tablescroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.16); border-radius: 3px; }
+.tablescroll::-webkit-scrollbar-track { background: transparent; }
 .card h3 {
   margin: 0 0 12px; font-size: 12px; font-weight: 700;
   text-transform: uppercase; letter-spacing: 1.4px; color: var(--muted);

@@ -8,7 +8,7 @@ import {
   etMinutesOfDay, sessionBucket, timeOfDayBucket, holdBucket, holdMinutes,
   type AnalyticsTrade,
 } from "./journalAnalytics";
-import { calcMetrics } from "./journal";
+import { calcMetrics, calcRealTrade, groupFillsIntoTrades, fmtPnl, type RealFill, type RawFill } from "./journal";
 
 let passed = 0, failed = 0;
 function check(name: string, cond: boolean) {
@@ -177,6 +177,70 @@ const F: AnalyticsTrade[] = [
 const rmF = riskMetrics(F);
 approx("F avgRiskPerTrade", rmF.avgRiskPerTrade, 85);
 check("F tradesWithRisk = 2", rmF.tradesWithRisk === 2);
+
+/* ============ Set G: stop-loss → R mapping (real trades) ============
+ * calcRealTrade is the exact function the journal page runs on stored
+ * journal_real_trades rows (stop_loss column → initialRisk → R). */
+const fillsG: RealFill[] = [
+  { id: "g1", side: "buy", qty: 100, price: 10, fees: 0, fill_time: "2026-10-09T14:00:00Z" },
+  { id: "g2", side: "sell", qty: 100, price: 11, fees: 0, fill_time: "2026-10-09T15:00:00Z" },
+];
+const withStop = calcRealTrade(fillsG, "long", 9.5, null);
+approx("G initialRisk with stop = 50", withStop.initialRisk, 50);
+approx("G netRealized = 100", withStop.netRealized, 100);
+approx("G rMultiple with stop = 2", withStop.rMultiple, 2);
+const noStop = calcRealTrade(fillsG, "long", null, null);
+check("G initialRisk null without stop", noStop.initialRisk === null);
+check("G rMultiple null without stop (never invented)", noStop.rMultiple === null);
+
+/* ============ Set H: simulator fills carry no stop (honest null R) ===
+ * session_trades fills have no stop field at all, so grouped simulator
+ * trades must keep rMultiple null rather than deriving one. */
+const simFills: RawFill[] = [
+  { id: "h1", session_id: "s1", side: "buy", qty: 100, price: 10, candle_index: 0, candle_time: "2026-10-09T13:30:00Z", realized_pnl: 0, created_at: "2026-10-09T13:30:00Z" },
+  { id: "h2", session_id: "s1", side: "sell", qty: 100, price: 11, candle_index: 5, candle_time: "2026-10-09T13:35:00Z", realized_pnl: 100, created_at: "2026-10-09T13:35:00Z" },
+];
+const groupedH = groupFillsIntoTrades(simFills, { id: "s1", ticker: "VEEA", trade_date: "2026-10-09", source: "simulator" });
+check("H one grouped sim trade", groupedH.length === 1);
+check("H sim rMultiple is null (no stop stored on fills)", groupedH[0].rMultiple === null);
+approx("H sim realizedPnl = 100", groupedH[0].realizedPnl, 100);
+
+/* ============ Set I: imported real trade shape ======================
+ * Broker-CSV imports carry fill timestamps but NO stop and NO Trade DNA
+ * meta. Analytics must populate time buckets from the timestamps while
+ * every annotation dimension honestly reports "Not recorded". */
+const I: AnalyticsTrade[] = [
+  T({ source: "real", tradeDate: "2026-10-09", realizedPnl: 25, entryTime: "2026-10-09T15:00:00Z", exitTime: "2026-10-09T15:20:00Z" }),
+];
+check("I plan breakdown = Not recorded", breakdown(I, "plan").length === 1 && breakdown(I, "plan")[0].label === "Not recorded");
+check("I setup breakdown = Not recorded", breakdown(I, "setup").length === 1 && breakdown(I, "setup")[0].label === "Not recorded");
+check("I hod breakdown = Not recorded", breakdown(I, "hodClass").length === 1 && breakdown(I, "hodClass")[0].label === "Not recorded");
+check("I timeOfDay from fill_time = Morning", breakdown(I, "timeOfDay").length === 1 && breakdown(I, "timeOfDay")[0].label === "Morning (10:30–12:00)");
+check("I session = Regular hours", breakdown(I, "session").length === 1 && breakdown(I, "session")[0].label === "Regular hours");
+check("I tradesWithR = 0", riskMetrics(I).tradesWithR === 0);
+check("I avgR null (not zero)", riskMetrics(I).avgR === null);
+check("I bestSetup stat null when untagged", edgeInsights(I).bestSetup.stat === null);
+check("I plan notRecordedCount = 1", edgeInsights(I).planAdherence.notRecordedCount === 1);
+
+/* ============ Set J: trend delta uses UNROUNDED totals ===============
+ * Reproduces the 2026-10-12 QA screenshot case: recent +$46.024, prior
+ * +$4.786. Components display as +$46.02 / +$4.79 (naive difference
+ * +$41.23), but the true delta 41.238 displays as +$41.24. The delta
+ * MUST be computed from the unrounded sums — never "fixed" to match
+ * subtraction of the rounded display values. */
+const J: AnalyticsTrade[] = [
+  T({ tradeDate: "2026-10-09", realizedPnl: 23.012 }),
+  T({ tradeDate: "2026-10-10", realizedPnl: 23.012 }),
+  T({ tradeDate: "2026-09-05", realizedPnl: 4.786 }),
+];
+const trendJ = edgeInsights(J).trends[0];
+check("J window is 30d", trendJ.days === 30);
+approx("J current netPnl unrounded", trendJ.current?.netPnl ?? null, 46.024);
+approx("J prior netPnl unrounded", trendJ.prior?.netPnl ?? null, 4.786);
+approx("J delta from unrounded sums", trendJ.netPnlDelta, 41.238);
+check("J fmtPnl(current) = +$46.02", fmtPnl(trendJ.current!.netPnl) === "+$46.02");
+check("J fmtPnl(prior) = +$4.79", fmtPnl(trendJ.prior!.netPnl) === "+$4.79");
+check("J fmtPnl(delta) = +$41.24", fmtPnl(trendJ.netPnlDelta!) === "+$41.24");
 
 console.log(`journalAnalytics tests: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
