@@ -25,7 +25,7 @@ import { planBarPush, type BarPushState } from "../lib/chartPush";
 import { diag } from "../lib/diag";
 import { normalizePrice, formatPrice } from "../lib/price";
 import type { Drawing, DrawingTool, DrawingType, DrawingInteractionState } from "../lib/drawings";
-import { createDrawing } from "../lib/drawings";
+import { createDrawing, anchorHitZone, drawingCursor } from "../lib/drawings";
 import DrawingToolbar from "./DrawingToolbar";
 import DrawingLayer, { hitTestAll, hitTolerance } from "./DrawingLayer";
 
@@ -97,6 +97,18 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     interactionRef.current = s;
   };
 
+  // Drawing hover/drag cursor (Webull-style grab / grabbing / move),
+  // applied to the wrapper element — the same mechanism as the SL/TP
+  // ns-resize hover. The SVG drawing layer is pointerEvents:none, so
+  // per-element cursors can't work; the wrapper cursor is the one the
+  // user sees. cursorRef avoids a style write on every pointermove.
+  const cursorRef = useRef("");
+  const setWrapCursor = (c: string) => {
+    if (cursorRef.current === c) return;
+    cursorRef.current = c;
+    if (wrapRef.current) wrapRef.current.style.cursor = c;
+  };
+
   // Wrapped tool change: cancels any in-progress drawing (Phase 2 + Phase 5).
   // When user selects another tool mid-drawing: cancel unfinished drawing,
   // clear pending anchor and preview, activate new tool. Never create
@@ -112,6 +124,7 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     if (drawingDragRef.current) {
       drawingDragRef.current = null;
       enableChartNav();
+      setWrapCursor("");
     }
     // Update interaction state
     if (tool === "select") {
@@ -402,17 +415,39 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     return null;
   };
 
-  // Hover feedback: show ns-resize cursor when over a draggable line.
+  // Hover feedback: grab cursor over a draggable drawing (Select mode —
+  // the only mode where a drag can start), ns-resize over a draggable
+  // SL/TP line. Drawings win over bracket lines, the same precedence as
+  // the pointerdown hit-testing below. The drawing hit test is the exact
+  // one a click uses (hitTestAll, 8px mouse / 16px touch tolerance), so
+  // the grab zone is identical to the drag zone — and much wider than
+  // the 1.5px visible line.
   const onPointerMoveHover = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (dragRef.current) return; // already handled by drag move
+    if (dragRef.current || drawingDragRef.current) return; // a drag owns the cursor
     const el = elRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
+    const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
-    const hit = hitTestBracket(y);
-    if (wrapRef.current) {
-      wrapRef.current.style.cursor = hit ? "ns-resize" : "";
+    if (toolRef.current === "select") {
+      const dc = drawingCoords();
+      if (dc) {
+        const toX = (t: number) => dc.toX(t);
+        const toY = (p: number) => dc.toY(p);
+        const hits = hitTestAll(drawingsRef.current, x, y, toX, toY);
+        if (hits.length > 0) {
+          const top = hits[0];
+          // Endpoint handles exist only on the selected drawing.
+          const zone = top.id === selectedDrawingId
+            ? anchorHitZone(top, x, y, toX, toY, hitTolerance()) ?? "body"
+            : "body";
+          setWrapCursor(drawingCursor({ dragging: false, zone }) ?? "");
+          return;
+        }
+      }
     }
+    const hit = hitTestBracket(y);
+    setWrapCursor(hit ? "ns-resize" : "");
   };
 
   // Drawing coordinate helpers. All coordinates are element-relative
@@ -601,17 +636,13 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
         }
         setSelectedDrawingId(d.id);
         setInteraction("OBJECT_SELECTED");
-        // Check if hitting an endpoint (for line-type drawings).
-        let mode: "move" | "p1" | "p2" = "move";
-        const tol = hitTolerance();
-        if ((d.type === "trendline" || d.type === "arrow" || d.type === "extended" || d.type === "rect") && d.p1 && d.p2) {
-          const x1 = toX(d.p1.time); const y1 = toY(d.p1.price);
-          const x2 = toX(d.p2.time); const y2 = toY(d.p2.price);
-          if (x1 != null && y1 != null && Math.hypot(x - x1, y - y1) < tol) mode = "p1";
-          else if (x2 != null && y2 != null && Math.hypot(x - x2, y - y2) < tol) mode = "p2";
-        }
+        // Check if hitting an endpoint handle (for line-type drawings) —
+        // same classification the hover cursor uses, so press feedback
+        // always matches hover feedback.
+        const mode = anchorHitZone(d, x, y, toX, toY, hitTolerance()) ?? "move";
         drawingDragRef.current = { id: d.id, mode, startX: x, startY: y };
         // STATE: OBJECT_SELECTED -> OBJECT_DRAGGING or ANCHOR_DRAGGING (on move)
+        setWrapCursor(drawingCursor({ dragging: true, zone: null }) ?? "");
         disableChartNav();
         (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
         return;
@@ -660,6 +691,13 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
 
     // Drawing drag in progress.
     if (dDrag && cs && el) {
+      // STATE: OBJECT_SELECTED -> OBJECT_DRAGGING (body) / ANCHOR_DRAGGING (endpoint)
+      if (interactionRef.current === "OBJECT_SELECTED") {
+        setInteraction(dDrag.mode === "move" ? "OBJECT_DRAGGING" : "ANCHOR_DRAGGING");
+      }
+      // Keep the grabbing cursor for the whole drag (set at pointerdown;
+      // re-asserted here in case anything else touched it).
+      setWrapCursor(drawingCursor({ dragging: true, zone: null }) ?? "");
       const dc = drawingCoords();
       if (!dc) return;
       const rect = dc.rect;
@@ -739,6 +777,11 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     if (drawingDragRef.current) {
       drawingDragRef.current = null;
       enableChartNav();
+      setWrapCursor("");
+      // STATE: OBJECT_DRAGGING / ANCHOR_DRAGGING -> OBJECT_SELECTED
+      if (interactionRef.current === "OBJECT_DRAGGING" || interactionRef.current === "ANCHOR_DRAGGING") {
+        setInteraction("OBJECT_SELECTED");
+      }
       pushHistory([...drawingsRef.current]);
     }
     const drag = dragRef.current;
@@ -786,6 +829,7 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
         if (drawingDragRef.current) {
           drawingDragRef.current = null;
           enableChartNav();
+          setWrapCursor("");
         }
         setSelectedDrawingId(null);
         setInteraction("IDLE");
@@ -805,6 +849,12 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
+      onPointerLeave={() => {
+        // Pointer left the chart: drop hover feedback. An active drag
+        // holds pointer capture and keeps its grabbing cursor until
+        // pointerup/cancel, so don't clear while one is running.
+        if (!dragRef.current && !drawingDragRef.current) setWrapCursor("");
+      }}
     >
       <div ref={elRef} style={{ width: "100%", height: "100%" }} />
       <DrawingLayer

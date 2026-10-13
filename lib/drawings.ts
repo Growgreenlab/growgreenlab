@@ -145,6 +145,54 @@ export function pointInRect(
   return px >= minX && px <= maxX && py >= minY && py <= maxY;
 }
 
+/**
+ * Which endpoint handle (if any) of a two-point drawing is at pixel (x,y)?
+ * Returns "p1" / "p2" when the point is strictly within tol px of that
+ * endpoint, else null. Only trendline / arrow / extended / rect have
+ * draggable endpoint handles; every other type returns null.
+ * Single source of truth for anchor classification — used by pointerdown
+ * drag-mode selection AND by hover cursor feedback, so the two can never
+ * disagree about what counts as "on a handle".
+ */
+export function anchorHitZone(
+  d: Drawing,
+  x: number, y: number,
+  timeToX: (t: number) => number | null,
+  priceToY: (p: number) => number | null,
+  tol: number
+): "p1" | "p2" | null {
+  if (
+    (d.type !== "trendline" && d.type !== "arrow" &&
+     d.type !== "extended" && d.type !== "rect") ||
+    !d.p1 || !d.p2
+  ) return null;
+  const x1 = timeToX(d.p1.time); const y1 = priceToY(d.p1.price);
+  if (x1 != null && y1 != null && Math.hypot(x - x1, y - y1) < tol) return "p1";
+  const x2 = timeToX(d.p2.time); const y2 = priceToY(d.p2.price);
+  if (x2 != null && y2 != null && Math.hypot(x - x2, y - y2) < tol) return "p2";
+  return null;
+}
+
+/**
+ * Webull-style cursor for drawing interaction:
+ * - while any drawing drag is in progress → "grabbing" (forced for the
+ *   whole drag so fast pointer movement doesn't flicker back),
+ * - hovering an endpoint handle of the selected drawing → "move"
+ *   (matches the handle affordance the layer renders),
+ * - hovering a draggable drawing's body → "grab",
+ * - otherwise null (caller falls back to its own default, e.g. the
+ *   SL/TP ns-resize hover or the plain chart cursor).
+ */
+export function drawingCursor(args: {
+  dragging: boolean;
+  zone: "p1" | "p2" | "body" | null;
+}): "grabbing" | "move" | "grab" | null {
+  if (args.dragging) return "grabbing";
+  if (args.zone === "p1" || args.zone === "p2") return "move";
+  if (args.zone === "body") return "grab";
+  return null;
+}
+
 /** Distance from point to rect border (for selection) */
 export function distToRectBorder(
   px: number, py: number,
