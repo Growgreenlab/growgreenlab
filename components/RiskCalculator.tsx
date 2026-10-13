@@ -154,8 +154,12 @@ export default function RiskCalculator({
       setMsg("Short is calculation-only — the simulator executes long positions.");
       return;
     }
-    const err = await onBuySized(result.suggestedQty);
-    setMsg(err ?? `Bought ${result.suggestedQty} shares (simulated).`);
+    try {
+      const err = await onBuySized(result.suggestedQty);
+      setMsg(err ?? `Bought ${result.suggestedQty} shares (simulated).`);
+    } catch {
+      setMsg("Order didn't go through — something went wrong. Please try again.");
+    }
   };
 
   const field = (

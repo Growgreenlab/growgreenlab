@@ -10,6 +10,7 @@ import ReplayControls from "../../components/ReplayControls";
 import TradingPanel from "../../components/TradingPanel";
 import RiskCalculator from "../../components/RiskCalculator";
 import { ReplayEngine, formatMoney, formatSigned, countdownText, countdownTextFor, TICKS_PER_CANDLE, SECONDS_PER_CANDLE } from "../../lib/engine";
+import { advanceToIndex } from "../../lib/sessionReload";
 import type { Candle, SessionMeta } from "../../lib/types";
 import { TIMEFRAMES, aggregateCandles, higherTimeframeProgress, timeframeMinutes, type TimeframeId } from "../../lib/marketData";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
@@ -331,9 +332,13 @@ function ReplayPageInner() {
         // fast-forward through the recorded fills to rebuild state,
         // replaying each at its exact recorded price for P/L fidelity
         for (const t of fills) {
-          while (eng.index < t.candle_index) eng.step();
-          if (t.side === "buy") eng.buyAt(Number(t.qty), Number(t.price), t.candle_index, new Date(t.candle_time).getTime());
-          else eng.sellAt(Number(t.qty), Number(t.price), t.candle_index, new Date(t.candle_time).getTime());
+          // Bounded fast-forward: an unbounded while-loop here hangs the
+          // page forever when a recorded fill's candle_index exceeds the
+          // loaded session length (step() cannot advance past the end).
+          const reached = advanceToIndex(eng, t.candle_index);
+          const idx = Math.min(t.candle_index, reached);
+          if (t.side === "buy") eng.buyAt(Number(t.qty), Number(t.price), idx, new Date(t.candle_time).getTime());
+          else eng.sellAt(Number(t.qty), Number(t.price), idx, new Date(t.candle_time).getTime());
         }
         engineRef.current = eng;
         setCandles(cs);
@@ -632,29 +637,40 @@ function ReplayPageInner() {
     const isNewPosition = eng.positionQty === 0;
     const isGuest = !guardUserId; // works with or without Supabase (localStorage fallback)
     // Pre-check: block before consuming if already at limit.
+    // The gate must never reject into the caller: an unexpected failure in
+    // the limit machinery falls through to the order itself, whose own
+    // validation (quantity, cash, guard lockout) still fully applies.
     if (isNewPosition && isGuest) {
-      const remaining = await getGuestTradesRemaining(
-        isSupabaseConfigured() ? createClient() : null,
-        getGuestFingerprint()
-      );
-      setGuestRemaining(remaining);
-      if (remaining <= 0) {
-        setShowGuestModal(true);
-        return "Daily guest limit reached (5 trades).";
+      try {
+        const remaining = await getGuestTradesRemaining(
+          isSupabaseConfigured() ? createClient() : null,
+          getGuestFingerprint()
+        );
+        setGuestRemaining(remaining);
+        if (remaining <= 0) {
+          setShowGuestModal(true);
+          return "Daily guest limit reached (5 trades).";
+        }
+      } catch {
+        /* gate check failed unexpectedly — proceed to the order */
       }
     }
     const result = buyErr(qty);
     // Consume only on successful NEW position open.
     if (result === null && isNewPosition && isGuest) {
-      const consumed = await consumeGuestTrade(
-        isSupabaseConfigured() ? createClient() : null,
-        getGuestFingerprint()
-      );
-      const remaining = await getGuestTradesRemaining(
-        isSupabaseConfigured() ? createClient() : null,
-        getGuestFingerprint()
-      );
-      setGuestRemaining(remaining);
+      try {
+        await consumeGuestTrade(
+          isSupabaseConfigured() ? createClient() : null,
+          getGuestFingerprint()
+        );
+        const remaining = await getGuestTradesRemaining(
+          isSupabaseConfigured() ? createClient() : null,
+          getGuestFingerprint()
+        );
+        setGuestRemaining(remaining);
+      } catch {
+        /* counting is best-effort; the fill already happened */
+      }
     }
     return result;
   };

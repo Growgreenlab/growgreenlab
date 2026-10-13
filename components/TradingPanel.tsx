@@ -69,14 +69,20 @@ export default function TradingPanel({ snap, qty, onQtyChange, plannedSL, planne
   const effLimit = limitPx ? Number(limitPx) : snap.price;
 
   const submit = async (side: "buy" | "sell") => {
-    const q = Number(qty);
-    if (orderType === "market") {
-      const err = side === "buy" ? await onBuy(q) : onSell(q);
-      setMsg(err ?? `${side === "buy" ? "Bought" : "Sold"} ${q} @ ${formatMoney(snap.price)} (simulated)`);
-    } else {
-      const err = onPlaceLimit(side, q, effLimit);
-      setMsg(err ?? `Limit ${side} ${q} @ ${formatMoney(effLimit)} working (simulated)`);
-      if (!err) setLimitPx("");
+    // Never fail silently: if an order callback throws or rejects, the
+    // trader must see that the order did NOT go through.
+    try {
+      const q = Number(qty);
+      if (orderType === "market") {
+        const err = side === "buy" ? await onBuy(q) : onSell(q);
+        setMsg(err ?? `${side === "buy" ? "Bought" : "Sold"} ${q} @ ${formatMoney(snap.price)} (simulated)`);
+      } else {
+        const err = onPlaceLimit(side, q, effLimit);
+        setMsg(err ?? `Limit ${side} ${q} @ ${formatMoney(effLimit)} working (simulated)`);
+        if (!err) setLimitPx("");
+      }
+    } catch {
+      setMsg("Order didn't go through — something went wrong. Please try again.");
     }
   };
 
