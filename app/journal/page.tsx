@@ -3,7 +3,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
-import { groupFillsIntoTrades, calcMetrics, calcRealTrade, validateRealFills, parseBrokerCsv, parseWithMapping, autoMapColumns, MAPPABLE_FIELDS, groupImportedFills, fmtPnl, fmtPct, type GroupedTrade, type RawFill, type RealFill, type RealTradeCalc, type BrokerParseResult, type ImportedTrade } from "../../lib/journal";
+import { groupFillsIntoTrades, calcMetrics, calcRealTrade, validateRealFills, perExitPnl, parseKeyLevels, validateKeyLevels, computePlanUpdate, KEY_LEVEL_TYPES, KEY_LEVEL_INTERACTIONS, type KeyLevel, type PlanChange, parseBrokerCsv, parseWithMapping, autoMapColumns, MAPPABLE_FIELDS, groupImportedFills, fmtPnl, fmtPct, type GroupedTrade, type RawFill, type RealFill, type RealTradeCalc, type BrokerParseResult, type ImportedTrade } from "../../lib/journal";
 import { breakdown, riskMetrics, edgeInsights, dailyPnl, type AnalyticsTrade, type BreakdownDimension, type Insight } from "../../lib/journalAnalytics";
 import { listScreenshots, removeScreenshots, uploadScreenshots, validateScreenshotFile } from "../../lib/journalAttachments";
 
@@ -25,6 +25,10 @@ interface TradeMeta {
   notes: string | null;
   lessons: string | null;
   would_take_again: boolean | null;
+  key_levels: KeyLevel[] | null;
+  original_stop_loss: number | null;
+  original_target: number | null;
+  plan_history: PlanChange[] | null;
 }
 
 interface RealTrade {
@@ -169,7 +173,9 @@ export default function JournalPage() {
           stop_loss: rt.stop_loss != null ? Number(rt.stop_loss) : null,
           target: rt.target != null ? Number(rt.target) : null,
           fills: rf,
-          calc: calcRealTrade(rf, rt.direction, rt.stop_loss != null ? Number(rt.stop_loss) : null, rt.target != null ? Number(rt.target) : null),
+          calc: calcRealTrade(rf, rt.direction,
+            metaMap[`real:${rt.id}`]?.original_stop_loss ?? (rt.stop_loss != null ? Number(rt.stop_loss) : null),
+            metaMap[`real:${rt.id}`]?.original_target ?? (rt.target != null ? Number(rt.target) : null)),
         });
       }
       setRealTrades(real);
@@ -272,6 +278,8 @@ export default function JournalPage() {
         emotionalTags: meta?.emotional_tags ?? [],
         mistakes: meta?.mistakes ?? [],
         entryTime, exitTime, stopLoss, initialRisk,
+        keyLevelType: parseKeyLevels(meta?.key_levels)[0]?.type ?? null,
+        keyLevelInteraction: parseKeyLevels(meta?.key_levels)[0]?.interaction ?? null,
       };
     });
   }, [closedFiltered, trades, realTrades, metas]);
@@ -865,6 +873,29 @@ function ReviewTab({ tradeKey, simTrade, realTrade, meta, onSaved, onEditReal, o
         {!isReal && simTrade!.sessionId && (
           <p style={{ marginTop: 12 }}><Link href={`/replay?session=${simTrade!.sessionId}`} style={{ fontSize: 13 }}>↩ Open replay session</Link></p>
         )}
+        {(parseKeyLevels(form.key_levels).length > 0 || form.original_stop_loss != null || form.original_target != null) && (
+          <div style={{ marginTop: 14, borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 12 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Key Levels &amp; Plan</div>
+            {parseKeyLevels(form.key_levels).map((l, i) => (
+              <div key={i} style={{ fontSize: 13, padding: "3px 0" }}>
+                <b className="num">${l.price}</b> · {l.type}{l.interaction ? ` · ${l.interaction}` : ""}
+                {l.notes ? <span className="hint"> — {l.notes}</span> : null}
+              </div>
+            ))}
+            {(form.original_stop_loss != null || form.original_target != null) && (
+              <div style={{ fontSize: 13, marginTop: 6 }}>
+                <span className="hint">Original plan:</span> stop {form.original_stop_loss != null ? `$${form.original_stop_loss}` : "—"} · target {form.original_target != null ? `$${form.original_target}` : "—"}
+                {(form.plan_history?.length ?? 0) > 0 && (
+                  <div className="hint" style={{ marginTop: 4 }}>
+                    {form.plan_history!.map((c, i) => (
+                      <div key={i}>{new Date(c.at).toLocaleDateString()} — {c.field === "stop_loss" ? "Stop" : "Target"} changed {c.from != null ? `$${c.from}` : "—"} → {c.to != null ? `$${c.to}` : "—"}</div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
         {isReal && (
           <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
             <button className="btn" onClick={() => onEditReal?.(tradeKeyVal)}>Edit trade</button>
@@ -1195,6 +1226,54 @@ function fillTimeToInput(iso: string | null): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
+/**
+ * FillTimePicker — hour / minute / AM-PM selects that produce the same
+ * "HH:MM" 24-hour string the form has always stored (storage format and
+ * timezone conventions unchanged). Replaces the native time input,
+ * whose segmented keyboard entry was confusing. Empty = no time.
+ */
+function FillTimePicker({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(value);
+  const h24 = m ? Number(m[1]) : null;
+  const min = m ? Number(m[2]) : null;
+  const period = h24 != null && h24 >= 12 ? "PM" : "AM";
+  const h12 = h24 == null ? "" : String(h24 % 12 === 0 ? 12 : h24 % 12);
+  const emit = (h12v: string, minv: number | null, per: string) => {
+    if (!h12v) { onChange(""); return; }
+    let h = Number(h12v) % 12;
+    if (per === "PM") h += 12;
+    onChange(`${String(h).padStart(2, "0")}:${String(minv ?? 0).padStart(2, "0")}`);
+  };
+  const selStyle = { width: "auto", flex: "0 0 auto", padding: "8px 6px" };
+  return (
+    <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+      <select className="input" style={selStyle} aria-label="Hour" value={h12}
+        onChange={(e) => emit(e.target.value, min, period)}>
+        <option value="">––</option>
+        {Array.from({ length: 12 }, (_, i) => String(i + 1)).map((h) => <option key={h} value={h}>{h}</option>)}
+      </select>
+      <span style={{ color: "var(--muted)" }}>:</span>
+      <select className="input" style={selStyle} aria-label="Minute" value={min == null ? "" : String(min).padStart(2, "0")}
+        onChange={(e) => emit(h12 || "9", e.target.value === "" ? null : Number(e.target.value), period)}>
+        <option value="">––</option>
+        {Array.from({ length: 60 }, (_, i) => String(i).padStart(2, "0")).map((mm) => <option key={mm} value={mm}>{mm}</option>)}
+      </select>
+      <div style={{ display: "flex", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8, overflow: "hidden" }}>
+        {(["AM", "PM"] as const).map((pp) => (
+          <button key={pp} type="button" onClick={() => emit(h12 || "9", min, pp)}
+            style={{ padding: "7px 8px", fontSize: 12, cursor: "pointer", border: "none",
+              background: h24 != null && period === pp ? "rgba(16,185,129,0.25)" : "transparent",
+              color: h24 != null && period === pp ? "#34d399" : "var(--muted)" }}>{pp}</button>
+        ))}
+      </div>
+      {value && (
+        <button type="button" title="Clear time" onClick={() => onChange("")}
+          style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 14, padding: 2 }}>×</button>
+      )}
+    </div>
+  );
+}
+
 function RealTradeForm({ onSaved, editing, onCancel }: {
   /** Called after a successful save; `notice` carries non-fatal issues
    *  (e.g. screenshot upload failures) for the page to surface. */
@@ -1237,6 +1316,15 @@ function RealTradeForm({ onSaved, editing, onCancel }: {
   const [lessons, setLessons] = useState(em?.lessons ?? "");
   const [emotions, setEmotions] = useState<string[]>(em?.emotional_tags ?? []);
   const [mistakes, setMistakes] = useState<string[]>(em?.mistakes ?? []);
+  // Key levels & trade context (Trade DNA) — stored on meta as jsonb
+  const [levels, setLevels] = useState<{ price: string; type: string; interaction: string; notes: string }[]>(() =>
+    parseKeyLevels(em?.key_levels).map((l) => ({
+      price: String(l.price), type: l.type, interaction: l.interaction ?? "", notes: l.notes ?? "",
+    })),
+  );
+  const updateLevel = (i: number, k: string, v: string) =>
+    setLevels(levels.map((l, j) => (j === i ? { ...l, [k]: v } : l)));
+  const levelsError = validateKeyLevels(levels);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   // Screenshots: newly staged files (object-URL previews), screenshots
@@ -1299,8 +1387,18 @@ function RealTradeForm({ onSaved, editing, onCancel }: {
 
   // Live preview of calculations
   const previewFills: RealFill[] = fills
-    .filter((f) => f.qty && f.price)
-    .map((f, i) => ({ id: `p${i}`, side: f.side, qty: Number(f.qty), price: Number(f.price), fees: Number(f.fees || 0), fill_time: f.time || null }));
+    .map((f, row) => ({ f, row }))
+    .filter(({ f }) => f.qty && f.price)
+    .map(({ f, row }) => ({ id: `row${row}`, side: f.side, qty: Number(f.qty), price: Number(f.price), fees: Number(f.fees || 0), fill_time: f.time || null }));
+  // Realized P&L per exit fill (FIFO, reconciles with the totals below)
+  const exitPnlByRow = new Map(perExitPnl(previewFills, direction).map((x) => [x.fillId, x]));
+  // Row captions: initial vs partial entries, exits vs partial exits
+  const isEntrySide = (s: "buy" | "sell") => (direction === "long" ? s === "buy" : s === "sell");
+  let entrySeen = 0, exitSeen = 0;
+  const rowCaptions = fills.map((f) =>
+    isEntrySide(f.side)
+      ? (++entrySeen === 1 ? "Initial entry" : "Partial entry")
+      : (++exitSeen === 1 ? "Exit" : "Partial exit"));
   const preview = previewFills.length > 0
     ? calcRealTrade(previewFills, direction, stopLoss ? Number(stopLoss) : null, target ? Number(target) : null)
     : null;
@@ -1313,6 +1411,7 @@ function RealTradeForm({ onSaved, editing, onCancel }: {
     if (!ticker.trim()) { setMsg("Ticker is required."); return; }
     if (previewFills.length === 0) { setMsg("Add at least one fill with quantity and price."); return; }
     if (fillsError) { setMsg(fillsError); return; }
+    if (levelsError) { setMsg(levelsError); return; }
     setSaving(true); setMsg(null);
     try {
       const supabase = createClient();
@@ -1370,6 +1469,21 @@ function RealTradeForm({ onSaved, editing, onCancel }: {
       const { error: fErr } = await supabase.from("journal_real_fills").insert(fillRows);
       if (fErr) throw new Error(fErr.message);
 
+      // Plan preservation + key levels (Trade DNA): originals are
+      // set-once, stop/target changes append to plan_history, and R
+      // downstream is computed from the ORIGINAL plan (see loader).
+      const planState = computePlanUpdate(
+        em ? { original_stop_loss: em.original_stop_loss ?? null, original_target: em.original_target ?? null, plan_history: em.plan_history ?? [] } : null,
+        et?.stop_loss ?? null, et?.target ?? null,
+        stopLoss ? Number(stopLoss) : null, target ? Number(target) : null,
+        new Date().toISOString(),
+      );
+      const keyLevels = parseKeyLevels(
+        levels
+          .filter((l) => l.price.trim() || l.type.trim())
+          .map((l) => ({ price: Number(l.price), type: l.type, interaction: l.interaction || null, notes: l.notes.trim() || null })),
+      );
+
       // Save Trade DNA annotations via shared meta table
       const tradeKey = `real:${tradeId}`;
       const { error: mErr } = await supabase.from("journal_trade_meta").upsert({
@@ -1384,6 +1498,10 @@ function RealTradeForm({ onSaved, editing, onCancel }: {
         mistakes,
         notes: notes.trim() || null,
         lessons: lessons.trim() || null,
+        key_levels: keyLevels,
+        original_stop_loss: planState.original_stop_loss,
+        original_target: planState.original_target,
+        plan_history: planState.plan_history,
         updated_at: new Date().toISOString(),
       }, { onConflict: "user_id,trade_key" });
       if (mErr) throw new Error(mErr.message);
@@ -1447,21 +1565,34 @@ function RealTradeForm({ onSaved, editing, onCancel }: {
 
       <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>Fills <span className="hint">(multiple entries & partial exits)</span></div>
       {fills.map((f, i) => (
-        <div key={i} className="fill-row" style={{ display: "grid", gridTemplateColumns: "80px 1fr 1fr 1fr 110px 32px", gap: 8, marginBottom: 8, alignItems: "end" }}>
-          <div className="field" style={field}><label>Side</label>
+        <div key={i} className="fill-row" style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10, alignItems: "end" }}>
+          <div style={{ flex: "1 0 100%", fontSize: 11, color: "var(--muted)", display: "flex", gap: 10, alignItems: "baseline" }}>
+            <span style={{ fontWeight: 600, letterSpacing: 0.4, textTransform: "uppercase" }}>{rowCaptions[i]}</span>
+            {exitPnlByRow.get(`row${i}`) && (
+              <span>realized on this exit{" "}
+                <b className="num" style={{ color: (exitPnlByRow.get(`row${i}`)?.grossPnl ?? 0) >= 0 ? "var(--emerald-bright)" : "#f6465d" }}>
+                  {fmtPnl(exitPnlByRow.get(`row${i}`)?.grossPnl ?? 0)}
+                </b>{" "}(before fees)
+              </span>
+            )}
+          </div>
+          <div className="field" style={{ ...field, flex: "0 0 76px" }}><label>Side</label>
             <select className="input" value={f.side} onChange={(e) => updateFill(i, "side", e.target.value)}>
-              <option value="buy">Buy</option><option value="sell">Sell</option>
+              <option value="buy">Buy</option>
+              <option value="sell">Sell</option>
             </select></div>
-          <div className="field" style={field}><label>Qty *</label><input className="input num" type="number" step="any" value={f.qty} onChange={(e) => updateFill(i, "qty", e.target.value)} /></div>
-          <div className="field" style={field}><label>Price *</label><input className="input num" type="number" step="any" value={f.price} onChange={(e) => updateFill(i, "price", e.target.value)} /></div>
-          <div className="field" style={field}><label>Fees $</label><input className="input num" type="number" step="any" value={f.fees} onChange={(e) => updateFill(i, "fees", e.target.value)} placeholder="0" /></div>
-          <div className="field" style={field}><label>Time</label><input className="input" type="time" value={f.time} onChange={(e) => updateFill(i, "time", e.target.value)} /></div>
+          <div className="field" style={{ ...field, flex: "1 1 84px" }}><label>Qty *</label><input className="input num" type="number" step="any" value={f.qty} onChange={(e) => updateFill(i, "qty", e.target.value)} /></div>
+          <div className="field" style={{ ...field, flex: "1 1 84px" }}><label>Price *</label><input className="input num" type="number" step="any" value={f.price} onChange={(e) => updateFill(i, "price", e.target.value)} /></div>
+          <div className="field" style={{ ...field, flex: "1 1 84px" }}><label>Fees $</label><input className="input num" type="number" step="any" value={f.fees} onChange={(e) => updateFill(i, "fees", e.target.value)} placeholder="0" /></div>
+          <div className="field" style={{ ...field, flex: "0 1 auto" }}><label>Time</label>
+            <FillTimePicker value={f.time} onChange={(v) => updateFill(i, "time", v)} /></div>
           <button className="btn" onClick={() => removeFill(i)} disabled={fills.length === 1} style={{ height: 38 }}>×</button>
         </div>
       ))}
-      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-        <button className="btn" onClick={() => addFill(direction === "long" ? "buy" : "sell")}>+ Add entry</button>
-        <button className="btn" onClick={() => addFill(direction === "long" ? "sell" : "buy")}>+ Add exit</button>
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
+        <button className="btn" onClick={() => addFill(direction === "long" ? "buy" : "sell")}>+ Add Partial Entry</button>
+        <button className="btn" onClick={() => addFill(direction === "long" ? "sell" : "buy")}>+ Add Partial Exit</button>
+        <span className="hint">Each adds another fill to this same trade — partial entries and exits stay grouped as one trade.</span>
       </div>
 
       {preview && (
@@ -1522,6 +1653,48 @@ function RealTradeForm({ onSaved, editing, onCancel }: {
         <div className="field" style={field}><label>Setup</label><select className="input" value={setup} onChange={(e) => setSetup(e.target.value)}><option value="">—</option>{SETUPS.map((s) => <option key={s} value={s}>{s}</option>)}</select></div>
         <div className="field" style={field}><label>HOD Class</label><select className="input" value={hodClass} onChange={(e) => setHodClass(e.target.value)}><option value="">—</option>{HOD_CLASSES.map((c) => <option key={c} value={c}>{c}</option>)}</select></div>
         <div className="field" style={field}><label>Exec Grade</label><select className="input" value={grade} onChange={(e) => setGrade(e.target.value)}><option value="">—</option>{GRADES.map((g) => <option key={g} value={g}>{g}</option>)}</select></div>
+      </div>
+
+      {et && (em?.original_stop_loss != null || em?.original_target != null) && (
+        <p className="hint" style={{ margin: "0 0 12px" }}>
+          Original plan (preserved): stop {em?.original_stop_loss != null ? `$${em.original_stop_loss}` : "—"} · target {em?.original_target != null ? `$${em.original_target}` : "—"}
+          {(em?.plan_history?.length ?? 0) > 0 && <> · {em?.plan_history?.length} plan change{(em?.plan_history?.length ?? 0) === 1 ? "" : "s"} recorded — R is calculated from the original plan</>}
+        </p>
+      )}
+      {et && em?.original_stop_loss == null && em?.original_target == null && (et.stop_loss != null || et.target != null) && (
+        <p className="hint" style={{ margin: "0 0 12px" }}>
+          Plan history was not recorded for this trade (it pre-dates plan tracking). Saving now records the current stop/target as the original plan — nothing is back-filled or invented.
+        </p>
+      )}
+
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 4 }}>
+          Key Levels &amp; Trade Context <span className="hint">(optional — the technical level this trade was built around; feeds Trade DNA review)</span>
+        </div>
+        {levels.map((l, i) => (
+          <div key={i} style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 8, alignItems: "end" }}>
+            <div className="field" style={{ ...field, flex: "1 1 110px" }}><label>Level price</label>
+              <input className="input num" type="number" step="any" value={l.price} onChange={(e) => updateLevel(i, "price", e.target.value)} placeholder="4.20" /></div>
+            <div className="field" style={{ ...field, flex: "1 1 170px" }}><label>Level type</label>
+              <select className="input" value={l.type} onChange={(e) => updateLevel(i, "type", e.target.value)}>
+                <option value="">Select level type…</option>
+                {KEY_LEVEL_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+              </select></div>
+            <div className="field" style={{ ...field, flex: "1 1 170px" }}><label>Trade interaction</label>
+              <select className="input" value={l.interaction} onChange={(e) => updateLevel(i, "interaction", e.target.value)}>
+                <option value="">Select interaction…</option>
+                {KEY_LEVEL_INTERACTIONS.map((t) => <option key={t} value={t}>{t}</option>)}
+              </select></div>
+            <div className="field" style={{ ...field, flex: "2 1 220px" }}><label>Context notes</label>
+              <input className="input" value={l.notes} onChange={(e) => updateLevel(i, "notes", e.target.value)} placeholder="What you expected at this level, confirmation you saw…" /></div>
+            <button className="btn" type="button" title="Remove this level" onClick={() => setLevels(levels.filter((_, j) => j !== i))} style={{ height: 38 }}>×</button>
+          </div>
+        ))}
+        <button className="btn" type="button" disabled={levels.length >= 5}
+          onClick={() => setLevels([...levels, { price: "", type: "", interaction: "", notes: "" }])}>
+          + Add Key Level
+        </button>
+        {levelsError && <p style={{ color: "#f6465d", fontSize: 12, margin: "8px 0 0" }}>{levelsError}</p>}
       </div>
 
       <div style={{ display: "grid", gap: 12, marginBottom: 16 }}>
@@ -1667,6 +1840,8 @@ const DIMENSION_OPTIONS: { key: BreakdownDimension; label: string }[] = [
   { key: "source", label: "Source" },
   { key: "side", label: "Side" },
   { key: "hodClass", label: "HOD Class" },
+  { key: "keyLevel", label: "Key Level" },
+  { key: "interaction", label: "Trade Interaction" },
 ];
 
 function fmtR(v: number | null): string {

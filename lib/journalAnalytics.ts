@@ -53,13 +53,17 @@ export interface AnalyticsTrade {
   /** ISO instant of the last exit fill, when known. */
   exitTime: string | null;
   stopLoss: number | null;
+  /** Primary recorded key level (Trade DNA), when annotated. */
+  keyLevelType: string | null;
+  keyLevelInteraction: string | null;
   /** |entry − stop| × qty in dollars, when known (real trades). */
   initialRisk: number | null;
 }
 
 export type BreakdownDimension =
   | "setup" | "hodClass" | "symbol" | "mistake" | "emotion" | "plan"
-  | "source" | "session" | "timeOfDay" | "hold" | "side";
+  | "source" | "session" | "timeOfDay" | "hold" | "side"
+  | "keyLevel" | "interaction";
 
 export interface BreakdownRow {
   key: string;
@@ -175,6 +179,8 @@ function bucketLabels(t: AnalyticsTrade, dim: BreakdownDimension): string[] {
     case "timeOfDay": return [timeOfDayBucket(t)];
     case "hold": return [holdBucket(t)];
     case "side": return [t.direction === "long" ? "Long" : "Short"];
+    case "keyLevel": return [t.keyLevelType ?? "Not recorded"];
+    case "interaction": return [t.keyLevelInteraction ?? "Not recorded"];
   }
 }
 
