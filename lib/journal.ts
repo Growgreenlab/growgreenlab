@@ -467,6 +467,8 @@ export interface RealFill {
 export interface RealTradeCalc {
   /** Weighted average entry price across all entry fills */
   avgEntry: number | null;
+  /** FIFO-matched weighted average exit price (null when nothing closed) */
+  avgExit: number | null;
   /** Total entry quantity */
   entryQty: number;
   /** Quantity still open */
@@ -510,6 +512,11 @@ export function calcRealTrade(
   let totalFees = 0;
   let entryQty = 0;
   let entryCost = 0;
+  // Matched exit quantity + proceeds, for the average exit price.
+  // Only FIFO-matched portions count (unmatched excess exits are ignored,
+  // exactly as they are for realized P&L).
+  let matchedExitQty = 0;
+  let matchedExitProceeds = 0;
 
   for (const f of sorted) {
     const q = Number(f.qty), p = Number(f.price);
@@ -525,6 +532,8 @@ export function calcRealTrade(
         const matched = Math.min(remaining, lot.qty);
         const pnlPerShare = direction === "long" ? p - lot.price : lot.price - p;
         grossRealized += pnlPerShare * matched;
+        matchedExitQty += matched;
+        matchedExitProceeds += p * matched;
         lot.qty -= matched;
         remaining -= matched;
         if (lot.qty < 1e-9) lots.shift();
@@ -536,6 +545,7 @@ export function calcRealTrade(
 
   const openQty = lots.reduce((s, l) => s + l.qty, 0);
   const avgEntry = entryQty > 0 ? entryCost / entryQty : null;
+  const avgExit = matchedExitQty > 0 ? matchedExitProceeds / matchedExitQty : null;
   const netRealized = grossRealized - totalFees;
   const isClosed = openQty < 1e-9 && entryQty > 0;
 
@@ -555,9 +565,46 @@ export function calcRealTrade(
   }
 
   return {
-    avgEntry, entryQty, openQty,
+    avgEntry, avgExit, entryQty, openQty,
     grossRealized, totalFees, netRealized,
     initialRisk, rMultiple, riskReward,
     isClosed,
   };
+}
+
+/**
+ * Validate the fills of a manually entered real-market trade.
+ * Returns a human-readable error for the first problem found, or null
+ * when the fills are valid. Pure — used live by the trade form (to
+ * disable saving) and again at save time.
+ *
+ * Rules: at least one fill; every fill qty > 0, price > 0, fees >= 0;
+ * at least one entry fill for the direction (long → buy, short → sell);
+ * total exit quantity must not exceed total entry quantity.
+ */
+export function validateRealFills(
+  direction: "long" | "short",
+  fills: RealFill[],
+): string | null {
+  if (fills.length === 0) return "Add at least one fill with quantity and price.";
+  for (const f of fills) {
+    if (!(Number(f.qty) > 0)) return "Every fill needs a quantity greater than 0.";
+    if (!(Number(f.price) > 0)) return "Every fill needs a price greater than 0.";
+    const fees = Number(f.fees ?? 0);
+    if (!Number.isFinite(fees) || fees < 0) return "Fees cannot be negative.";
+  }
+  const isEntry = (f: RealFill) =>
+    direction === "long" ? f.side === "buy" : f.side === "sell";
+  const entryQty = fills.filter(isEntry).reduce((s, f) => s + Number(f.qty), 0);
+  const exitQty = fills.filter((f) => !isEntry(f)).reduce((s, f) => s + Number(f.qty), 0);
+  if (entryQty <= 0) {
+    return direction === "long"
+      ? "Add at least one buy fill (the entry) for a long trade."
+      : "Add at least one sell fill (the entry) for a short trade.";
+  }
+  if (exitQty > entryQty + 1e-9) {
+    const fmtQty = (n: number) => String(Math.round(n * 1e6) / 1e6);
+    return `Exit quantity (${fmtQty(exitQty)}) exceeds position size (${fmtQty(entryQty)})`;
+  }
+  return null;
 }
