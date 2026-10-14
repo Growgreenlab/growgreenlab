@@ -543,7 +543,10 @@ export function sanitizeJsonValue(value: unknown): unknown {
 export interface PnlSeriesPoint { date: string; dailyPnl: number; cumulative: number; drawdown: number }
 
 /** Chronological cumulative realized P&L + drawdown (USD, <= 0) series
- *  from dailyPnl() — the same aggregation the Analytics UI charts. */
+ *  from dailyPnl() — the same aggregation the Analytics UI charts.
+ *  NOTE: this is a PER-DAY series; its drawdown trough can differ from
+ *  riskMetrics().maxDrawdownUSD, which is calculated PER TRADE. Use
+ *  tradeLevelDrawdownSeries() wherever the headline drawdown is shown. */
 export function cumulativePnlSeries(snapshot: ExportSnapshot): PnlSeriesPoint[] {
   const days = dailyPnl(snapshot.analyticsTrades);
   let cum = 0, peak = 0;
@@ -554,7 +557,57 @@ export function cumulativePnlSeries(snapshot: ExportSnapshot): PnlSeriesPoint[] 
   });
 }
 
+export interface TradeDrawdownPoint { date: string; tradeId: string; pnl: number; cumulative: number; drawdown: number }
+
+/**
+ * Per-trade cumulative realized P&L + drawdown (USD, <= 0) series, in
+ * the SAME chronological order lib/journalAnalytics riskMetrics() uses
+ * (tradeDate, then entry time, then key — mirroring its internal
+ * chronological() sort). The trough of this series therefore equals
+ * -riskMetrics().maxDrawdownUSD exactly: one source of truth for the
+ * headline metric and any chart drawn next to it. A per-day series
+ * hides intra-day drawdown (all of a day's trades collapse into one
+ * point), which is why the PDF drawdown chart uses this series.
+ */
+export function tradeLevelDrawdownSeries(snapshot: ExportSnapshot): TradeDrawdownPoint[] {
+  const sorted = [...snapshot.analyticsTrades].sort((a, b) =>
+    a.tradeDate.localeCompare(b.tradeDate) ||
+    (a.entryTime ?? "").localeCompare(b.entryTime ?? "") ||
+    a.key.localeCompare(b.key));
+  let cum = 0, peak = 0;
+  return sorted.map((t) => {
+    cum += t.realizedPnl;
+    if (cum > peak) peak = cum;
+    return { date: t.tradeDate, tradeId: exportIdForTradeKey(t.key), pnl: t.realizedPnl, cumulative: cum, drawdown: cum - peak };
+  });
+}
+
 /* ================= screenshot manifest ================================== */
+
+/**
+ * Public (downloadable) projection of a manifest entry. The internal
+ * entry carries the raw Supabase storage path — which contains the
+ * account's UUID and internal object identifiers — and the journal's
+ * internal trade key. NEITHER may be serialized into a downloadable
+ * artifact: exports identify screenshots by stable trade ID,
+ * package-relative file name and status only. Storage paths stay
+ * internal to the application.
+ */
+export function publicScreenshotManifestEntry(e: ScreenshotManifestEntry): {
+  tradeId: string; symbol: string; type: ScreenshotManifestEntry["type"];
+  file: string | null; fileName: string | null;
+  status: ScreenshotManifestEntry["status"]; capturedAt: string | null;
+} {
+  return {
+    tradeId: e.tradeId,
+    symbol: e.symbol,
+    type: e.type,
+    file: e.file,
+    fileName: e.fileName,
+    status: e.status,
+    capturedAt: e.capturedAt,
+  };
+}
 
 export interface ScreenshotManifestEntry {
   /** Stable export ID of the owning trade. */
@@ -779,14 +832,23 @@ export function buildTradesCsv(snapshot: ExportSnapshot, manifest: ScreenshotMan
 
 /* ================= analytics.json ======================================= */
 
+/**
+ * Display-rounding convention for the whole package, stated identically
+ * in README.txt, analytics.json (metadata.rounding) and a Trading_Report
+ * .pdf footnote so users can reconcile the artifacts themselves.
+ */
+export const ROUNDING_NOTE = "Rounding & reconciliation: per-trade amounts in trades.csv are rounded to cents for display. Totals in analytics.json and Trading_Report.pdf are calculated from full-precision values, so summing the displayed per-trade rows can differ from a reported total by a cent or two. That difference is a display-rounding effect, not an error.";
+
 export const METRIC_DEFINITIONS: Record<string, string> = {
   winRate: "Wins / (wins + losses) x 100. Breakeven trades (realized P&L exactly 0) are excluded from the denominator - the journalAnalytics convention.",
   expectancy: "Net realized P&L / closed trade count (breakevens included) - the calcMetrics convention.",
-  profitFactor: "Gross profit / gross loss. When there are winners and zero gross loss the value is unbounded: serialized as null with profitFactorUnbounded: true. Null when there are no winners and no losers.",
+  grossProfit: "Sum of the realized P&L of winning closed trades. 'Gross' means before offsetting winners against losers - it is NOT a pre-fee figure: every trade's realized P&L is its net P&L. For real trades that net P&L is after their recorded fees; for simulator trades it is the engine-reported P&L - the simulator has no fee model, so simulator P&L is fee-free and no simulator fees are ever invented. A mixed-source gross profit therefore combines fee-netted real P&L with fee-free simulator P&L.",
+  grossLoss: "Sum of the realized P&L of losing closed trades, expressed as a positive amount. Same basis as grossProfit: net per-trade realized P&L (real trades net of recorded fees; simulator trades fee-free, no fee model).",
+  profitFactor: "Gross profit / gross loss (see the grossProfit / grossLoss definitions). When there are winners and zero gross loss the value is unbounded: serialized as null with profitFactorUnbounded: true. Null when there are no winners and no losers.",
   avgR: "Mean R-multiple over trades with a recorded risk basis. Trades without a recorded stop are excluded, never counted as 0R.",
   medianR: "Median R-multiple over the same trades-with-R set as avgR.",
   rMultiple: "Net realized P&L / initial risk. Initial risk uses the ORIGINAL planned stop when one is recorded, otherwise the trade's recorded stop (see risk_basis in trades.csv).",
-  maxDrawdownUSD: "Largest peak-to-trough decline of the chronological cumulative realized P&L curve, in dollars.",
+  maxDrawdownUSD: "Largest peak-to-trough decline of the cumulative realized P&L curve, in dollars. The curve is calculated PER TRADE (one step per closed trade, in chronological order) - the same per-trade basis as the Trading_Report.pdf drawdown chart, whose trough equals this figure. A per-day curve would hide drawdowns that occur and recover within a single day.",
   maxDrawdownPct: "Max drawdown as a percentage of the cumulative P&L peak that preceded it. The journal has no account-equity baseline, so this is NOT a percentage of account equity. Null when that peak was not positive.",
   winLossRatio: "Average win / average loss (absolute). Null when either side has no trades.",
   avgRiskPerTrade: "Mean initial risk in dollars over trades whose risk is known.",
@@ -963,7 +1025,11 @@ export function buildAnalyticsJson(
       metricsUnavailable: metricsUnavailableList(snapshot),
       missingDataSummary: missing,
       calculationDefinitions: METRIC_DEFINITIONS,
-      screenshotManifest: manifest,
+      rounding: ROUNDING_NOTE,
+      // Privacy: only the public projection is serialized — raw storage
+      // paths (account UUID, internal object ids) and internal trade
+      // keys never enter a downloadable artifact.
+      screenshotManifest: manifest.map(publicScreenshotManifestEntry),
       screenshotCoverage: coverage,
       edgeFinder: {
         available: true,
@@ -977,7 +1043,7 @@ export function buildAnalyticsJson(
     perSource: snapshot.source === "all"
       ? {
           mixedSource: true,
-          note: "Real Market and Simulator results are kept separate below. The combined overall block mixes both sources and must be read as mixed-source data.",
+          note: "Real Market and Simulator results are kept separate below. The combined overall block mixes both sources and must be read as mixed-source data. In the combined block, gross profit / gross loss are sums of winning / losing trades' realized (net) P&L on the basis defined under grossProfit / grossLoss in metadata.calculationDefinitions: real-trade P&L is net of recorded fees, while simulator P&L is fee-free because the simulator has no fee model.",
           real: perSourceBlock(snapshot, "real"),
           simulator: perSourceBlock(snapshot, "simulator"),
         }
@@ -1013,7 +1079,6 @@ export function buildAnalyticsJson(
       : { available: false, reason: "No simulator trades in this selection." },
     tradesIndex: snapshot.trades.map((r) => ({
       tradeId: r.exportId,
-      tradeKey: r.tradeKey,
       symbol: r.symbol,
       source: r.source === "real" ? "Real Market" : "Simulator",
       tradeDate: r.tradeDate,
@@ -1206,8 +1271,12 @@ export function buildReadme(
     ...Object.entries(METRIC_DEFINITIONS).map(([k, v]) => `- ${k}: ${v}`),
     "Non-finite values: JSON cannot represent unbounded numbers. An unbounded metric (e.g. profit factor with winners and no losers) is serialized as null with a sibling \"<metric>Unbounded\": true flag.",
     "",
+    "ROUNDING & RECONCILIATION",
+    ROUNDING_NOTE,
+    "",
     "SCREENSHOT MANIFEST",
-    "screenshots-manifest.json lists every screenshot considered for this package: owning trade ID, storage path, package file name, and status (included / unavailable). The same manifest is embedded in analytics.json (metadata.screenshotManifest).",
+    "screenshots-manifest.json lists every screenshot considered for this package: owning stable trade ID, symbol, package-relative file name, and status (included / unavailable). The same manifest is embedded in analytics.json (metadata.screenshotManifest).",
+    "PRIVACY: raw storage paths are intentionally NOT included anywhere in this package. Storage paths contain the account's internal identifiers (account UUID and internal object names), so they stay inside the application; screenshots are identified only by stable trade ID and package-relative file name.",
     "Screenshots are typed \"trade-screenshot\": the platform does not record whether a screenshot was taken at entry, exit, or review, and the export does not guess from file names.",
     coverage.note,
     ...(manifest.length === 0 ? ["No screenshot entries were recorded for this package."] : []),

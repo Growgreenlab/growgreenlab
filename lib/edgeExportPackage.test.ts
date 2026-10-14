@@ -18,6 +18,31 @@ import {
 } from "./edgeExport";
 import { generateEdgePackage } from "./edgeExportPackage";
 import JSZip from "jszip";
+import { inflateSync } from "node:zlib";
+
+/** Extract searchable text from a pdf-lib-generated PDF: inflate the
+ *  FlateDecode content streams, then decode the hex-string Tj operands
+ *  pdf-lib writes for every drawText call (one operand per drawn
+ *  string, so single-call strings stay contiguous). */
+function extractPdfText(bytes: Uint8Array): string {
+  const raw = Buffer.from(bytes).toString("latin1");
+  let all = raw;
+  const re = /stream\r?\n/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(raw)) !== null) {
+    const start = m.index + m[0].length;
+    const end = raw.indexOf("endstream", start);
+    if (end < 0) break;
+    try { all += "\n" + inflateSync(Buffer.from(raw.slice(start, end), "latin1")).toString("latin1"); } catch { /* not a flate stream */ }
+  }
+  const decoded: string[] = [];
+  const hexRe = /<([0-9A-Fa-f]{4,})>\s*Tj/g;
+  let h: RegExpExecArray | null;
+  while ((h = hexRe.exec(all)) !== null) {
+    decoded.push(Buffer.from(h[1], "hex").toString("latin1"));
+  }
+  return all + "\n" + decoded.join("\n");
+}
 
 let passed = 0, failed = 0;
 function check(name: string, cond: boolean) {
@@ -125,6 +150,66 @@ const fakeClient = {
   },
 } as any;
 
+/* ---- fixtures: privacy + consistency package (Issues 1-4) ----
+ * RW: real win, gross +50 with $1 recorded fees -> net +49, WITH a
+ * screenshot stored under a FAKE ACCOUNT UUID path (privacy probe).
+ * RL: real loss -20 (2026-10-12). SW: simulator win +50 (fee-free).
+ * Chronology: RL -20 -> SW +50 -> RW +49; per-trade max drawdown $20.
+ * Overall: grossProfit 99 (49 net real + 50 fee-free sim), grossLoss 20,
+ * net 79. */
+const FAKE_ACCT = "123e4567-e89b-12d3-a456-426614174000";
+const RW_ID = "44444444-4444-4444-4444-444444444444";
+const RL_ID = "55555555-5555-5555-5555-555555555555";
+const SW_SESSION = "99999999-9999-9999-9999-999999999999";
+const OBJ_NAME = "cafef00d-0000-4000-8000-0000000000ff-chart.png";
+const RW_PATH = `${FAKE_ACCT}/real_${RW_ID}/${OBJ_NAME}`;
+const rwFills: RealFill[] = [
+  { id: "w1", side: "buy", qty: 100, price: 2.00, fees: 0.50, fill_time: "2026-10-13T13:45:00.000Z" },
+  { id: "w2", side: "sell", qty: 100, price: 2.50, fees: 0.50, fill_time: "2026-10-13T14:15:00.000Z" },
+];
+const rlFills: RealFill[] = [
+  { id: "l1", side: "buy", qty: 100, price: 3.00, fees: 0, fill_time: "2026-10-12T13:45:00.000Z" },
+  { id: "l2", side: "sell", qty: 100, price: 2.80, fees: 0, fill_time: "2026-10-12T15:00:00.000Z" },
+];
+const rwTrade: ExportRealTradeInput = {
+  id: RW_ID, ticker: "PRIV", trade_date: "2026-10-13", direction: "long", strategy: null,
+  status: "closed", stop_loss: null, target: null, float_shares: null, relative_volume: null,
+  market_conditions: null, fills: rwFills, calc: calcRealTrade(rwFills, "long", null, null),
+};
+const rlTrade: ExportRealTradeInput = {
+  id: RL_ID, ticker: "LOSS", trade_date: "2026-10-12", direction: "long", strategy: null,
+  status: "closed", stop_loss: null, target: null, float_shares: null, relative_volume: null,
+  market_conditions: null, fills: rlFills, calc: calcRealTrade(rlFills, "long", null, null),
+};
+const swTrade: GroupedTrade = groupFillsIntoTrades([
+  sf("d1", "buy", 100, 5.00, 0, 0, "2026-10-13T13:35:00.000Z"),
+  sf("d2", "sell", 100, 5.50, 4, 50, "2026-10-13T13:40:00.000Z"),
+], { id: SW_SESSION, ticker: "SIMW", trade_date: "2026-10-13", source: "sample" })[0];
+const privInput: ExportSnapshotInput = {
+  unified: [realU(rwTrade), realU(rlTrade), {
+    key: swTrade.tradeKey.replace(S1_SESSION, SW_SESSION), source: "simulator", ticker: swTrade.ticker, tradeDate: swTrade.tradeDate,
+    direction: swTrade.direction, entryPrice: swTrade.entryPrice, exitPrice: swTrade.exitPrice, qty: swTrade.qty,
+    realizedPnl: swTrade.realizedPnl, isOpen: false, rMultiple: swTrade.rMultiple,
+  }],
+  metas: {},
+  realTrades: [rwTrade, rlTrade],
+  simTrades: [{ ...swTrade, tradeKey: swTrade.tradeKey.replace(S1_SESSION, SW_SESSION) }],
+};
+const privSnapshot = buildExportSnapshot(privInput, { range: { start: "2026-10-01", end: "2026-10-31" }, mode: "custom", source: "all" });
+const privClient = {
+  storage: {
+    from: (_bucket: string) => ({
+      list: async (prefix: string) => prefix === `${FAKE_ACCT}/real_${RW_ID}`
+        ? { data: [{ name: OBJ_NAME, id: "obj-9", created_at: "2026-10-13T14:00:00.000Z" }], error: null }
+        : { data: [], error: null },
+      createSignedUrls: async (paths: string[]) => ({ data: paths.map((p) => ({ path: p, signedUrl: "https://signed.example/x", error: null })), error: null }),
+      download: async (path: string) => path === RW_PATH
+        ? { data: new Blob([new Uint8Array(FAKE_PNG)]), error: null }
+        : { data: null, error: { message: "Object not found" } },
+    }),
+  },
+} as any;
+
 async function main() {
   const result = await generateEdgePackage(fakeClient, USER, snapshot, { includeScreenshots: true, includePdf: true });
   check("package file name", result.fileName === "growgreen-ai-edge-2026-10-31.zip");
@@ -214,6 +299,65 @@ async function main() {
   const zip4 = await JSZip.loadAsync(new Uint8Array(await failedDl.blob.arrayBuffer()));
   const names4 = Object.keys(zip4.files).filter((n) => !zip4.files[n].dir);
   check("failed download: NO-SCREENSHOTS note file present", names4.includes("screenshots/NO-SCREENSHOTS.txt"));
+
+  /* ---- privacy + consistency package (Issues 1-4 regression) ---- */
+  {
+    const res = await generateEdgePackage(privClient, FAKE_ACCT, privSnapshot, { includeScreenshots: true, includePdf: true });
+    check("priv: generation produced a ZIP", !!res.blob && res.summary.pdfIncluded);
+    const zip = await JSZip.loadAsync(new Uint8Array(await res.blob.arrayBuffer()));
+    const names = Object.keys(zip.files);
+    const shotPath = `screenshots/TRADE-${RW_ID}-shot-1.png`;
+
+    // Screenshot bytes still exported under the stable package name.
+    const shotFile = zip.file(shotPath);
+    check("priv: screenshot present under stable name", !!shotFile);
+    const privShotBytes = shotFile ? await shotFile.async("uint8array") : new Uint8Array(0);
+    check("priv: screenshot bytes intact", privShotBytes.length === FAKE_PNG.length && privShotBytes.every((b, i) => b === FAKE_PNG[i]));
+
+    // NO artifact may contain the account UUID, the internal object
+    // name, any storage path, or a storagePath key.
+    const csvT = await zip.file("trades.csv")!.async("string");
+    const analyticsT = await zip.file("analytics.json")!.async("string");
+    const manifestT = await zip.file("screenshots-manifest.json")!.async("string");
+    const readmeT = await zip.file("README.txt")!.async("string");
+    const promptT = await zip.file("ChatGPT_Prompt.txt")!.async("string");
+    const pdfBytes = await zip.file("Trading_Report.pdf")!.async("uint8array");
+    const pdfT = extractPdfText(pdfBytes);
+    const artifacts: Record<string, string> = { csv: csvT, analytics: analyticsT, manifest: manifestT, readme: readmeT, prompt: promptT, pdf: pdfT };
+    for (const [label, text] of Object.entries(artifacts)) {
+      check(`priv: no account UUID in ${label}`, !text.includes(FAKE_ACCT));
+      check(`priv: no internal object name in ${label}`, !text.includes("cafef00d"));
+      check(`priv: no storagePath key in ${label}`, !text.includes("storagePath"));
+      check(`priv: no bucket path segment in ${label}`, !text.includes(`real_${RW_ID}/`));
+    }
+
+    // Manifest still maps stable trade ID <-> package file <-> status.
+    const manifestDoc = JSON.parse(manifestT) as any;
+    const entry = (manifestDoc.entries as any[]).find((e) => e.tradeId === `TRADE-${RW_ID}`);
+    check("priv: manifest entry maps id/file/status", !!entry && entry.file === shotPath && entry.status === "included" && entry.symbol === "PRIV" && entry.type === "trade-screenshot");
+    check("priv: manifest entry keys are exactly the public set", !!entry && JSON.stringify(Object.keys(entry).sort()) === JSON.stringify(["capturedAt", "file", "fileName", "status", "symbol", "tradeId", "type"]));
+
+    // Analytics: gross values on the documented net basis + definitions.
+    const analytics = JSON.parse(analyticsT) as any;
+    check("gross: overall grossProfit = 99 (49 net real + 50 fee-free sim)", Math.abs(analytics.overall.grossProfit - 99) < 1e-6);
+    check("gross: overall grossLoss = 20", Math.abs(analytics.overall.grossLoss - 20) < 1e-6);
+    check("gross: overall net = 79", Math.abs(analytics.overall.netRealizedPnl - 79) < 1e-6);
+    check("gross: definition present in JSON", String(analytics.metadata.calculationDefinitions.grossProfit).includes("fee-free") && String(analytics.metadata.calculationDefinitions.grossProfit).includes("NOT a pre-fee figure"));
+    check("gross: README carries the definition", readmeT.includes("- grossProfit:") && readmeT.includes("NOT a pre-fee figure"));
+    check("gross: perSource note carries fee basis", String(analytics.perSource.note).includes("fee-free"));
+
+    // Rounding transparency in all three artifacts.
+    check("rounding: note in JSON metadata", typeof analytics.metadata.rounding === "string" && analytics.metadata.rounding.includes("cent"));
+    check("rounding: note in README", readmeT.includes("ROUNDING & RECONCILIATION"));
+    check("rounding: note in PDF text", pdfT.includes("Rounding & reconciliation"));
+
+    // PDF: gross figures + drawdown chart trough == headline ($20).
+    check("pdf: stats table shows gross pair $99.00 / $20.00", pdfT.includes("$99.00 / $20.00"));
+    check("pdf: gross footnote present", pdfT.includes("NOT before fees") && pdfT.includes("fee-free"));
+    check("pdf: drawdown chart titled per-trade", pdfT.includes("per trade"));
+    check("pdf: drawdown chart min label == -headline (-$20.00)", pdfT.includes("min -$20.00"));
+    check("pdf: headline maximum drawdown $20.00 present", pdfT.includes("$20.00"));
+  }
 
   console.log(`edgeExportPackage tests: ${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);

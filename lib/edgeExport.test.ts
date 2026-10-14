@@ -10,8 +10,9 @@
 import { calcRealTrade, groupFillsIntoTrades, type GroupedTrade, type RawFill, type RealFill } from "./journal";
 import { riskMetrics } from "./journalAnalytics";
 import {
-  buildAnalyticsJson, buildExportSnapshot, buildScreenshotManifest, buildTradesCsv,
+  buildAnalyticsJson, buildExportSnapshot, buildReadme, buildScreenshotManifest, buildTradesCsv,
   cumulativePnlSeries, exportIdForTradeKey, resolveExportRange, summarizeScreenshotCoverage,
+  tradeLevelDrawdownSeries, ROUNDING_NOTE,
   type ExportMetaInput, type ExportRealTradeInput, type ExportSnapshotInput, type ExportUnifiedInput,
 } from "./edgeExport";
 
@@ -324,6 +325,130 @@ const RANGE = { start: "2026-10-01", end: "2026-10-31" };
   const doc = buildAnalyticsJson(snap, [], summarizeScreenshotCoverage(snap, [], false)) as any;
   check("large: json tradesIndex 500", (doc.tradesIndex as any[]).length === 500);
   check("large: json parses", !!JSON.parse(JSON.stringify(doc)));
+}
+
+/* ============ Issue 1 regression: drawdown basis consistency ============
+ * The PDF headline max drawdown comes from riskMetrics() (PER TRADE).
+ * The PDF drawdown chart must plot the same per-trade series — the old
+ * per-day series hid intra-day drawdowns (user ZIP: headline $5.01,
+ * chart $0.00). These fixtures FAIL against the daily series. */
+{
+  const mkDd = (session: string, date: string, pnl: number, tIn: string, tOut: string) => groupFillsIntoTrades([
+    sf(`${session}f1`, session, "buy", 100, 1.00, 0, 0, tIn),
+    sf(`${session}f2`, session, "sell", 100, 1.00 + pnl / 100, 1, pnl, tOut),
+  ], { id: session, ticker: "DD", trade_date: date, source: "sample" })[0];
+
+  // All trades on ONE day: +10, -7, +2. Per-trade DD = 7; per-day = 0.
+  const d1 = mkDd("eeeeeeee-eeee-eeee-eeee-eeeeeeeeee01", "2026-10-13", 10, "2026-10-13T14:00:00.000Z", "2026-10-13T14:05:00.000Z");
+  const d2 = mkDd("eeeeeeee-eeee-eeee-eeee-eeeeeeeeee02", "2026-10-13", -7, "2026-10-13T14:10:00.000Z", "2026-10-13T14:15:00.000Z");
+  const d3 = mkDd("eeeeeeee-eeee-eeee-eeee-eeeeeeeeee03", "2026-10-13", 2, "2026-10-13T14:20:00.000Z", "2026-10-13T14:25:00.000Z");
+  const snapD = buildExportSnapshot(
+    { unified: [simUnified(d1), simUnified(d2), simUnified(d3)], metas: {}, realTrades: [], simTrades: [d1, d2, d3] },
+    { range: RANGE, mode: "custom", source: "simulator" });
+  const rmD = riskMetrics(snapD.analyticsTrades);
+  approx("dd same-day: headline maxDrawdownUSD = 7", rmD.maxDrawdownUSD, 7);
+  const tlD = tradeLevelDrawdownSeries(snapD);
+  check("dd same-day: trade-level series has one point per trade", tlD.length === 3);
+  approx("dd same-day: trade-level trough == -maxDrawdownUSD", Math.min(...tlD.map((p) => p.drawdown)), -rmD.maxDrawdownUSD);
+  approx("dd same-day: per-day series trough is 0 (the fixed bug)", Math.min(...cumulativePnlSeries(snapD).map((p) => p.drawdown)), 0);
+
+  // Multi-day: day1 +20; day2 -15 then +10. Per-trade DD = 15; per-day = 5.
+  // Unified rows are deliberately scrambled — ordering must come from
+  // tradeDate + entry time (the riskMetrics chronological order).
+  const m1 = mkDd("eeeeeeee-eeee-eeee-eeee-eeeeeeeeee11", "2026-10-12", 20, "2026-10-12T14:00:00.000Z", "2026-10-12T14:05:00.000Z");
+  const m2 = mkDd("eeeeeeee-eeee-eeee-eeee-eeeeeeeeee12", "2026-10-13", -15, "2026-10-13T14:00:00.000Z", "2026-10-13T14:05:00.000Z");
+  const m3 = mkDd("eeeeeeee-eeee-eeee-eeee-eeeeeeeeee13", "2026-10-13", 10, "2026-10-13T15:00:00.000Z", "2026-10-13T15:05:00.000Z");
+  const snapM = buildExportSnapshot(
+    { unified: [simUnified(m3), simUnified(m1), simUnified(m2)], metas: {}, realTrades: [], simTrades: [m1, m2, m3] },
+    { range: RANGE, mode: "custom", source: "simulator" });
+  const rmM = riskMetrics(snapM.analyticsTrades);
+  approx("dd multi-day: headline maxDrawdownUSD = 15", rmM.maxDrawdownUSD, 15);
+  approx("dd multi-day: trade-level trough == -15", Math.min(...tradeLevelDrawdownSeries(snapM).map((p) => p.drawdown)), -rmM.maxDrawdownUSD);
+  approx("dd multi-day: per-day trough is only -5 (different basis)", Math.min(...cumulativePnlSeries(snapM).map((p) => p.drawdown)), -5);
+  const docM = buildAnalyticsJson(snapM, [], summarizeScreenshotCoverage(snapM, [], false)) as any;
+  approx("dd multi-day: json maxDrawdownUSD matches riskMetrics", docM.overall.maxDrawdownUSD, rmM.maxDrawdownUSD);
+  check("dd: json definition states the per-trade basis", String(docM.metadata.calculationDefinitions.maxDrawdownUSD).includes("PER TRADE"));
+}
+
+/* ============ Issue 2 regression: P&L reconciliation ==================
+ * CSV rows are cent-rounded for display; aggregates use full precision
+ * (the platform convention — aggregates must NOT change). Three trades
+ * of 10.004 produce a designed 1-cent display difference, and the
+ * rounding convention must be documented in JSON + README (+ PDF,
+ * covered in the package suite). */
+{
+  const pnlU = (key: string, v: number): ExportUnifiedInput => ({
+    key, source: "simulator", ticker: "RND", tradeDate: "2026-10-13", direction: "long",
+    entryPrice: 1, exitPrice: 1, qty: 1, realizedPnl: v, isOpen: false, rMultiple: null,
+  });
+  const snapR = buildExportSnapshot(
+    { unified: [pnlU("rsess:1", 10.004), pnlU("rsess:2", 10.004), pnlU("rsess:3", 10.004)], metas: {}, realTrades: [], simTrades: [] },
+    { range: RANGE, mode: "custom", source: "all" });
+  const rowsR = parseCsv(buildTradesCsv(snapR, []));
+  const netIdx = rowsR[0].indexOf("net_realized_pnl_usd");
+  const csvSum = rowsR.slice(1).reduce((s, r) => s + Number(r[netIdx]), 0);
+  approx("rounding: displayed CSV rows sum to 30.00", csvSum, 30);
+  const docR = buildAnalyticsJson(snapR, [], summarizeScreenshotCoverage(snapR, [], false)) as any;
+  approx("rounding: JSON total keeps full precision (30.012)", docR.overall.netRealizedPnl, 30.012, 1e-9);
+  check("rounding: displayed-sum gap bounded by 1c per trade", Math.abs(csvSum - docR.overall.netRealizedPnl) <= 0.01 * 3 + 1e-9);
+  check("rounding: JSON total renders as $30.01 (the PDF figure)", Number(docR.overall.netRealizedPnl).toFixed(2) === "30.01" && csvSum.toFixed(2) === "30.00");
+  check("rounding: note present in JSON metadata", docR.metadata.rounding === ROUNDING_NOTE);
+  const readmeR = buildReadme(snapR, summarizeScreenshotCoverage(snapR, [], false), [], { pdfIncluded: true, pdfFailureNote: null, zipFileName: "growgreen-ai-edge-2026-10-31.zip" });
+  check("rounding: note present in README", readmeR.includes("ROUNDING & RECONCILIATION") && readmeR.includes(ROUNDING_NOTE));
+}
+
+/* ============ Issue 4 regression: gross profit/loss definitions =======
+ * grossProfit/grossLoss are sums of winning/losing trades' realized
+ * (NET) P&L — NOT pre-fee figures. Main fixture: R1 real +43 net (after
+ * $1 recorded fees on $44 gross), SIMX sim +100 (fee-free), MNDR real
+ * -50, SIMY sim -50. */
+{
+  const snap = buildExportSnapshot(input, { range: RANGE, mode: "custom", source: "all" });
+  const doc = buildAnalyticsJson(snap, [], summarizeScreenshotCoverage(snap, [], false)) as any;
+  approx("gross mixed: grossProfit = 143 (sum of winning NET pnl)", doc.overall.grossProfit, 143);
+  approx("gross mixed: grossLoss = 100 (|sum of losing NET pnl|)", doc.overall.grossLoss, 100);
+  const gpDef = String(doc.metadata.calculationDefinitions.grossProfit ?? "");
+  check("gross mixed: definition states net basis + sim fee caveat", gpDef.includes("NOT a pre-fee figure") && gpDef.includes("fee-free") && gpDef.includes("no simulator fees are ever invented"));
+  check("gross mixed: grossLoss definition present", String(doc.metadata.calculationDefinitions.grossLoss ?? "").includes("Same basis as grossProfit"));
+  check("gross mixed: perSource note carries the fee basis", String(doc.perSource.note).includes("fee-free"));
+  const readme = buildReadme(snap, summarizeScreenshotCoverage(snap, [], false), [], { pdfIncluded: true, pdfFailureNote: null, zipFileName: "x.zip" });
+  check("gross mixed: README carries the definitions", readme.includes("- grossProfit:") && readme.includes("NOT a pre-fee figure"));
+
+  const simOnly = buildExportSnapshot(input, { range: RANGE, mode: "custom", source: "simulator" });
+  const docS = buildAnalyticsJson(simOnly, [], summarizeScreenshotCoverage(simOnly, [], false)) as any;
+  approx("gross sim-only: grossProfit 100", docS.overall.grossProfit, 100);
+  approx("gross sim-only: grossLoss 50", docS.overall.grossLoss, 50);
+  check("gross sim-only: definitions still read correctly", String(docS.metadata.calculationDefinitions.grossProfit).includes("fee-free"));
+
+  const realOnly = buildExportSnapshot(input, { range: RANGE, mode: "custom", source: "real" });
+  const docRl = buildAnalyticsJson(realOnly, [], summarizeScreenshotCoverage(realOnly, [], false)) as any;
+  approx("gross real-only: grossProfit 43 (net of recorded fees)", docRl.overall.grossProfit, 43);
+  approx("gross real-only: grossLoss 50", docRl.overall.grossLoss, 50);
+}
+
+/* ============ Issue 3 regression: manifest privacy ====================
+ * The internal manifest entry keeps the raw storage path (the package
+ * layer needs it to fetch bytes), but NOTHING downloadable may contain
+ * it — nor the account UUID inside it, nor internal object names. */
+{
+  const FAKE_UUID = "123e4567-e89b-12d3-a456-426614174000";
+  const snap = buildExportSnapshot(input, { range: RANGE, mode: "custom", source: "all" });
+  const listed = new Map<string, string[]>([[`real:${R1_ID}`, [`${FAKE_UUID}/real_${R1_ID}/cafef00d-internal.png`]]]);
+  const manifest = buildScreenshotManifest(snap, listed);
+  manifest[0].status = "included";
+  check("privacy: internal entry retains path for app use", manifest[0].storagePath.includes(FAKE_UUID));
+  const doc = buildAnalyticsJson(snap, manifest, summarizeScreenshotCoverage(snap, manifest, true)) as any;
+  const pub = doc.metadata.screenshotManifest[0];
+  check("privacy: public entry keeps tradeId/file/status/symbol", pub.tradeId === `TRADE-${R1_ID}` && pub.file === `screenshots/TRADE-${R1_ID}-shot-1.png` && pub.status === "included" && pub.symbol === "TEST");
+  check("privacy: public entry has NO storagePath / tradeKey", !("storagePath" in pub) && !("tradeKey" in pub));
+  const docStr = JSON.stringify(doc);
+  check("privacy: account UUID nowhere in analytics.json", !docStr.includes(FAKE_UUID));
+  check("privacy: internal object name nowhere in analytics.json", !docStr.includes("cafef00d-internal"));
+  check("privacy: no storagePath key anywhere in analytics.json", !docStr.includes("storagePath"));
+  check("privacy: tradesIndex carries no raw tradeKey", (doc.tradesIndex as any[]).every((t) => !("tradeKey" in t)));
+  const readme = buildReadme(snap, summarizeScreenshotCoverage(snap, manifest, true), manifest, { pdfIncluded: true, pdfFailureNote: null, zipFileName: "x.zip" });
+  check("privacy: README states paths are intentionally excluded", readme.includes("intentionally NOT included"));
+  check("privacy: README leaks no UUID / object name", !readme.includes(FAKE_UUID) && !readme.includes("cafef00d-internal"));
 }
 
 console.log(`edgeExport tests: ${passed} passed, ${failed} failed`);

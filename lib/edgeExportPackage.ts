@@ -7,7 +7,9 @@
  * Guarantees:
  * - Screenshots are fetched as BYTES through the caller's RLS-scoped
  *   storage session (owner-folder policies) — signed URLs never enter
- *   the package.
+ *   the package, and neither do raw storage paths: every serialized
+ *   manifest (screenshots-manifest.json, analytics.json) carries only
+ *   the public projection (stable trade ID, package file, status).
  * - A screenshot that cannot be downloaded is marked "unavailable" in
  *   the manifest and reported as a warning — it never aborts the export
  *   and is never silently dropped.
@@ -21,7 +23,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { BUCKET, listScreenshots } from "./journalAttachments";
 import {
   buildAnalyticsJson, buildChatGptPrompt, buildReadme, buildScreenshotManifest,
-  buildTradesCsv, summarizeScreenshotCoverage,
+  buildTradesCsv, publicScreenshotManifestEntry, summarizeScreenshotCoverage,
   type ExportSnapshot, type ScreenshotManifestEntry,
 } from "./edgeExport";
 import type { PdfScreenshotImage } from "./edgeExportPdf";
@@ -159,8 +161,11 @@ export async function generateEdgePackage(
 
   const promptText = buildChatGptPrompt(snapshot, coverage, { pdfIncluded });
   const readme = buildReadme(snapshot, coverage, manifest, { pdfIncluded, pdfFailureNote, zipFileName });
+  // Privacy: the downloadable manifest contains ONLY the public
+  // projection — raw storage paths (account UUID, internal object ids)
+  // and internal trade keys are never serialized into the ZIP.
   const manifestJson = JSON.stringify(
-    { generatedAt: snapshot.generatedAt, coverage, entries: manifest },
+    { generatedAt: snapshot.generatedAt, coverage, entries: manifest.map(publicScreenshotManifestEntry) },
     null, 2,
   );
 

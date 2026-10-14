@@ -9,7 +9,7 @@
  * exist say so plainly instead of being filled with invented insight.
  */
 import {
-  cumulativePnlSeries, formatRangeText, periodModeLabel, sourceLabel,
+  cumulativePnlSeries, ROUNDING_NOTE, tradeLevelDrawdownSeries, formatRangeText, periodModeLabel, sourceLabel,
   type ExportSnapshot, type ScreenshotCoverage,
 } from "./edgeExport";
 import { breakdown, type AnalyticsTrade, type BreakdownDimension } from "./journalAnalytics";
@@ -126,10 +126,10 @@ export async function buildTradingReportPdf(
     for (const r of rows) drawRow(r, font, INK);
     y -= 4;
   };
-  const lineChart = (title: string, points: { x: string; v: number }[], color: RGB, height = 130) => {
+  const lineChart = (title: string, points: { x: string; v: number }[], color: RGB, height = 130, emptyNote?: string) => {
     text(title, 10, bold);
     if (points.length < 2) {
-      para("Not enough trading days in this selection to draw this chart (at least 2 are needed). The underlying daily figures are in analytics.json (dailyPnl).", 9, GRAY);
+      para(emptyNote ?? "Not enough trading days in this selection to draw this chart (at least 2 are needed). The underlying daily figures are in analytics.json (dailyPnl).", 9, GRAY);
       return;
     }
     ensure(height + 18);
@@ -196,12 +196,25 @@ export async function buildTradingReportPdf(
       ["Trading days / Losing days", `${overall.tradingDays} / ${overall.losingDays} (${pct(overall.losingDayFrequency)})`],
       ["Recorded fees", overall.feesComplete ? money(overall.totalFeesRecorded) : `${money(overall.totalFeesRecorded)} (partial - some trades have unrecorded fees; see analytics.json)`],
     ], [250, 249]);
+    para("Gross profit / gross loss are the sums of winning / losing closed trades' realized P&L (full definitions in analytics.json). 'Gross' means before offsetting winners against losers - NOT before fees: real-trade P&L is net of recorded fees, and simulator trades have no fee model, so simulator P&L is fee-free and no simulator fees are invented.", 8.5, GRAY);
+    para(ROUNDING_NOTE, 8.5, GRAY);
   }
 
   /* ---- charts ---- */
   const series = cumulativePnlSeries(snapshot);
   lineChart("Cumulative realized P&L by trading day", series.map((p) => ({ x: p.date, v: p.cumulative })), GREEN);
-  lineChart("Drawdown from cumulative peak (USD)", series.map((p) => ({ x: p.date, v: p.drawdown })), RED);
+  // Per-TRADE drawdown: the same series the headline max drawdown is
+  // calculated on (riskMetrics), so the chart trough equals the
+  // reported maximum drawdown. A per-day series would show $0.00
+  // whenever a drawdown happens and recovers inside one trading day.
+  const ddSeries = tradeLevelDrawdownSeries(snapshot);
+  lineChart(
+    "Drawdown from cumulative peak (USD, per trade)",
+    ddSeries.map((p) => ({ x: p.date, v: p.drawdown })),
+    RED,
+    130,
+    "Not enough closed trades in this selection to draw this chart (at least 2 are needed). The headline maximum drawdown above is calculated per trade from the cumulative realized P&L curve; see analytics.json (overall.maxDrawdownUSD).",
+  );
 
   /* ---- breakdowns ---- */
   const bdTable = (title: string, dim: BreakdownDimension) => {
@@ -272,7 +285,7 @@ export async function buildTradingReportPdf(
   para("Areas for further investigation (evidence gaps, not conclusions): record a stop loss on every real trade so R coverage improves; keep tagging setups, HOD class, mistakes and emotions in Trade Review; attach screenshots to real trades you want reviewed visually; accumulate at least 10 trades per setup before treating any pattern as an edge.", 9);
 
   heading("Methodology and definitions");
-  para("All figures are computed by the same library functions the journal Analytics tab renders (lib/journalAnalytics.ts: breakdown, riskMetrics, dailyPnl, edgeInsights; lib/journal.ts: calcMetrics, perExitPnl FIFO). Win rate excludes breakeven trades from the denominator. Expectancy is net P&L per closed trade including breakevens. R uses the ORIGINAL planned stop when recorded, otherwise the trade's recorded stop. Drawdown percentage is relative to the peak cumulative realized P&L (no account-equity baseline exists in the journal). Open trades are excluded from performance statistics. Simulator results are simulated replay outcomes.");
+  para("All figures are computed by the same library functions the journal Analytics tab renders (lib/journalAnalytics.ts: breakdown, riskMetrics, dailyPnl, edgeInsights; lib/journal.ts: calcMetrics, perExitPnl FIFO). Win rate excludes breakeven trades from the denominator. Expectancy is net P&L per closed trade including breakevens. R uses the ORIGINAL planned stop when recorded, otherwise the trade's recorded stop. Maximum drawdown is calculated PER TRADE on the cumulative realized P&L curve, and the drawdown chart plots that same per-trade series; daily figures (analytics.json dailyPnl, and the cumulative chart above) aggregate by trading day, so a dip that happens and recovers within one day appears in the per-trade drawdown but not in the daily curve. Drawdown percentage is relative to the peak cumulative realized P&L (no account-equity baseline exists in the journal). Open trades are excluded from performance statistics. Simulator results are simulated replay outcomes.");
   para("Definitions for every metric shipped in this package are in analytics.json under metadata.calculationDefinitions, and column definitions are in README.txt.", 9, GRAY);
 
   return doc.save();
