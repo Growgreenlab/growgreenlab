@@ -5,6 +5,8 @@ const CHART_ALT =
   "Grow Green Lab trading simulator chart — candlesticks and volume replaying a historical session, with stop-loss and take-profit lines drawn on the chart";
 const ORDER_ALT =
   "Grow Green Lab order panel — simulated market order entry with quantity, stop-loss and take-profit brackets, and the fills ledger";
+const JOURNAL_ALT =
+  "Grow Green Lab Trade Journal — Analytics tab with the AI Edge Analysis Export panel and risk metrics";
 
 const MANIFEST_ROWS: { file: string; desc: string }[] = [
   { file: "trades.csv", desc: "One row per trade — entries, exits, P&L, R multiples and your annotations." },
@@ -120,57 +122,115 @@ export default function Home() {
             <article className="ggl-rpanel ggl-rpanel-analyze" id="analyze" aria-labelledby="analyze-heading">
               <p className="ggl-eyebrow">02 — ANALYZE</p>
               <h2 id="analyze-heading" className="ggl-rpanel-title">
-                Know what your trades are telling you.
+                Know What Your Trades Are Telling You.
               </h2>
               <p className="ggl-rpanel-lede">
-                Every simulator trade — and every real trade you log — lands in one
-                Trade Journal. The Edge Analyzer breaks performance down by setup,
-                mistake, emotion and plan adherence, and flags where your results
-                actually concentrate. When you want a deeper review, the AI Edge
-                Analysis Export packages a period of your journal into a single ZIP,
-                ready to hand to an AI assistant.
+                Every trade contains clues about your edge. Analyze your setups,
+                uncover recurring mistakes, understand your performance, and use
+                AI-assisted reviews to discover what to improve next.
               </p>
-              <h3 className="ggl-manifest-title">Inside an Edge Export</h3>
-              <div className="ggl-manifest">
-                {MANIFEST_ROWS.map((r) => (
-                  <div className="ggl-manifest-row" key={r.file}>
-                    <span className="ggl-manifest-file">{r.file}</span>
-                    <span className="ggl-manifest-desc">{r.desc}</span>
+              <div className="ggl-analyze-grid">
+                <div className="ggl-benefits">
+                  <div className="ggl-benefit">
+                    <svg
+                      className="ggl-benefit-icon"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.7"
+                      strokeLinecap="round"
+                      aria-hidden="true"
+                    >
+                      <line x1="6" y1="20" x2="6" y2="14" />
+                      <line x1="12" y1="20" x2="12" y2="4" />
+                      <line x1="18" y1="20" x2="18" y2="10" />
+                    </svg>
+                    <div>
+                      <h3>Performance Insights</h3>
+                      <p>
+                        Break down your results by setup, mistakes, emotions, risk,
+                        and plan adherence to identify where your performance is
+                        strongest and where it needs work.
+                      </p>
+                    </div>
                   </div>
-                ))}
+                  <div className="ggl-benefit">
+                    <svg
+                      className="ggl-benefit-icon"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.7"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                    >
+                      <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+                      <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+                      <line x1="12" y1="22.08" x2="12" y2="12" />
+                    </svg>
+                    <div>
+                      <h3>AI-Ready Trade Export</h3>
+                      <p>
+                        Export your trades, analytics, performance report, review
+                        instructions, and associated screenshots in one organized
+                        package for deeper AI-assisted analysis.
+                      </p>
+                    </div>
+                  </div>
+                  <p className="ggl-analyze-cta">
+                    <Link href="/journal" className="ggl-btn ggl-btn-primary">
+                      Explore Trade Journal <span aria-hidden="true">→</span>
+                    </Link>
+                  </p>
+                </div>
+                <figure className="ggl-analyze-figure">
+                  <img
+                    src="/journal-analytics.png"
+                    alt={JOURNAL_ALT}
+                    className="ggl-analyze-shot"
+                    loading="lazy"
+                  />
+                </figure>
               </div>
-              <dl className="ggl-defs">
-                <div className="ggl-def-row">
-                  <dt>Performance breakdowns</dt>
-                  <dd>
-                    Net P&amp;L, win rate, average R and expectancy — grouped by setup,
-                    HOD class, symbol, mistake, emotion, session and time of day.
-                  </dd>
+              <details className="ggl-included">
+                <summary>What’s Included in Your AI Edge Export</summary>
+                <div className="ggl-included-body">
+                  <div className="ggl-manifest">
+                    {MANIFEST_ROWS.map((r) => (
+                      <div className="ggl-manifest-row" key={r.file}>
+                        <span className="ggl-manifest-file">{r.file}</span>
+                        <span className="ggl-manifest-desc">{r.desc}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <h3 className="ggl-manifest-title">How the analysis works</h3>
+                  <dl className="ggl-defs ggl-defs-included">
+                    <div className="ggl-def-row">
+                      <dt>Performance breakdowns</dt>
+                      <dd>
+                        Net P&amp;L, win rate, average R and expectancy — grouped by setup,
+                        HOD class, symbol, mistake, emotion, session and time of day.
+                      </dd>
+                    </div>
+                    <div className="ggl-def-row">
+                      <dt>Edge Finder</dt>
+                      <dd>
+                        Surfaces the dimensions where your results concentrate, with
+                        minimum sample sizes — a handful of trades is never dressed up
+                        as an edge.
+                      </dd>
+                    </div>
+                    <div className="ggl-def-row">
+                      <dt>Risk metrics</dt>
+                      <dd>
+                        Average R, maximum drawdown, profit factor and streaks, computed
+                        trade by trade from your own journal.
+                      </dd>
+                    </div>
+                  </dl>
                 </div>
-                <div className="ggl-def-row">
-                  <dt>Edge Finder</dt>
-                  <dd>
-                    Surfaces the dimensions where your results concentrate, with
-                    minimum sample sizes — a handful of trades is never dressed up
-                    as an edge.
-                  </dd>
-                </div>
-                <div className="ggl-def-row">
-                  <dt>Risk metrics</dt>
-                  <dd>
-                    Average R, maximum drawdown, profit factor and streaks, computed
-                    trade by trade from your own journal.
-                  </dd>
-                </div>
-              </dl>
-              <p className="ggl-rlinks">
-                <Link href="/journal" className="ggl-textlink">
-                  Open the Trade Journal <span aria-hidden="true">→</span>
-                </Link>
-                <Link href="/journal?tab=analytics" className="ggl-textlink">
-                  See the Edge Analyzer <span aria-hidden="true">→</span>
-                </Link>
-              </p>
+              </details>
             </article>
 
             {/* ---- 03 IMPROVE ---- */}
@@ -246,6 +306,45 @@ export default function Home() {
               </p>
             </article>
           </HomeProcess>
+        </div>
+      </section>
+
+      {/* ============ FOUNDER ============ */}
+      <section className="ggl-rfounder" aria-labelledby="founder-heading">
+        <div className="ggl-rfounder-inner">
+          <p className="ggl-eyebrow">THE STORY BEHIND THE PLATFORM</p>
+          <h2 id="founder-heading" className="ggl-rfounder-title">
+            Built for Traders. <span className="ggl-rfounder-accent">Driven by Purpose.</span>
+          </h2>
+          <div className="ggl-rfounder-rule" aria-hidden="true" />
+          <div className="ggl-rfounder-story">
+            <p>
+              I&rsquo;m <strong>Karandeep Singh</strong>, from Ladhra, a small village near
+              Jalandhar, Punjab, India.
+            </p>
+            <p>
+              Like many traders, I understand that trading is a continuous journey of
+              learning, discipline, and improvement. I started building Grow Green Trade Lab
+              with a simple vision: to make that journey easier through practical tools that
+              help traders review their trades, analyze their performance, learn from
+              mistakes, and develop better habits.
+            </p>
+            <p>
+              I&rsquo;m building this platform not because I have everything figured out, but
+              because I believe there&rsquo;s always room to learn, improve, and build better
+              tools along the way.
+            </p>
+            <p>
+              My goal is to create something meaningful for the trading community &mdash; a
+              platform built around the challenges traders face and the tools that can help
+              them grow.
+            </p>
+          </div>
+          <p className="ggl-rfounder-closing">&ldquo;Big visions can come from small beginnings.&rdquo;</p>
+          <div className="ggl-rfounder-sign">
+            <div className="ggl-rfounder-name">Karandeep Singh</div>
+            <div className="ggl-rfounder-role">Founder, Grow Green Trade Lab</div>
+          </div>
         </div>
       </section>
 

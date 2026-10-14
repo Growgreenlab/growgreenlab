@@ -1296,6 +1296,44 @@ body.ws-active .footer { display: none; }
 .ggl-def-row dt { font-size: 14px; font-weight: 700; color: var(--ggl-text); }
 .ggl-def-row dd { margin: 0; font-size: 14px; line-height: 1.6; color: var(--ggl-muted); }
 
+/* analyze — editorial layout: benefits + journal screenshot */
+.ggl-analyze-grid {
+  display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  gap: 48px; align-items: start; margin-top: 10px;
+}
+.ggl-benefits { display: flex; flex-direction: column; gap: 30px; min-width: 0; }
+.ggl-benefit { display: flex; gap: 16px; align-items: flex-start; }
+.ggl-benefit-icon { flex: none; width: 22px; height: 22px; margin-top: 2px; color: var(--ggl-text2); }
+.ggl-benefit h3 { font-size: 16px; font-weight: 700; margin: 0 0 8px; color: var(--ggl-text); }
+.ggl-benefit p { font-size: 14.5px; line-height: 1.7; color: var(--ggl-muted); margin: 0; }
+.ggl-analyze-cta { margin: 4px 0 0; }
+.ggl-analyze-figure { margin: 0; min-width: 0; }
+.ggl-analyze-shot {
+  display: block; width: 100%; height: auto;
+  border: 1px solid var(--ggl-border); border-radius: 12px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+}
+
+/* analyze — expandable export contents */
+.ggl-included { margin-top: 42px; border-top: 1px solid var(--ggl-border); }
+.ggl-included summary {
+  list-style: none; cursor: pointer; padding: 18px 0 6px;
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  font-size: 15px; font-weight: 700; color: var(--ggl-text);
+}
+.ggl-included summary::-webkit-details-marker { display: none; }
+.ggl-included summary::after {
+  content: ""; flex: none; width: 9px; height: 9px;
+  border-right: 1.6px solid var(--ggl-muted); border-bottom: 1.6px solid var(--ggl-muted);
+  transform: rotate(45deg); transition: transform 0.18s;
+}
+.ggl-included[open] summary::after { transform: rotate(225deg); }
+.ggl-included summary:hover { color: #fff; }
+.ggl-included summary:focus-visible { outline: 2px solid var(--ggl-green-mut); outline-offset: 3px; }
+.ggl-included-body { padding-top: 8px; }
+.ggl-included .ggl-manifest { border-top: none; }
+.ggl-included .ggl-defs { margin-top: 8px; }
+
 /* improve — ledger checklist */
 .ggl-rpanel-split {
   display: grid; grid-template-columns: 1fr 1fr; gap: 48px; align-items: start;
@@ -1344,6 +1382,27 @@ body.ws-active .footer { display: none; }
   margin: 0 0 28px; max-width: 460px;
 }
 
+/* ---------- founder (restored, current design language) ---------- */
+.ggl-rfounder { border-top: 1px solid var(--ggl-border); padding: 76px 24px; }
+.ggl-rfounder-inner { max-width: 1280px; margin: 0 auto; }
+.ggl-rfounder-title {
+  font-size: clamp(24px, 2.6vw, 32px); font-weight: 800;
+  letter-spacing: -0.6px; line-height: 1.2; margin: 0 0 20px; color: var(--ggl-text);
+}
+.ggl-rfounder-accent { color: var(--ggl-green-mut); }
+.ggl-rfounder-rule { width: 56px; height: 2px; background: var(--ggl-border); margin: 0 0 30px; }
+.ggl-rfounder-story { max-width: 760px; }
+.ggl-rfounder-story p {
+  font-size: 15.5px; line-height: 1.75; color: var(--ggl-text2); margin: 0 0 18px;
+}
+.ggl-rfounder-story strong { color: var(--ggl-text); }
+.ggl-rfounder-closing {
+  font-size: 19px; font-weight: 600; line-height: 1.5; color: var(--ggl-text);
+  margin: 32px 0 26px; max-width: 760px;
+}
+.ggl-rfounder-name { font-size: 15px; font-weight: 700; color: var(--ggl-text); }
+.ggl-rfounder-role { font-size: 13px; color: var(--ggl-muted); margin-top: 3px; }
+
 /* focus states for new interactive elements */
 .ggl-rail-item:focus-visible, .ggl-stagebar-item:focus-visible,
 .ggl-textlink:focus-visible, .ggl-footer-col a:focus-visible {
@@ -1381,6 +1440,8 @@ body.ws-active .footer { display: none; }
   .ggl-rpanel { scroll-margin-top: 132px; }
   .ggl-raccess-grid { grid-template-columns: 1fr; }
   .ggl-rband { padding: 56px 20px; }
+  .ggl-analyze-grid { grid-template-columns: 1fr; gap: 32px; }
+  .ggl-rfounder { padding: 56px 20px; }
 }
 @media (max-width: 640px) {
   .ggl-rheadline { font-size: 32px; letter-spacing: -0.6px; }
@@ -1388,6 +1449,8 @@ body.ws-active .footer { display: none; }
   .ggl-rhero-order { width: 38%; right: 10px; }
   .ggl-rpanel { padding-bottom: 64px; }
   .ggl-rpanel-analyze { padding: 28px 20px; margin-bottom: 64px; }
+  .ggl-benefits { gap: 24px; }
+  .ggl-rfounder-closing { font-size: 17px; }
   .ggl-rpanel-improve, .ggl-rpanel-connect { padding-top: 56px; }
   .ggl-rpanel-cols, .ggl-rpanel-split { grid-template-columns: 1fr; gap: 28px; }
   .ggl-rpanel-visual { padding-bottom: 64px; }
