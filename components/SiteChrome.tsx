@@ -1,7 +1,23 @@
 "use client";
 
+import Link from "next/link";
 import { usePathname } from "next/navigation";
-import Header from "./Header";
+import Header, { DRILLS_URL } from "./Header";
+
+const PRODUCT_LINKS: { label: string; href: string; external?: boolean }[] = [
+  { label: "Simulator", href: "/replay" },
+  { label: "Trade Journal", href: "/journal" },
+  { label: "Edge Analyzer", href: "/journal?tab=analytics" },
+  { label: "Breakout Drills", href: DRILLS_URL, external: true },
+  { label: "Community", href: "/community" },
+];
+
+const PLATFORM_LINKS = [
+  { label: "Features", href: "/#features" },
+  { label: "How It Works", href: "/#how-it-works" },
+  { label: "Pricing", href: "/#pricing" },
+  { label: "About", href: "/#about" },
+];
 
 /**
  * Conditionally renders site chrome (header/footer).
@@ -22,9 +38,51 @@ export default function SiteChrome({ children }: { children: React.ReactNode }) 
     <>
       <Header />
       <main className="wrap">{children}</main>
-      <footer className="wrap footer">
-        <strong style={{ color: "var(--emerald-bright)" }}>Grow Green Lab</strong>
-        {" · "}Trade Replay Lab — simulated trading only. Not real orders, not financial advice.
+      <footer className="wrap footer ggl-footer">
+        <div className="ggl-footer-grid">
+          <div className="ggl-footer-brand">
+            <strong>Grow Green Lab</strong>
+            <p>
+              Trade Replay Lab — a trading practice platform. Replay real market
+              sessions, journal every trade, and build consistency before real
+              capital is at risk.
+            </p>
+          </div>
+          <nav className="ggl-footer-col" aria-label="Product">
+            <h4>Product</h4>
+            {PRODUCT_LINKS.map((l) =>
+              l.external ? (
+                <a key={l.href} href={l.href}>
+                  {l.label}
+                </a>
+              ) : (
+                <Link key={l.href} href={l.href}>
+                  {l.label}
+                </Link>
+              )
+            )}
+          </nav>
+          <nav className="ggl-footer-col" aria-label="Platform">
+            <h4>Platform</h4>
+            {PLATFORM_LINKS.map((l) => (
+              <Link key={l.href} href={l.href}>
+                {l.label}
+              </Link>
+            ))}
+          </nav>
+          <nav className="ggl-footer-col" aria-label="Get started">
+            <h4>Get Started</h4>
+            <Link href="/replay">Start Practicing</Link>
+            <Link href="/login">Sign In</Link>
+            <Link href="/sessions">My Sessions</Link>
+          </nav>
+        </div>
+        <div className="ggl-footer-base">
+          <span>© 2026 Grow Green Lab</span>
+          <span>
+            Simulated trading only. Not real orders, not financial advice.
+          </span>
+        </div>
       </footer>
     </>
   );

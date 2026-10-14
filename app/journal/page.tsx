@@ -89,6 +89,15 @@ function periodStartStr(p: Period): string | null {
 
 export default function JournalPage() {
   const [tab, setTab] = useState<Tab>("overview");
+
+  // Deep links: /journal?tab=analytics (e.g. the "Edge Analyzer" nav link)
+  // opens the journal on that tab. Without the param, behavior is unchanged.
+  useEffect(() => {
+    const t = new URLSearchParams(window.location.search).get("tab");
+    if (t === "overview" || t === "trades" || t === "review" || t === "calendar" || t === "analytics") {
+      setTab(t);
+    }
+  }, []);
   const [period, setPeriod] = useState<Period>("all");
   const [trades, setTrades] = useState<GroupedTrade[]>([]);
   const [metas, setMetas] = useState<Record<string, TradeMeta>>({});

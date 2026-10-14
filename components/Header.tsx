@@ -4,15 +4,37 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { createClient, isSupabaseConfigured } from "../lib/supabaseClient";
 
-const NAV_LINKS = [
-  { label: "Replay Lab", href: "/replay" },
+export const DRILLS_URL =
+  "https://growgreenlab-git-breakout-drills-growgreen1.vercel.app/drills";
+
+const NAV_LINKS: { label: string; href: string; external?: boolean }[] = [
+  { label: "Simulator", href: "/replay" },
   { label: "Trade Journal", href: "/journal" },
+  { label: "Edge Analyzer", href: "/journal?tab=analytics" },
+  { label: "Breakout Drills", href: DRILLS_URL, external: true },
   { label: "Community", href: "/community" },
-  { label: "Features", href: "/#features" },
-  { label: "How It Works", href: "/#how-it-works" },
-  { label: "Pricing", href: "/#pricing" },
-  { label: "About", href: "/#about" },
 ];
+
+function NavLink({
+  link,
+  onClick,
+}: {
+  link: (typeof NAV_LINKS)[number];
+  onClick?: () => void;
+}) {
+  if (link.external) {
+    return (
+      <a href={link.href} onClick={onClick}>
+        {link.label}
+      </a>
+    );
+  }
+  return (
+    <Link href={link.href} onClick={onClick}>
+      {link.label}
+    </Link>
+  );
+}
 
 export default function Header() {
   const [email, setEmail] = useState<string | null>(null);
@@ -49,9 +71,7 @@ export default function Header() {
 
         <nav className="ggl-nav-links" aria-label="Primary">
           {NAV_LINKS.map((l) => (
-            <Link key={l.href} href={l.href}>
-              {l.label}
-            </Link>
+            <NavLink key={l.href} link={l} />
           ))}
           {email && (
             <Link href="/sessions">
@@ -74,8 +94,8 @@ export default function Header() {
             </Link>
           )}
           <Link href="/replay" className="ggl-btn ggl-btn-primary ggl-launch-btn">
-            <span className="ggl-launch-full">Launch Simulator</span>
-            <span className="ggl-launch-short">Launch</span>
+            <span className="ggl-launch-full">Start Practicing</span>
+            <span className="ggl-launch-short">Start</span>
             <span aria-hidden="true">→</span>
           </Link>
           <button
@@ -92,10 +112,13 @@ export default function Header() {
       {menuOpen && (
         <nav className="ggl-mobile-menu" aria-label="Mobile">
           {NAV_LINKS.map((l) => (
-            <Link key={l.href} href={l.href} onClick={() => setMenuOpen(false)}>
-              {l.label}
-            </Link>
+            <NavLink key={l.href} link={l} onClick={() => setMenuOpen(false)} />
           ))}
+          {email && (
+            <Link href="/sessions" onClick={() => setMenuOpen(false)}>
+              My Sessions
+            </Link>
+          )}
           {email ? (
             <>
               <span className="ggl-user-badge" title={email}>{displayName || email}</span>
@@ -109,8 +132,8 @@ export default function Header() {
             </Link>
           )}
           <Link href="/replay" className="ggl-btn ggl-btn-primary ggl-launch-btn" onClick={() => setMenuOpen(false)}>
-            <span className="ggl-launch-full">Launch Simulator</span>
-            <span className="ggl-launch-short">Launch</span>
+            <span className="ggl-launch-full">Start Practicing</span>
+            <span className="ggl-launch-short">Start</span>
             <span aria-hidden="true">→</span>
           </Link>
         </nav>
