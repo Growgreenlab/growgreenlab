@@ -6,6 +6,8 @@ import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
 import { groupFillsIntoTrades, calcMetrics, calcRealTrade, validateRealFills, perExitPnl, parseKeyLevels, validateKeyLevels, computePlanUpdate, KEY_LEVEL_TYPES, KEY_LEVEL_INTERACTIONS, type KeyLevel, type PlanChange, parseBrokerCsv, parseWithMapping, autoMapColumns, MAPPABLE_FIELDS, groupImportedFills, fmtPnl, fmtPct, type GroupedTrade, type RawFill, type RealFill, type RealTradeCalc, type BrokerParseResult, type ImportedTrade } from "../../lib/journal";
 import { breakdown, riskMetrics, edgeInsights, dailyPnl, type AnalyticsTrade, type BreakdownDimension, type Insight } from "../../lib/journalAnalytics";
 import { listScreenshots, removeScreenshots, uploadScreenshots, validateScreenshotFile } from "../../lib/journalAttachments";
+import EdgeExportPanel from "../../components/EdgeExportPanel";
+import type { ExportSnapshotInput } from "../../lib/edgeExport";
 
 type Tab = "overview" | "trades" | "review" | "calendar" | "analytics";
 type Period = "today" | "week" | "month" | "30d" | "90d" | "ytd" | "all";
@@ -404,7 +406,7 @@ export default function JournalPage() {
       {tab === "trades" && <TradesTab trades={filtered} metas={metas} fTicker={fTicker} setFTicker={setFTicker} fSetup={fSetup} setFSetup={setFSetup} fWinLoss={fWinLoss} setFWinLoss={setFWinLoss} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} onRealTradeSaved={handleRealTradeSaved} showRealForm={showRealForm} setShowRealForm={setShowRealForm} showImport={showImport} setShowImport={setShowImport} sourceFilter={sourceFilter} editingReal={editingReal} onEditReal={startEditReal} onDeleteReal={startDeleteReal} onCancelEdit={cancelEdit} />}
       {tab === "review" && <ReviewTab tradeKey={selectedKey} simTrade={!isRealSelected ? (selected as GroupedTrade | null) : null} realTrade={isRealSelected ? (selected as RealTrade | null) : null} meta={selectedMeta} onSaved={load} onEditReal={startEditReal} onDeleteReal={startDeleteReal} />}
       {tab === "calendar" && <CalendarTab trades={closedFiltered} metas={metas} selectedDay={selectedCalDay} onSelectDay={setSelectedCalDay} onSelectTrade={(k) => { setSelectedKey(k); setTab("review"); }} />}
-      {tab === "analytics" && <AnalyticsTab trades={analyticsTrades} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} />}
+      {tab === "analytics" && <AnalyticsTab trades={analyticsTrades} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} exportInput={{ unified, metas, realTrades, simTrades: trades }} />}
 
       {deleteTarget && (
         <div
@@ -1891,7 +1893,7 @@ function InsightCard({ title, insight }: { title: string; insight: Insight }) {
   );
 }
 
-function AnalyticsTab({ trades, onSelect }: { trades: AnalyticsTrade[]; onSelect: (k: string) => void }) {
+function AnalyticsTab({ trades, onSelect, exportInput }: { trades: AnalyticsTrade[]; onSelect: (k: string) => void; exportInput?: ExportSnapshotInput }) {
   const [dim, setDim] = useState<BreakdownDimension>("setup");
   const [expanded, setExpanded] = useState<string | null>(null);
   // Breakdown-table scroll affordance: show a right-edge fade while more
@@ -1909,8 +1911,11 @@ function AnalyticsTab({ trades, onSelect }: { trades: AnalyticsTrade[]; onSelect
 
   if (trades.length === 0) {
     return (
-      <div className="card" style={{ padding: 32, textAlign: "center" }}>
-        <p className="hint" style={{ margin: 0 }}>No data — analytics need closed trades in the current filter selection. Adjust the source/period filters above, or log and close some trades first.</p>
+      <div style={{ display: "grid", gap: 20 }}>
+        {exportInput && <EdgeExportPanel input={exportInput} />}
+        <div className="card" style={{ padding: 32, textAlign: "center" }}>
+          <p className="hint" style={{ margin: 0 }}>No data — analytics need closed trades in the current filter selection. Adjust the source/period filters above, or log and close some trades first.</p>
+        </div>
       </div>
     );
   }
@@ -1932,6 +1937,7 @@ function AnalyticsTab({ trades, onSelect }: { trades: AnalyticsTrade[]; onSelect
 
   return (
     <div style={{ display: "grid", gap: 20 }}>
+      {exportInput && <EdgeExportPanel input={exportInput} />}
       {/* ---- Risk & Consistency ---- */}
       <section style={{ minWidth: 0 }}>
         <h3 style={{ margin: "0 0 10px" }}>Risk &amp; Consistency</h3>
