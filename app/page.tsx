@@ -13,7 +13,9 @@ export default function Home() {
               <br />
               Trading.
               <br />
-              <span className="ggl-headline-muted">Before You Risk Real Money.</span>
+              <span className="ggl-headline-muted">
+                Before You Risk <span className="ggl-headline-accent">Real Money.</span>
+              </span>
             </h1>
             <p className="ggl-sub">
               Replay historical market sessions, refine your entries, practise risk
@@ -23,10 +25,17 @@ export default function Home() {
               <Link href="/replay" className="ggl-btn ggl-btn-primary ggl-btn-lg">
                 Launch Simulator <span aria-hidden="true">→</span>
               </Link>
-              <Link href="/#features" className="ggl-btn ggl-btn-outline ggl-btn-lg">
-                Explore Features
+              <Link href="/journal" className="ggl-btn ggl-btn-outline ggl-btn-lg">
+                See the Journal
               </Link>
             </div>
+            <p className="ggl-value-row">
+              <span>Real historical market data</span>
+              <span>SL/TP brackets</span>
+              <span>Psychology Guard</span>
+              <span>Trade DNA journal</span>
+              <span>AI Edge Export</span>
+            </p>
             <ul className="ggl-ticks">
               <li>✓ Try it free</li>
               <li>✓ 5 practice trades per day</li>
@@ -36,14 +45,92 @@ export default function Home() {
           </div>
           <div className="ggl-hero-visual">
             <div className="ggl-sim-frame">
-              <img
-                src="/sim-preview.png"
-                alt="Grow Green Lab trading simulator — candlestick chart with replay controls, order panel and risk calculator"
-                className="ggl-sim-img"
-                loading="eager"
-              />
+              <div className="ggl-browser-bar" aria-hidden="true">
+                <span className="ggl-browser-dots">
+                  <i />
+                  <i />
+                  <i />
+                </span>
+                <span className="ggl-browser-pill">growgreenlab.com/replay</span>
+              </div>
+              <div className="ggl-sim-viewport">
+                <img
+                  src="/sim-chart.png"
+                  alt="Grow Green Lab trading simulator chart — candlesticks and volume replaying a historical session, with a take-profit line drawn on the chart"
+                  className="ggl-sim-img"
+                  loading="eager"
+                />
+              </div>
             </div>
           </div>
+        </div>
+      </section>
+
+      {/* ============ PRODUCT STRIP ============ */}
+      <section className="ggl-section ggl-platform" aria-labelledby="platform-heading">
+        <div className="ggl-platform-head">
+          <p className="ggl-eyebrow">THE PLATFORM</p>
+          <h2 id="platform-heading">One platform for your whole trading process</h2>
+        </div>
+        <div className="ggl-platform-grid">
+          <article className="ggl-card ggl-platform-card">
+            <div className="ggl-platform-visual">
+              <img
+                src="/sim-chart.png"
+                alt=""
+                aria-hidden="true"
+                className="ggl-platform-img"
+                loading="lazy"
+              />
+            </div>
+            <h3>Replay Lab</h3>
+            <p>Practise on real historical sessions, candle by candle.</p>
+            <Link href="/replay" className="ggl-card-link" aria-label="Replay Lab — open the simulator">
+              <span aria-hidden="true">→</span>
+            </Link>
+          </article>
+          <article className="ggl-card ggl-platform-card">
+            <div className="ggl-platform-visual ggl-platform-tile" aria-hidden="true">
+              <svg width="52" height="52" viewBox="0 0 40 40" fill="none">
+                <rect x="6" y="22" width="5" height="10" rx="1" fill="#7F8993" />
+                <rect x="14" y="16" width="5" height="16" rx="1" fill="#7F8993" />
+                <rect x="22" y="10" width="5" height="22" rx="1" fill="#B5BDC5" />
+                <rect x="30" y="5" width="5" height="27" rx="1" fill="#42D879" />
+              </svg>
+            </div>
+            <h3>Trade Journal</h3>
+            <p>Log real and simulator trades — analytics plus the AI Edge Export.</p>
+            <Link href="/journal" className="ggl-card-link" aria-label="Trade Journal — open your journal">
+              <span aria-hidden="true">→</span>
+            </Link>
+          </article>
+          <article className="ggl-card ggl-platform-card">
+            <div className="ggl-platform-visual ggl-platform-tile" aria-hidden="true">
+              <svg width="52" height="52" viewBox="0 0 40 40" fill="none">
+                <circle cx="20" cy="20" r="14" stroke="#B5BDC5" strokeWidth="2.5" />
+                <circle cx="20" cy="20" r="8" stroke="#B5BDC5" strokeWidth="2.5" />
+                <circle cx="20" cy="20" r="3" fill="#42D879" />
+              </svg>
+            </div>
+            <h3>Breakout Drills</h3>
+            <p>Recognition training with simulated Level 2 and tape reading.</p>
+            <span className="ggl-pill">In preview</span>
+          </article>
+          <article className="ggl-card ggl-platform-card">
+            <div className="ggl-platform-visual ggl-platform-tile" aria-hidden="true">
+              <svg width="52" height="52" viewBox="0 0 40 40" fill="none">
+                <circle cx="14" cy="14" r="5" stroke="#B5BDC5" strokeWidth="2.5" fill="none" />
+                <circle cx="27" cy="14" r="5" stroke="#B5BDC5" strokeWidth="2.5" fill="none" />
+                <path d="M4 32C4 26 8 23 14 23C20 23 24 26 24 32" stroke="#B5BDC5" strokeWidth="2.5" fill="none" />
+                <path d="M22 24C28 24 36 26 36 32" stroke="#42D879" strokeWidth="2.5" fill="none" />
+              </svg>
+            </div>
+            <h3>Community</h3>
+            <p>Trader rooms and discussion for every market you follow.</p>
+            <Link href="/community" className="ggl-card-link" aria-label="Community — visit the trader rooms">
+              <span aria-hidden="true">→</span>
+            </Link>
+          </article>
         </div>
       </section>
 
