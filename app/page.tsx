@@ -1,6 +1,5 @@
 import Link from "next/link";
 import HomeProcess from "../components/HomeProcess";
-import { DRILLS_URL } from "../components/Header";
 
 const CHART_ALT =
   "Grow Green Lab trading simulator chart — candlesticks and volume replaying a historical session, with stop-loss and take-profit lines drawn on the chart";
@@ -93,13 +92,13 @@ export default function Home() {
             <article className="ggl-rpanel ggl-rpanel-practice" id="practice" aria-labelledby="practice-heading">
               <p className="ggl-eyebrow">01 — PRACTICE</p>
               <h2 id="practice-heading" className="ggl-rpanel-title">
-                Replay the market. Drill the breakout.
+                Replay the market, candle by candle.
               </h2>
               <div className="ggl-rpanel-visual">
                 <img src="/sim-chart.png" alt={CHART_ALT} className="ggl-rpanel-chart" loading="lazy" />
                 <img src="/sim-order-panel.png" alt={ORDER_ALT} className="ggl-rpanel-order" loading="lazy" />
               </div>
-              <div className="ggl-rpanel-cols">
+              <div className="ggl-rpanel-cols ggl-rpanel-cols-1">
                 <div>
                   <h3>Historical Market Replay</h3>
                   <p>
@@ -109,23 +108,11 @@ export default function Home() {
                     and stop-loss / take-profit brackets that trigger on every tick.
                   </p>
                 </div>
-                <div>
-                  <h3>Breakout Drills</h3>
-                  <p>
-                    Drills train the read before the trade. Classify high-of-day
-                    breakouts as they form — clean, weak, or failed — read simulated
-                    Level 2 and Time &amp; Sales, and get graded on recognition,
-                    separately from entry and outcome.
-                  </p>
-                </div>
               </div>
               <p className="ggl-rlinks">
                 <Link href="/replay" className="ggl-textlink">
                   Open the Replay Lab <span aria-hidden="true">→</span>
                 </Link>
-                <a href={DRILLS_URL} className="ggl-textlink">
-                  Try Breakout Drills <span aria-hidden="true">→</span>
-                </a>
               </p>
             </article>
 
@@ -259,58 +246,6 @@ export default function Home() {
               </p>
             </article>
           </HomeProcess>
-        </div>
-      </section>
-
-      {/* ============ FOUNDER / ABOUT BAND ============ */}
-      <section className="ggl-rband ggl-rfounder" id="about" aria-labelledby="founder-heading">
-        <div className="ggl-rband-inner ggl-rfounder-grid">
-          <div className="ggl-rfounder-side">
-            <p className="ggl-eyebrow">ABOUT</p>
-            <h2 className="ggl-rband-title">Built by traders, for traders.</h2>
-            <p className="ggl-rfounder-about">
-              Grow Green Lab started as a personal practice tool for mastering
-              penny-stock breakouts without risking real capital. Every feature — the
-              replay engine, the risk calculator, the Guard system — exists because it
-              solved a real problem at the screen.
-            </p>
-            <div className="ggl-rfounder-sign">
-              <p className="ggl-rfounder-closing">
-                &ldquo;Big visions can come from small beginnings.&rdquo;
-              </p>
-              <div className="ggl-founder-name">Karandeep Singh</div>
-              <div className="ggl-founder-role">Founder, Grow Green Trade Lab</div>
-            </div>
-          </div>
-          <div className="ggl-rfounder-story">
-            <p className="ggl-eyebrow">THE STORY BEHIND THE PLATFORM</p>
-            <h2 id="founder-heading" className="ggl-rband-title">
-              Built for Traders. Driven by Purpose.
-            </h2>
-            <div className="ggl-founder-story">
-              <p>
-                I&rsquo;m <strong>Karandeep Singh</strong>, from Ladhra, a small village near
-                Jalandhar, Punjab, India.
-              </p>
-              <p>
-                Like many traders, I understand that trading is a continuous journey of
-                learning, discipline, and improvement. I started building Grow Green Trade Lab
-                with a simple vision: to make that journey easier through practical tools that
-                help traders review their trades, analyze their performance, learn from
-                mistakes, and develop better habits.
-              </p>
-              <p>
-                I&rsquo;m building this platform not because I have everything figured out, but
-                because I believe there&rsquo;s always room to learn, improve, and build better
-                tools along the way.
-              </p>
-              <p>
-                My goal is to create something meaningful for the trading community &mdash; a
-                platform built around the challenges traders face and the tools that can help
-                them grow.
-              </p>
-            </div>
-          </div>
         </div>
       </section>
 

@@ -4,14 +4,10 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { createClient, isSupabaseConfigured } from "../lib/supabaseClient";
 
-export const DRILLS_URL =
-  "https://growgreenlab-git-breakout-drills-growgreen1.vercel.app/drills";
-
 const NAV_LINKS: { label: string; href: string; external?: boolean }[] = [
   { label: "Simulator", href: "/replay" },
   { label: "Trade Journal", href: "/journal" },
   { label: "Edge Analyzer", href: "/journal?tab=analytics" },
-  { label: "Breakout Drills", href: DRILLS_URL, external: true },
   { label: "Community", href: "/community" },
 ];
 

@@ -2,13 +2,12 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import Header, { DRILLS_URL } from "./Header";
+import Header from "./Header";
 
 const PRODUCT_LINKS: { label: string; href: string; external?: boolean }[] = [
   { label: "Simulator", href: "/replay" },
   { label: "Trade Journal", href: "/journal" },
   { label: "Edge Analyzer", href: "/journal?tab=analytics" },
-  { label: "Breakout Drills", href: DRILLS_URL, external: true },
   { label: "Community", href: "/community" },
 ];
 
@@ -16,7 +15,6 @@ const PLATFORM_LINKS = [
   { label: "Features", href: "/#features" },
   { label: "How It Works", href: "/#how-it-works" },
   { label: "Pricing", href: "/#pricing" },
-  { label: "About", href: "/#about" },
 ];
 
 /**
