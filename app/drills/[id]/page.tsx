@@ -526,6 +526,10 @@ export default function DrillRunner() {
                     style={{ padding: "8px 14px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "#fff", cursor: "pointer", fontSize: 13 }}>
                     Back to decision
                   </button>
+                  <button onClick={() => setChartFocused((f) => !f)} aria-pressed={chartFocused}
+                    style={{ padding: "8px 14px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.15)", background: chartFocused ? "rgba(66,216,121,0.15)" : "transparent", color: "#fff", cursor: "pointer", fontSize: 13 }}>
+                    {chartFocused ? "Exit focus" : "Expand chart"}
+                  </button>
                   <button
                     onClick={lockDecision}
                     disabled={!selClass || !selAction}
@@ -536,7 +540,11 @@ export default function DrillRunner() {
                 </div>
               ) : (
               <div className="checkpoint-card" style={{ background: "#0d1117", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 16, padding: 28, maxWidth: 520, width: "100%", maxHeight: "90vh", overflowY: "auto" }}>
-                <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8 }}>
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginBottom: 8 }}>
+                  <button onClick={() => setChartFocused((f) => !f)} aria-pressed={chartFocused}
+                    style={{ padding: "6px 14px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.15)", background: chartFocused ? "rgba(66,216,121,0.15)" : "transparent", color: "#fff", cursor: "pointer", fontSize: 13 }}>
+                    {chartFocused ? "Exit focus" : "Expand chart"}
+                  </button>
                   <button onClick={() => setPanelCollapsed(true)} aria-expanded={true}
                     style={{ padding: "6px 12px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "var(--ggl-muted)", cursor: "pointer", fontSize: 13 }}>
                     Review evidence ▾
