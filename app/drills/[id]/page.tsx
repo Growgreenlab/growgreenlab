@@ -109,6 +109,15 @@ const chipStyle = (active: boolean): CSSProperties => ({
   color: "#fff", fontSize: 15, fontWeight: 600, cursor: "pointer", textAlign: "left",
 });
 
+// Shared by the checkpoint card and the collapsed decision bar so the
+// ready/disabled lock states can never drift apart visually.
+const lockBtnStyle = (ready: boolean): CSSProperties => ({
+  padding: "14px 16px", borderRadius: 10, border: "none",
+  background: ready ? "#42d879" : "rgba(255,255,255,0.08)",
+  color: ready ? "#06110b" : "#6e7681",
+  fontSize: 15, fontWeight: 800, cursor: ready ? "pointer" : "not-allowed",
+});
+
 export default function DrillRunner() {
   const params = useParams();
   const router = useRouter();
@@ -128,6 +137,11 @@ export default function DrillRunner() {
   // (undefined = not loaded yet, null = cycle complete).
   const [nextSlug, setNextSlug] = useState<string | null | undefined>(undefined);
   const [mobileTab, setMobileTab] = useState<"l2" | "ts">("l2");
+  // Presentation-only: checkpoint card collapsed to its compact bar,
+  // and the focused (panels-hidden) chart layout. Neither touches the
+  // sim, the selections, or the phase machine.
+  const [panelCollapsed, setPanelCollapsed] = useState(false);
+  const [chartFocused, setChartFocused] = useState(false);
 
   const simRef = useRef<DrillSim | null>(null);
   const clockRef = useRef<SimClock | null>(null);
@@ -151,6 +165,8 @@ export default function DrillRunner() {
     setDecision(null);
     setNextSlug(undefined);
     setPaused(false);
+    setPanelCollapsed(false);
+    setChartFocused(false);
     setUiVersion(0);
   }, [id]);
 
@@ -177,6 +193,8 @@ export default function DrillRunner() {
     setConfidence(DEFAULT_CONFIDENCE);
     setDecision(null);
     setPaused(false);
+    setPanelCollapsed(false);
+    setChartFocused(false);
     setUiVersion((v) => v + 1);
     setPhase("running");
   }, [scenario, resolved?.mode, id]);
@@ -436,9 +454,13 @@ export default function DrillRunner() {
               {livePrice >= scenario.hod ? "+" : "−"}${Math.abs(livePrice - scenario.hod).toFixed(2)} ({distPct >= 0 ? "+" : ""}{distPct.toFixed(2)}%)
             </strong></span>
             <span><span style={{ color: "var(--ggl-muted)" }}>State:</span> <strong>{HOD_STATE_LABEL[hodState]}</strong></span>
+            <button onClick={() => setChartFocused((f) => !f)} aria-pressed={chartFocused}
+              style={{ marginLeft: "auto", padding: "6px 14px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.15)", background: chartFocused ? "rgba(66,216,121,0.15)" : "transparent", color: "#fff", cursor: "pointer", fontSize: 13 }}>
+              {chartFocused ? "Exit focus" : "Expand chart"}
+            </button>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 300px", gap: 12 }} className="drill-grid">
-            <div style={{ minHeight: 380 }}>
+          <div style={{ display: "grid", gridTemplateColumns: chartFocused ? "1fr" : "1fr 300px", gap: 12 }} className="drill-grid">
+            <div style={{ minHeight: chartFocused ? 520 : 380 }}>
               <LwcChart
                 candles={displayCandles}
                 revealedCount={displayCandles.length}
@@ -456,6 +478,10 @@ export default function DrillRunner() {
                 onDrawingToolChange={() => {}}
               />
             </div>
+            {/* Focus mode hides ONLY this sibling column — the chart
+                element above keeps its exact tree position and props,
+                so it never remounts and zoom/pan survive the toggle. */}
+            {!chartFocused && (
             <div className="drill-side-panels" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               <div className="drill-desktop-panels" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                 <Level2Panel book={sim.book} level={scenario.hod} />
@@ -475,16 +501,47 @@ export default function DrillRunner() {
                 {mobileTab === "l2" ? <Level2Panel book={sim.book} level={scenario.hod} /> : <TimeSalesPanel prints={sim.prints} />}
               </div>
             </div>
+            )}
           </div>
 
           {/* Decision checkpoint: classify + act, then LOCK. The lock is
               one-way — the ledger rejects any later change. */}
           {phase === "checkpoint" && (
-            <div style={{
-              position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)",
-              display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 16,
+            <div className="checkpoint-overlay" style={{
+              position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
+              display: "flex", alignItems: panelCollapsed ? "flex-end" : "center", justifyContent: "center", zIndex: 100, padding: 16,
             }}>
-              <div style={{ background: "#0d1117", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 16, padding: 28, maxWidth: 520, width: "100%", maxHeight: "90vh", overflowY: "auto" }}>
+              {panelCollapsed ? (
+                <div className="checkpoint-bar" style={{
+                  background: "#0d1117", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 12,
+                  padding: "12px 16px", maxWidth: 520, width: "100%",
+                  display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
+                }}>
+                  <span style={{ fontSize: 14, flex: "1 1 200px" }}>
+                    Your picks: <strong>{selClass ? DECISION_CLASS_LABEL[selClass] : "—"}</strong>
+                    {" · "}<strong>{selAction ? ACTION_LABEL[selAction] : "—"}</strong>
+                    {" · "}Confidence {confidence}/5
+                  </span>
+                  <button onClick={() => setPanelCollapsed(false)} aria-expanded={false}
+                    style={{ padding: "8px 14px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "#fff", cursor: "pointer", fontSize: 13 }}>
+                    Back to decision
+                  </button>
+                  <button
+                    onClick={lockDecision}
+                    disabled={!selClass || !selAction}
+                    aria-disabled={!selClass || !selAction}
+                    style={lockBtnStyle(!!(selClass && selAction))}>
+                    Lock In Decision
+                  </button>
+                </div>
+              ) : (
+              <div className="checkpoint-card" style={{ background: "#0d1117", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 16, padding: 28, maxWidth: 520, width: "100%", maxHeight: "90vh", overflowY: "auto" }}>
+                <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8 }}>
+                  <button onClick={() => setPanelCollapsed(true)} aria-expanded={true}
+                    style={{ padding: "6px 12px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "var(--ggl-muted)", cursor: "pointer", fontSize: 13 }}>
+                    Review evidence ▾
+                  </button>
+                </div>
                 <h2 style={{ fontSize: 20, fontWeight: 800, marginBottom: 8 }}>What type of breakout is this setting up to be?</h2>
                 <p style={{ fontSize: 14, color: "var(--ggl-muted)", marginBottom: 16 }}>
                   Base your read on the candles, volume, Level 2, and Time &amp; Sales so far.
@@ -492,7 +549,7 @@ export default function DrillRunner() {
                 </p>
                 <div style={{ display: "grid", gap: 10, marginBottom: 20 }}>
                   {CLASS_OPTIONS.map((o) => (
-                    <button key={o.id} onClick={() => setSelClass(o.id)} style={chipStyle(selClass === o.id)}>
+                    <button key={o.id} onClick={() => setSelClass(o.id)} aria-pressed={selClass === o.id} style={chipStyle(selClass === o.id)}>
                       {o.label}
                     </button>
                   ))}
@@ -500,7 +557,7 @@ export default function DrillRunner() {
                 <h3 style={{ fontSize: 15, fontWeight: 800, marginBottom: 8 }}>And what would you do?</h3>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 20 }}>
                   {ACTION_OPTIONS.map((o) => (
-                    <button key={o.id} onClick={() => setSelAction(o.id)} style={{ ...chipStyle(selAction === o.id), textAlign: "center" }}>
+                    <button key={o.id} onClick={() => setSelAction(o.id)} aria-pressed={selAction === o.id} style={{ ...chipStyle(selAction === o.id), textAlign: "center" }}>
                       {o.label}
                     </button>
                   ))}
@@ -517,15 +574,17 @@ export default function DrillRunner() {
                 <button
                   onClick={lockDecision}
                   disabled={!selClass || !selAction}
-                  style={{
-                    width: "100%", padding: "14px 16px", borderRadius: 10, border: "none",
-                    background: selClass && selAction ? "#42d879" : "rgba(255,255,255,0.08)",
-                    color: selClass && selAction ? "#06110b" : "#6e7681",
-                    fontSize: 15, fontWeight: 800, cursor: selClass && selAction ? "pointer" : "not-allowed",
-                  }}>
+                  aria-disabled={!selClass || !selAction}
+                  style={{ ...lockBtnStyle(!!(selClass && selAction)), width: "100%" }}>
                   Lock In Decision
                 </button>
+                {(!selClass || !selAction) && (
+                  <p style={{ fontSize: 13, color: "var(--ggl-muted)", marginTop: 10, marginBottom: 0, textAlign: "center" }}>
+                    Choose a classification and an action to lock in.
+                  </p>
+                )}
               </div>
+              )}
             </div>
           )}
         </>
@@ -691,6 +750,18 @@ export default function DrillRunner() {
           .drill-grid { grid-template-columns: 1fr !important; }
           .drill-desktop-panels { display: none !important; }
           .drill-mobile-tabs { display: block !important; }
+          /* Checkpoint becomes a bottom drawer: the chart, HOD line and
+             status strip stay visible above it while deciding. */
+          .checkpoint-overlay { align-items: flex-end !important; padding: 0 !important; }
+          .checkpoint-card {
+            width: 100% !important; max-width: none !important;
+            max-height: 62dvh !important;
+            border-radius: 16px 16px 0 0 !important; border-bottom: none !important;
+          }
+          .checkpoint-bar {
+            width: 100% !important; max-width: none !important;
+            border-radius: 16px 16px 0 0 !important; border-bottom: none !important;
+          }
         }
       `}</style>
     </div>
