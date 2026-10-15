@@ -3,6 +3,11 @@
 /**
  * /drills/[id] — Breakout Recognition drill runner.
  *
+ * The [id] segment is an OPAQUE slug resolved by lib/drills/catalog.ts
+ * ("d-047" for blind drills, "f-clean" for focused ones) — the URL,
+ * header, and intro never present the scenario classification before
+ * the post-drill review (see docs/drill-blind-audit-2026-10-14.md).
+ *
  * State machine: intro → running → checkpoint (paused) → resolving → teaching.
  *
  * Synchronization (see docs/drill-audit-2026-10-14.md): ONE simulation
@@ -16,12 +21,25 @@
  *
  * Speed definition: s× = s simulated minutes per wall-clock minute
  * (one 1-minute candle forms in 60/s seconds; 1x is real time).
+ *
+ * Decision integrity: at the checkpoint the trader locks a
+ * classification + intended action into a DecisionLedger
+ * (lib/drills/decision.ts) together with the sim timestamp. The
+ * ledger accepts exactly one record per attempt and seals at the
+ * reveal — the original answer cannot be changed after the fact.
+ * Scoring lives in lib/drills/scoring.ts.
  */
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, type CSSProperties } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { getScenario, HOD_SCENARIOS } from "../../../lib/drills/scenarios";
-import { gradeAnswer, type DrillAnswer, type BreakoutClassification } from "../../../lib/drills/types";
+import {
+  resolveDrillSlug, blindSlugForSeed, randomRunSeed,
+} from "../../../lib/drills/catalog";
+import type {
+  BreakoutClassification, DecisionClassification, IntendedAction,
+} from "../../../lib/drills/types";
+import { DecisionLedger, type DrillDecision } from "../../../lib/drills/decision";
+import { buildReviewModel } from "../../../lib/drills/scoring";
 import { DrillSim, SimClock } from "../../../lib/drills/sim";
 import { hodMarketState, HOD_STATE_LABEL } from "../../../lib/drills/hodState";
 import LwcChart from "../../../components/LwcChart";
@@ -30,11 +48,19 @@ import TimeSalesPanel from "../../../components/TimeSalesPanel";
 
 type DrillPhase = "intro" | "running" | "checkpoint" | "resolving" | "teaching";
 
-const ANSWER_OPTIONS: { id: DrillAnswer; label: string }[] = [
+const BLIND_SEED_KEY = "ggl-blind-seed";
+
+const CLASS_OPTIONS: { id: DecisionClassification; label: string }[] = [
   { id: "clean", label: "Clean Breakout" },
   { id: "weak", label: "Weak Breakout" },
   { id: "failed", label: "Failed Breakout / Trap" },
-  { id: "not_sure", label: "Not Sure" },
+  { id: "ambiguous", label: "Ambiguous / No Trade" },
+];
+
+const ACTION_OPTIONS: { id: IntendedAction; label: string }[] = [
+  { id: "enter", label: "Enter" },
+  { id: "wait", label: "Wait" },
+  { id: "skip", label: "Skip" },
 ];
 
 const CLASS_LABEL: Record<BreakoutClassification, string> = {
@@ -45,10 +71,17 @@ const CLASS_LABEL: Record<BreakoutClassification, string> = {
   ambiguous: "Ambiguous",
 };
 
-const DIFFICULTY_LABEL: Record<string, string> = {
-  beginner: "Beginner",
-  intermediate: "Intermediate",
-  advanced: "Advanced",
+const DECISION_CLASS_LABEL: Record<DecisionClassification, string> = {
+  clean: "Clean Breakout",
+  weak: "Weak Breakout",
+  failed: "Failed Breakout / Trap",
+  ambiguous: "Ambiguous / No Trade",
+};
+
+const ACTION_LABEL: Record<IntendedAction, string> = {
+  enter: "Enter",
+  wait: "Wait",
+  skip: "Skip",
 };
 
 function fmtSimTime(ms: number): string {
@@ -58,51 +91,84 @@ function fmtSimTime(ms: number): string {
   return `${mm}:${ss}`;
 }
 
+const chipStyle = (active: boolean): CSSProperties => ({
+  padding: "12px 16px", borderRadius: 10,
+  border: `1px solid ${active ? "#42d879" : "rgba(255,255,255,0.15)"}`,
+  background: active ? "rgba(66,216,121,0.15)" : "rgba(255,255,255,0.03)",
+  color: "#fff", fontSize: 15, fontWeight: 600, cursor: "pointer", textAlign: "left",
+});
+
 export default function DrillRunner() {
   const params = useParams();
   const router = useRouter();
   const id = params.id as string;
-  const scenario = getScenario(id);
+  const resolved = resolveDrillSlug(id);
+  const scenario = resolved?.scenario;
 
   const [phase, setPhase] = useState<DrillPhase>("intro");
   const [speed, setSpeed] = useState(8);
   const [paused, setPaused] = useState(false);
   const [, setUiVersion] = useState(0); // render pump
-  const [answer, setAnswer] = useState<DrillAnswer | null>(null);
+  const [selClass, setSelClass] = useState<DecisionClassification | null>(null);
+  const [selAction, setSelAction] = useState<IntendedAction | null>(null);
   const [confidence, setConfidence] = useState<number | null>(null);
+  const [decision, setDecision] = useState<DrillDecision | null>(null);
+  const [blindSeed, setBlindSeed] = useState<number | null>(null);
   const [mobileTab, setMobileTab] = useState<"l2" | "ts">("l2");
 
   const simRef = useRef<DrillSim | null>(null);
   const clockRef = useRef<SimClock | null>(null);
-  const answeredRef = useRef(false);
+  const ledgerRef = useRef<DecisionLedger>(new DecisionLedger());
+  const lockedRef = useRef(false);
   const speedRef = useRef(speed);
   speedRef.current = speed;
 
   // Scenario switch: Next.js may reuse this component across /drills/[id]
-  // changes — never let a previous scenario's sim, phase, or answer leak
-  // into the new one (audit RC9).
+  // changes — never let a previous scenario's sim, phase, decision, or
+  // ledger leak into the new one (audit RC9).
   useEffect(() => {
     simRef.current = null;
     clockRef.current = null;
-    answeredRef.current = false;
+    ledgerRef.current = new DecisionLedger();
+    lockedRef.current = false;
     setPhase("intro");
-    setAnswer(null);
+    setSelClass(null);
+    setSelAction(null);
     setConfidence(null);
+    setDecision(null);
+    setBlindSeed(null);
     setPaused(false);
     setUiVersion(0);
   }, [id]);
 
   const startDrill = useCallback(() => {
     if (!scenario) return;
+    // A reset/replay starts a NEW attempt: any locked decision is
+    // archived by the ledger, never edited or resurrected.
+    ledgerRef.current.startNewAttempt();
+    lockedRef.current = false;
     simRef.current = new DrillSim(scenario);
     clockRef.current = new SimClock();
-    answeredRef.current = false;
-    setAnswer(null);
+    setSelClass(null);
+    setSelAction(null);
     setConfidence(null);
+    setDecision(null);
+    setBlindSeed(null);
     setPaused(false);
     setUiVersion((v) => v + 1);
     setPhase("running");
   }, [scenario]);
+
+  const reveal = useCallback(() => {
+    ledgerRef.current.seal();
+    if (resolved?.mode === "blind") {
+      try {
+        const s = sessionStorage.getItem(BLIND_SEED_KEY);
+        if (s) setBlindSeed(Number(s));
+      } catch { /* seed display is best-effort */ }
+    }
+    setPhase("teaching");
+  }, [resolved?.mode]);
 
   // The scheduler: the only place sim time is requested. Runs only while
   // running/resolving and not paused; cleanup cancels the frame loop, so
@@ -127,12 +193,12 @@ export default function DrillRunner() {
           lastUiPush = nowMs;
           setUiVersion((v) => v + 1);
         }
-        if (!answeredRef.current && sim.checkpointReached) {
+        if (!lockedRef.current && sim.checkpointReached) {
           setPhase("checkpoint");
           return; // no further frame: the scheduler stops with the phase
         }
         if (sim.atEnd) {
-          setPhase("teaching");
+          reveal();
           return;
         }
       }
@@ -140,12 +206,22 @@ export default function DrillRunner() {
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [phase, paused, id]);
+  }, [phase, paused, id, reveal]);
 
-  const submitAnswer = (a: DrillAnswer) => {
-    if (answeredRef.current || !scenario) return;
-    answeredRef.current = true;
-    setAnswer(a);
+  const lockDecision = () => {
+    const sim = simRef.current;
+    if (!sim || !selClass || !selAction || lockedRef.current) return;
+    const ok = ledgerRef.current.record({
+      classification: selClass,
+      action: selAction,
+      confidence: confidence ?? undefined,
+      simTimeMs: sim.simTimeMs,
+      candleIndex: sim.engine.index,
+      recordedAt: Date.now(),
+    });
+    if (!ok) return;
+    lockedRef.current = true;
+    setDecision(ledgerRef.current.current);
     setPaused(false);
     setPhase("resolving");
   };
@@ -155,21 +231,30 @@ export default function DrillRunner() {
     if (!sim) return;
     sim.advanceToEnd();
     setUiVersion((v) => v + 1);
-    setPhase("teaching");
+    reveal();
   };
 
-  if (!scenario) {
+  const nextBlindDrill = () => {
+    const seed = randomRunSeed();
+    try {
+      sessionStorage.setItem(BLIND_SEED_KEY, String(seed));
+    } catch { /* best-effort */ }
+    router.push(`/drills/${blindSlugForSeed(seed)}`);
+  };
+
+  if (!resolved || !scenario) {
     return (
       <div style={{ maxWidth: 760, margin: "0 auto", padding: "48px 16px", textAlign: "center" }}>
-        <h2>Scenario not found</h2>
+        <h2>Drill not found</h2>
         <Link href="/drills">Back to drills</Link>
       </div>
     );
   }
 
   const sim = simRef.current;
-  const grading = answer ? gradeAnswer(scenario, answer) : null;
-  const nextScenario = HOD_SCENARIOS[(HOD_SCENARIOS.findIndex((s) => s.id === scenario.id) + 1) % HOD_SCENARIOS.length];
+  const review = phase === "teaching" && decision
+    ? buildReviewModel(scenario, decision)
+    : null;
 
   // HOD header data — revealed data only (engine boundary), never the
   // scenario's future candles.
@@ -187,15 +272,15 @@ export default function DrillRunner() {
 
   return (
     <div style={{ maxWidth: 1200, margin: "0 auto", padding: "16px" }}>
-      {/* Header — neutral title until the teaching screen (audit RC8):
+      {/* Header — neutral label + mode only until the teaching screen:
           the runner never announces the classification mid-drill. */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
         <div>
           <Link href="/drills" style={{ fontSize: 13, color: "var(--ggl-muted)" }}>← All drills</Link>
           <h1 style={{ fontSize: 20, fontWeight: 800, margin: "4px 0 0" }}>
-            {phase === "teaching" ? scenario.title : "HOD Breakout Drill"}
+            {phase === "teaching" ? scenario.title : resolved.label}
             <span style={{ fontSize: 12, fontWeight: 600, color: "var(--ggl-muted)", marginLeft: 10 }}>
-              {DIFFICULTY_LABEL[scenario.difficulty]}
+              {resolved.mode === "blind" ? "Blind Practice" : "Focused Learning"}
             </span>
           </h1>
         </div>
@@ -235,11 +320,17 @@ export default function DrillRunner() {
 
       {phase === "intro" && (
         <div style={{ background: "#0d1117", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 12, padding: 24, maxWidth: 640 }}>
-          <p style={{ fontSize: 15, marginBottom: 12 }}>{scenario.description}</p>
+          <p style={{ fontSize: 15, marginBottom: 12 }}>
+            {resolved.mode === "blind"
+              ? "This is a blind drill — the setup type is not disclosed. Read the market, not the label."
+              : "Focused practice — you chose this setup category on purpose. Study its tells as it develops."}
+          </p>
           <p style={{ fontSize: 14, color: "var(--ggl-muted)", marginBottom: 12 }}>
             Watch the market develop. At the key moment you&apos;ll be asked to
-            classify the breakout — then see how it actually played out and learn
-            from the evidence. Order flow panels are simulated for training.
+            classify the breakout AND state your intended action (Enter, Wait,
+            or Skip). Your decision locks in before the outcome is revealed —
+            it can&apos;t be changed afterwards. Order flow panels are
+            simulated for training.
           </p>
           <p style={{ fontSize: 14, color: "var(--ggl-muted)", marginBottom: 20 }}>
             Controls: Pause/Resume and Reset are in the header while the drill
@@ -312,27 +403,35 @@ export default function DrillRunner() {
             </div>
           </div>
 
-          {/* Checkpoint modal */}
+          {/* Decision checkpoint: classify + act, then LOCK. The lock is
+              one-way — the ledger rejects any later change. */}
           {phase === "checkpoint" && (
             <div style={{
               position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)",
               display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 16,
             }}>
-              <div style={{ background: "#0d1117", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 16, padding: 28, maxWidth: 520, width: "100%" }}>
+              <div style={{ background: "#0d1117", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 16, padding: 28, maxWidth: 520, width: "100%", maxHeight: "90vh", overflowY: "auto" }}>
                 <h2 style={{ fontSize: 20, fontWeight: 800, marginBottom: 8 }}>What type of breakout is this setting up to be?</h2>
-                <p style={{ fontSize: 14, color: "var(--ggl-muted)", marginBottom: 20 }}>
+                <p style={{ fontSize: 14, color: "var(--ggl-muted)", marginBottom: 16 }}>
                   Base your read on the candles, volume, Level 2, and Time &amp; Sales so far.
-                  The outcome is hidden until you answer.
+                  Your decision locks in before the outcome is revealed — it can&apos;t be changed afterwards.
                 </p>
                 <div style={{ display: "grid", gap: 10, marginBottom: 20 }}>
-                  {ANSWER_OPTIONS.map((o) => (
-                    <button key={o.id} onClick={() => submitAnswer(o.id)}
-                      style={{ padding: "12px 16px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.15)", background: "rgba(255,255,255,0.03)", color: "#fff", fontSize: 15, fontWeight: 600, cursor: "pointer", textAlign: "left" }}>
+                  {CLASS_OPTIONS.map((o) => (
+                    <button key={o.id} onClick={() => setSelClass(o.id)} style={chipStyle(selClass === o.id)}>
                       {o.label}
                     </button>
                   ))}
                 </div>
-                <div style={{ marginBottom: 8 }}>
+                <h3 style={{ fontSize: 15, fontWeight: 800, marginBottom: 8 }}>And what would you do?</h3>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 20 }}>
+                  {ACTION_OPTIONS.map((o) => (
+                    <button key={o.id} onClick={() => setSelAction(o.id)} style={{ ...chipStyle(selAction === o.id), textAlign: "center" }}>
+                      {o.label}
+                    </button>
+                  ))}
+                </div>
+                <div style={{ marginBottom: 16 }}>
                   <label style={{ fontSize: 13, color: "var(--ggl-muted)", display: "block", marginBottom: 6 }}>
                     Confidence (optional): {confidence ?? "—"}/5
                   </label>
@@ -341,33 +440,56 @@ export default function DrillRunner() {
                     onChange={(e) => setConfidence(Number(e.target.value))}
                     style={{ width: "100%" }} />
                 </div>
+                <button
+                  onClick={lockDecision}
+                  disabled={!selClass || !selAction}
+                  style={{
+                    width: "100%", padding: "14px 16px", borderRadius: 10, border: "none",
+                    background: selClass && selAction ? "#42d879" : "rgba(255,255,255,0.08)",
+                    color: selClass && selAction ? "#06110b" : "#6e7681",
+                    fontSize: 15, fontWeight: 800, cursor: selClass && selAction ? "pointer" : "not-allowed",
+                  }}>
+                  Lock In Decision
+                </button>
               </div>
             </div>
           )}
         </>
       )}
 
-      {phase === "teaching" && answer && grading && (
+      {phase === "teaching" && decision && review && (
         <div style={{ maxWidth: 760, margin: "0 auto" }}>
           {/* Result */}
           <div style={{
             background: "#0d1117", border: "1px solid rgba(255,255,255,0.1)",
             borderRadius: 12, padding: 24, marginBottom: 16,
-            borderLeft: `4px solid ${grading.correct ? "#2ebd85" : grading.partial ? "#f0b429" : "#f6465d"}`,
+            borderLeft: `4px solid ${review.scores.classification.verdict === "correct" ? "#2ebd85" : review.scores.classification.verdict === "partial" ? "#f0b429" : "#f6465d"}`,
           }}>
-            <div style={{ fontSize: 13, color: "var(--ggl-muted)", marginBottom: 4 }}>YOUR ANSWER</div>
+            <div style={{ fontSize: 13, color: "var(--ggl-muted)", marginBottom: 4 }}>
+              YOUR DECISION · locked at sim time {fmtSimTime(decision.simTimeMs)}
+              {decision.confidence ? ` · confidence ${decision.confidence}/5` : ""}
+            </div>
             <div style={{ fontSize: 20, fontWeight: 800, marginBottom: 12 }}>
-              {answer === "not_sure" ? "Not Sure" : CLASS_LABEL[answer as BreakoutClassification]}
+              {DECISION_CLASS_LABEL[decision.classification]} — {ACTION_LABEL[decision.action]}
             </div>
             <div style={{ fontSize: 13, color: "var(--ggl-muted)", marginBottom: 4 }}>ACTUAL CLASSIFICATION</div>
             <div style={{ fontSize: 20, fontWeight: 800, marginBottom: 12 }}>{CLASS_LABEL[scenario.classification]}</div>
-            <div style={{
-              display: "inline-block", padding: "4px 14px", borderRadius: 20, fontSize: 13, fontWeight: 700,
-              background: grading.correct ? "rgba(46,189,133,0.15)" : grading.partial ? "rgba(240,180,41,0.15)" : "rgba(246,70,93,0.15)",
-              color: grading.correct ? "#2ebd85" : grading.partial ? "#f0b429" : "#f6465d",
-            }}>
-              {grading.correct ? "Correct" : grading.partial ? "Partially Correct" : "Incorrect"}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <VerdictChip
+                label={`Read: ${review.scores.classification.verdict === "correct" ? "Correct" : review.scores.classification.verdict === "partial" ? "Partially Correct" : "Incorrect"}`}
+                tone={review.scores.classification.verdict}
+              />
+              <VerdictChip
+                label={`Decision: ${review.scores.action.verdict === "appropriate" ? "Appropriate" : review.scores.action.verdict === "acceptable" ? "Acceptable" : "Inappropriate"} (${ACTION_LABEL[decision.action]})`}
+                tone={review.scores.action.verdict === "appropriate" ? "correct" : review.scores.action.verdict === "acceptable" ? "partial" : "incorrect"}
+              />
+              <span style={{ fontSize: 13, fontWeight: 800, padding: "4px 14px", borderRadius: 20, background: "rgba(255,255,255,0.06)" }}>
+                Score {review.scores.overall}/100
+              </span>
             </div>
+            <p style={{ fontSize: 13, color: "var(--ggl-muted)", marginTop: 14, lineHeight: 1.6 }}>
+              {review.actionRationale}
+            </p>
           </div>
 
           {/* Evidence */}
@@ -380,10 +502,10 @@ export default function DrillRunner() {
           </div>
 
           {/* What you missed */}
-          {scenario.teaching.missedByAnswer[answer] && (
+          {review.missed && (
             <div style={{ background: "#0d1117", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 12, padding: 24, marginBottom: 16 }}>
               <h3 style={{ fontSize: 16, fontWeight: 800, marginBottom: 12 }}>What to take from this</h3>
-              <p style={{ fontSize: 14, lineHeight: 1.6 }}>{scenario.teaching.missedByAnswer[answer]}</p>
+              <p style={{ fontSize: 14, lineHeight: 1.6 }}>{review.missed}</p>
             </div>
           )}
 
@@ -396,7 +518,7 @@ export default function DrillRunner() {
           </div>
 
           {/* Lessons */}
-          <div style={{ background: "#0d1117", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 12, padding: 24, marginBottom: 24 }}>
+          <div style={{ background: "#0d1117", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 12, padding: 24, marginBottom: 16 }}>
             <h3 style={{ fontSize: 16, fontWeight: 800, marginBottom: 12 }}>Key lessons</h3>
             <ul style={{ margin: 0, paddingLeft: 20 }}>
               {scenario.teaching.lessons.map((l, i) => (
@@ -405,13 +527,34 @@ export default function DrillRunner() {
             </ul>
           </div>
 
+          {/* Reproducibility — review stage only */}
+          <p style={{ fontSize: 12, color: "#6e7681", marginBottom: 24 }}>
+            {resolved.label} · {resolved.mode === "blind" ? "Blind Practice" : "Focused Learning"}
+            {blindSeed !== null ? ` · draw seed ${blindSeed}` : ""}
+            {" "}· scenario seed {scenario.seed} · decision locked at sim time {fmtSimTime(decision.simTimeMs)}, candle {decision.candleIndex + 1}
+          </p>
+
           {/* Actions */}
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 32 }}>
-            <Link href={`/drills/${nextScenario.id}`}
-              style={{ padding: "12px 24px", borderRadius: 10, background: "#42d879", color: "#06110b", fontWeight: 800, textDecoration: "none", fontSize: 14 }}>
-              Next Drill →
-            </Link>
-            <button onClick={() => { simRef.current = null; setPhase("intro"); }}
+            {resolved.mode === "blind" ? (
+              <button onClick={nextBlindDrill}
+                style={{ padding: "12px 24px", borderRadius: 10, border: "none", background: "#42d879", color: "#06110b", fontWeight: 800, cursor: "pointer", fontSize: 14 }}>
+                Next Blind Drill →
+              </button>
+            ) : (
+              <Link href="/drills/focused"
+                style={{ padding: "12px 24px", borderRadius: 10, background: "#42d879", color: "#06110b", fontWeight: 800, textDecoration: "none", fontSize: 14 }}>
+                More Focused Drills →
+              </Link>
+            )}
+            <button onClick={() => {
+                ledgerRef.current.startNewAttempt();
+                lockedRef.current = false;
+                simRef.current = null;
+                setDecision(null);
+                setBlindSeed(null);
+                setPhase("intro");
+              }}
               style={{ padding: "12px 24px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "#fff", fontWeight: 600, cursor: "pointer", fontSize: 14 }}>
               Replay This Setup
             </button>
@@ -431,6 +574,18 @@ export default function DrillRunner() {
         }
       `}</style>
     </div>
+  );
+}
+
+function VerdictChip({ label, tone }: { label: string; tone: "correct" | "partial" | "incorrect" }) {
+  const color = tone === "correct" ? "#2ebd85" : tone === "partial" ? "#f0b429" : "#f6465d";
+  return (
+    <span style={{
+      display: "inline-block", padding: "4px 14px", borderRadius: 20, fontSize: 13, fontWeight: 700,
+      background: `${color}26`, color,
+    }}>
+      {label}
+    </span>
   );
 }
 

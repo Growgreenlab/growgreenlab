@@ -73,6 +73,17 @@ export type DrillAnswer =
   | BreakoutClassification
   | "not_sure";
 
+/**
+ * Checkpoint classification answers (Blind Drills redesign). The
+ * "ambiguous" option is presented as "Ambiguous / No Trade" — it is
+ * both a first-class read (correct on genuinely ambiguous scenarios)
+ * and the honest-uncertainty answer, scored per lib/drills/scoring.ts.
+ */
+export type DecisionClassification = "clean" | "weak" | "failed" | "ambiguous";
+
+/** Intended action recorded alongside the classification. */
+export type IntendedAction = "enter" | "wait" | "skip";
+
 export interface DrillAttempt {
   scenarioId: string;
   scenarioVersion: number;
