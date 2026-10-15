@@ -44,7 +44,7 @@ import {
   type OrderBookSnapshot,
   type TradePrint,
 } from "./orderflow";
-import { hodMarketState } from "./hodState";
+import { hodMarketState, type HodMarketState } from "./hodState";
 import type { DrillScenario } from "./types";
 
 /** Scenario id → order-flow behavior. Internal: never shown pre-answer. */
@@ -194,19 +194,32 @@ export class DrillSim {
   }
 
   /**
-   * Flow phase + context for a candle, derived from REVEALED data only:
-   * the HOD event state over finalized candles + the forming candle
-   * (F2), the class-character ramp (F1), and the volatility EMA (F5).
-   * Pure function of the tick stream so far — chunking-invariant.
+   * THE market-state derivation — one source of truth for everything
+   * the user sees: the flow engine's phase/context AND the runner
+   * header's state label both come from here, so the label can never
+   * disagree with what the book and tape are doing. Derived from
+   * REVEALED data only (finalized candles + the forming candle + the
+   * last tick price), a pure function of the tick stream so far —
+   * chunking-invariant, pause-safe.
+   *
+   * On top of the raw hodMarketState machine it applies the two
+   * causal-timing rules the flow has always used:
+   *  - a strict-cross rejection counts only once CONFIRMED by a
+   *    finalized close back below the level (an intra-candle
+   *    spike-and-fade is still the trap forming, not distribution);
+   *  - for Failed, an exact-touch test rejection (the b34193f
+   *    chapter) is a rejection even though the strict machine —
+   *    which needs a wick or close strictly ABOVE the level — can
+   *    never see it.
    */
-  private flowContextFor(candleIndex: number): { phase: FlowPhase; ctx: FlowContext } {
+  private deriveState(): HodMarketState {
     const level = this.scenario.hod;
     const revealed = this.engine.revealed;
     const live = hodMarketState(level, revealed, this.formingCandle());
     let state = live;
     if (live === "rejected") {
-      // Rejection counts for FLOW only once it is confirmed by a
-      // finalized candle: a wick above the level that has since
+      // Rejection counts (flow AND header label) only once it is
+      // confirmed by a finalized candle: a wick above the level that has since
       // FINALIZED below it (or an accepted close that a later finalized
       // candle lost). An intra-candle spike-and-fade inside the cross
       // candle itself is still the trap forming, not distribution —
@@ -238,6 +251,32 @@ export class DrillSim {
       // and weak coils and diluted their cross-candle tape).
       state = "rejected";
     }
+    return state;
+  }
+
+  /**
+   * The market state the runner header displays, via the SAME
+   * derivation the flow engine uses (deriveState). Before this getter
+   * existed the page called the raw hodMarketState directly, so in
+   * failed-003 the header stayed on "Testing HOD" / "Approaching
+   * HOD" through the whole post-rejection grind while the book and
+   * tape were already distributing — the strict machine cannot see
+   * an exact-touch rejection, and it also flashes "rejected" on
+   * intra-candle wick fades the flow deliberately treats as
+   * unconfirmed. One derivation, no parallel condition.
+   */
+  get marketState(): HodMarketState {
+    return this.deriveState();
+  }
+
+  /**
+   * Flow phase + context for a candle, derived from REVEALED data only:
+   * the HOD event state over finalized candles + the forming candle
+   * (F2), the class-character ramp (F1), and the volatility EMA (F5).
+   * Pure function of the tick stream so far — chunking-invariant.
+   */
+  private flowContextFor(candleIndex: number): { phase: FlowPhase; ctx: FlowContext } {
+    const state = this.deriveState();
     const cp = this.scenario.checkpointIndex;
     return {
       phase: flowPhaseForState(state, candleIndex, cp, BEHAVIOR_FOR[this.scenario.id]),

@@ -17,7 +17,8 @@
  */
 import { HOD_SCENARIOS } from "./scenarios";
 import { DrillSim, BEHAVIOR_FOR, historyCountFor } from "./sim";
-import { TICKS_PER_FLOW_UPDATE, FLOW_UPDATES_PER_CANDLE } from "./orderflow";
+import { TICKS_PER_FLOW_UPDATE, FLOW_UPDATES_PER_CANDLE, DRILL_TICKS_PER_CANDLE } from "./orderflow";
+import { hodMarketState, type HodMarketState } from "./hodState";
 import type { DrillScenario } from "./types";
 import type { SimEvent } from "./sim";
 
@@ -324,6 +325,139 @@ console.log("\n=== Residual #2a: clean approach lean ===");
   check("clean approach tape lean softened (class mean <= 0.57)", cleanMean <= 0.57);
   check("failed approach tape overlaps clean (no reliable approach shortcut)",
     Math.max(...byClass.get("failed")!) >= Math.min(...byClass.get("clean")!));
+}
+
+// =====================================================================
+// 7. HEADER LABEL == FLOW STATE (label synchronization fix)
+//    The runner header used to call the raw hodMarketState directly
+//    while the flow engine acted on DrillSim's gated derivation — in
+//    failed-003 the header sat on "Testing HOD" / "Approaching HOD"
+//    for the whole post-rejection grind the book spent distributing.
+//    The header now consumes sim.marketState, the SAME derivation
+//    (confirmation gate + Failed test-rejection chapter). These
+//    assertions pin the label timeline at candle boundaries (the
+//    state sampled the moment each candle finalizes), the exact
+//    transition tick, and the blast radius vs the old raw derivation.
+// =====================================================================
+console.log("\n=== Label synchronization ===");
+type StateMap = Map<number, HodMarketState>;
+function boundaryStates(s: DrillScenario, chunk: number, derived: boolean): StateMap {
+  const sim = new DrillSim(s);
+  const out: StateMap = new Map();
+  let g = 0;
+  while (!sim.atEnd && g++ < 100000) {
+    for (const e of sim.advance(chunk)) {
+      if (e.kind !== "final") continue;
+      out.set(
+        e.candleIndex,
+        derived ? sim.marketState : hodMarketState(s.hod, sim.engine.revealed, sim.formingCandle())
+      );
+    }
+  }
+  return out;
+}
+const sameTimeline = (a: StateMap, b: StateMap) =>
+  a.size === b.size && [...a].every(([k, v]) => b.get(k) === v);
+const firstRejectedAt = (m: StateMap) =>
+  [...m.entries()].find(([, v]) => v === "rejected")?.[0];
+
+{
+  const s = HOD_SCENARIOS.find((x) => x.id === "hod-failed-003")!;
+  const derived = boundaryStates(s, DRILL_TICKS_PER_CANDLE, true);
+  const raw = boundaryStates(s, DRILL_TICKS_PER_CANDLE, false);
+
+  // (1) Not rejected before confirmation; (2) rejected exactly at
+  // the confirming candle's boundary (candle 10: the first finalized
+  // close back below the level after the exact-touch test).
+  check("failed-003 label: test candle boundary is not rejected (still testing)",
+    derived.get(9) === "testing");
+  check("failed-003 label: rejected at the confirming candle boundary (c10)",
+    derived.get(10) === "rejected");
+  check("failed-003 label: stays rejected through the grind (c11-c15)",
+    [11, 12, 13, 14, 15].every((ci) => derived.get(ci) === "rejected"));
+  // (5) Fake acceptance moves the label on; the final collapse
+  // re-rejects via the strict path.
+  check("failed-003 label: spike candle closing at the level is not stuck on rejected",
+    derived.get(16) === "breaking");
+  check("failed-003 label: fake acceptance reads accepting (c17-c19)",
+    [17, 18, 19].every((ci) => derived.get(ci) === "accepting"));
+  check("failed-003 label: rejected again after the final collapse (c20+)",
+    derived.get(20) === "rejected" && derived.get(23) === "rejected");
+  // Blast radius vs the old page derivation: the derived timeline
+  // may differ from raw ONLY at the chapter candles and the spike
+  // candle that closes exactly at the level.
+  const diffCandles = [...derived.keys()].filter((ci) => derived.get(ci) !== raw.get(ci));
+  check("failed-003 label: divergence from raw confined to c10-c16",
+    diffCandles.length > 0 && diffCandles.every((ci) => ci >= 10 && ci <= 16));
+
+  // (2)+(4) Tick-level: the label's first rejected tick, the flow's
+  // first distribution (resolution-phase) tick, and the confirming
+  // candle's finalizing tick are THE SAME tick — and no rejected
+  // sample exists while the confirming candle is still forming.
+  const hist = historyCountFor(s);
+  const confirmTick = (10 - hist + 1) * DRILL_TICKS_PER_CANDLE;
+  const sim = new DrillSim(s);
+  let firstRejTick = -1, firstResTick = -1, earlyRej = false, g = 0;
+  while (!sim.atEnd && g++ < 1000000) {
+    const evs = sim.advance(1);
+    const t = sim.ticksElapsed;
+    for (const e of evs) {
+      if (e.kind === "flow" && e.phase === "resolution" && firstResTick < 0) firstResTick = t;
+    }
+    if (sim.marketState === "rejected") {
+      if (firstRejTick < 0) firstRejTick = t;
+      if (t < confirmTick) earlyRej = true;
+    }
+  }
+  check("failed-003 label: no rejected sample before the confirming close finalizes", !earlyRej);
+  check("failed-003 label: first rejected tick == confirming candle's final tick",
+    firstRejTick === confirmTick);
+  check("failed-003 label: first rejected tick == first distribution (resolution) tick",
+    firstResTick === confirmTick && firstRejTick === firstResTick);
+
+  // (4) Pause/resume + chunking: the boundary timeline is a pure
+  // function of the tick stream — identical however time is sliced.
+  check("failed-003 label: boundary timeline identical at chunk 120 and chunk 10",
+    sameTimeline(derived, boundaryStates(s, TICKS_PER_FLOW_UPDATE, true)));
+}
+
+// (6) failed-001 / failed-002: boundary label timelines are
+// byte-identical to the old raw derivation; transition candles pin.
+for (const id of ["hod-failed-001", "hod-failed-002"]) {
+  const s = HOD_SCENARIOS.find((x) => x.id === id)!;
+  const derived = boundaryStates(s, DRILL_TICKS_PER_CANDLE, true);
+  const raw = boundaryStates(s, DRILL_TICKS_PER_CANDLE, false);
+  check(`${id} label: boundary timeline unchanged vs raw derivation`, sameTimeline(derived, raw));
+}
+check("failed-001 label: first rejected boundary pinned at c16",
+  firstRejectedAt(boundaryStates(HOD_SCENARIOS.find((x) => x.id === "hod-failed-001")!, DRILL_TICKS_PER_CANDLE, true)) === 16);
+check("failed-002 label: first rejected boundary pinned at c10",
+  firstRejectedAt(boundaryStates(HOD_SCENARIOS.find((x) => x.id === "hod-failed-002")!, DRILL_TICKS_PER_CANDLE, true)) === 10);
+
+// (7) Every other scenario: derived == raw at every candle boundary,
+// EXCEPT the pinned exact-at-level-close edges below. At those
+// points the raw machine says "rejected" (a wick strictly above,
+// price back AT the level) while the flow's confirmation gate —
+// which requires a finalized close BELOW the level — has not
+// confirmed; the label text itself ("back below HOD") does not
+// describe an at-level close. The header follows the flow's
+// authoritative derivation there, as everywhere else.
+const AT_LEVEL_EDGES: Record<string, Record<number, HodMarketState>> = {
+  "hod-weak-003": { 11: "breaking", 13: "breaking" },
+  "hod-ambiguous-003": { 17: "breaking", 18: "breaking" },
+};
+for (const s of HOD_SCENARIOS) {
+  if (BEHAVIOR_FOR[s.id] === "failed") continue;
+  const derived = boundaryStates(s, DRILL_TICKS_PER_CANDLE, true);
+  const raw = boundaryStates(s, DRILL_TICKS_PER_CANDLE, false);
+  const edges = AT_LEVEL_EDGES[s.id] ?? {};
+  let ok = derived.size === raw.size;
+  for (const [ci, st] of derived) {
+    if (ci in edges) {
+      if (st !== edges[ci] || raw.get(ci) !== "rejected") ok = false;
+    } else if (st !== raw.get(ci)) ok = false;
+  }
+  check(`${s.id} label: boundary timeline unchanged vs raw (modulo pinned at-level edges)`, ok);
 }
 
 console.log(`\n=== FLOWPATH RESULT: ${pass} passed, ${fail} failed ===`);

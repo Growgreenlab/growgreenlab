@@ -54,7 +54,7 @@ import {
 } from "../../../lib/drills/decision";
 import { buildReviewModel, scoreDecision } from "../../../lib/drills/scoring";
 import { DrillSim, SimClock } from "../../../lib/drills/sim";
-import { hodMarketState, HOD_STATE_LABEL } from "../../../lib/drills/hodState";
+import { HOD_STATE_LABEL } from "../../../lib/drills/hodState";
 import LwcChart from "../../../components/LwcChart";
 import Level2Panel from "../../../components/Level2Panel";
 import TimeSalesPanel from "../../../components/TimeSalesPanel";
@@ -325,10 +325,13 @@ export default function DrillRunner() {
   const displayCandles = engine ? engine.displayCandles : [];
   const livePrice = engine ? engine.displayPrice : scenario.candles[0].o;
   const liveHod = engine ? engine.hod : scenario.hod;
-  const forming = sim ? sim.formingCandle() : null;
-  const hodState = engine
-    ? hodMarketState(scenario.hod, engine.revealed, forming)
-    : "approaching";
+  // Header state comes from DrillSim's own derivation — the SAME
+  // state the flow engine acts on (confirmation gate + Failed
+  // test-rejection chapter included), so the label can never
+  // disagree with the book and tape. (The raw hodMarketState called
+  // here before could neither see an exact-touch rejection nor hold
+  // off on an unconfirmed intra-candle wick fade.)
+  const hodState = sim ? sim.marketState : "approaching";
   const distPct = ((livePrice - scenario.hod) / scenario.hod) * 100;
 
   const inRun = phase === "running" || phase === "resolving" || phase === "checkpoint";
