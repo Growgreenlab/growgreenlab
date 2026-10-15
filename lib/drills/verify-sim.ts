@@ -299,7 +299,15 @@ console.log("\n=== Scenarios ===");
       postMinLow: Math.min(...s.candles.slice(bi + 1).map((c) => c.l)),
     };
   };
-  const F = Object.fromEntries(HOD_SCENARIOS.map((s) => [s.classification, fp(s)]));
+  // The cross-scenario ORDERING checks below were written for the
+  // original four scenarios. With the pool at 12, keying fingerprints
+  // by classification would silently keep only the LAST scenario of
+  // each class — so F is built from the original four BY ID, and the
+  // per-scenario fingerprint-vs-classification checks for all 12
+  // scenarios live in verify-pool.ts.
+  const ORIGINALS = ["hod-clean-001", "hod-weak-001", "hod-failed-001", "hod-ambiguous-001"]
+    .map((id) => getScenario(id)!);
+  const F = Object.fromEntries(ORIGINALS.map((s) => [s.classification, fp(s)]));
   check("clean: volume expands ≥1.7x", F.clean.volMult >= 1.7);
   check("clean: closes in top third of breakout range", F.clean.closePos >= 0.65);
   check("clean: holds above HOD to the end", F.clean.final > getScenario("hod-clean-001")!.hod && F.clean.postMinLow >= getScenario("hod-clean-001")!.hod * 0.998);

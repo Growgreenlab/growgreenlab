@@ -8,18 +8,17 @@ import {
   type FlowBehavior, type FlowParams,
   DRILL_TICKS_PER_CANDLE } from "./orderflow";
 import { ReplayEngine } from "../engine";
+import { BEHAVIOR_FOR } from "./sim";
 
 let pass = 0, fail = 0;
 function check(name: string, cond: boolean) {
   if (cond) { pass++; } else { fail++; console.log(`  FAIL: ${name}`); }
 }
 
-const behaviorFor: Record<string, FlowBehavior> = {
-  "hod-clean-001": "clean",
-  "hod-weak-001": "weak",
-  "hod-failed-001": "failed",
-  "hod-ambiguous-001": "ambiguous",
-};
+// Behavior per scenario comes from the sim's own map (single source —
+// it previously duplicated a 4-entry copy here, which would have gone
+// stale when the pool grew to 12 scenarios).
+const behaviorFor = BEHAVIOR_FOR;
 
 for (const s of HOD_SCENARIOS) {
   const behavior = behaviorFor[s.id];

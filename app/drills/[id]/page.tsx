@@ -28,13 +28,23 @@
  * ledger accepts exactly one record per attempt and seals at the
  * reveal — the original answer cannot be changed after the fact.
  * Scoring lives in lib/drills/scoring.ts.
+ *
+ * Blind cycle (docs/drill-pool-2026-10-14.md): starting a blind drill
+ * marks it started in the persistent cycle queue (lib/drills/cycle.ts);
+ * sealing the decision submits it — the one event that consumes the
+ * drill for this cycle. "Next Blind Drill" follows the queue, never a
+ * random draw. Focused drills never touch the queue.
  */
 import { useEffect, useRef, useState, useCallback, type CSSProperties } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import {
-  resolveDrillSlug, drawNextBlindSlug, randomRunSeed,
+  resolveDrillSlug, randomRunSeed,
 } from "../../../lib/drills/catalog";
+import {
+  browserStorage, ensurePool, updatePool, markStarted, submitAttempt,
+  serveNextSlug, type SubmittedAttempt,
+} from "../../../lib/drills/cycle";
 import type {
   BreakoutClassification, DecisionClassification, IntendedAction,
 } from "../../../lib/drills/types";
@@ -42,7 +52,7 @@ import {
   DecisionLedger, buildDecision, decisionLockLabel, effectiveConfidence,
   formatSimTimeMs, DEFAULT_CONFIDENCE, type DrillDecision,
 } from "../../../lib/drills/decision";
-import { buildReviewModel } from "../../../lib/drills/scoring";
+import { buildReviewModel, scoreDecision } from "../../../lib/drills/scoring";
 import { DrillSim, SimClock } from "../../../lib/drills/sim";
 import { hodMarketState, HOD_STATE_LABEL } from "../../../lib/drills/hodState";
 import LwcChart from "../../../components/LwcChart";
@@ -51,7 +61,6 @@ import TimeSalesPanel from "../../../components/TimeSalesPanel";
 
 type DrillPhase = "intro" | "running" | "checkpoint" | "resolving" | "teaching";
 
-const BLIND_SEED_KEY = "ggl-blind-seed";
 
 const CLASS_OPTIONS: { id: DecisionClassification; label: string }[] = [
   { id: "clean", label: "Clean Breakout" },
@@ -114,7 +123,9 @@ export default function DrillRunner() {
   const [selAction, setSelAction] = useState<IntendedAction | null>(null);
   const [confidence, setConfidence] = useState<number>(DEFAULT_CONFIDENCE);
   const [decision, setDecision] = useState<DrillDecision | null>(null);
-  const [blindSeed, setBlindSeed] = useState<number | null>(null);
+  // Blind cycle: the queue's next slug once this drill is submitted
+  // (undefined = not loaded yet, null = cycle complete).
+  const [nextSlug, setNextSlug] = useState<string | null | undefined>(undefined);
   const [mobileTab, setMobileTab] = useState<"l2" | "ts">("l2");
 
   const simRef = useRef<DrillSim | null>(null);
@@ -137,7 +148,7 @@ export default function DrillRunner() {
     setSelAction(null);
     setConfidence(DEFAULT_CONFIDENCE);
     setDecision(null);
-    setBlindSeed(null);
+    setNextSlug(undefined);
     setPaused(false);
     setUiVersion(0);
   }, [id]);
@@ -148,28 +159,31 @@ export default function DrillRunner() {
     // archived by the ledger, never edited or resurrected.
     ledgerRef.current.startNewAttempt();
     lockedRef.current = false;
+    // Blind cycle: record the attempt as STARTED (not submitted — only
+    // a sealed decision consumes the drill). No-op if already started
+    // or already submitted, so Reset/Replay can never disturb the queue.
+    if (resolved?.mode === "blind") {
+      const storage = browserStorage();
+      if (storage) {
+        const now = Date.now();
+        updatePool(storage, randomRunSeed(), now, (s) => markStarted(s, id, now));
+      }
+    }
     simRef.current = new DrillSim(scenario);
     clockRef.current = new SimClock();
     setSelClass(null);
     setSelAction(null);
     setConfidence(DEFAULT_CONFIDENCE);
     setDecision(null);
-    setBlindSeed(null);
     setPaused(false);
     setUiVersion((v) => v + 1);
     setPhase("running");
-  }, [scenario]);
+  }, [scenario, resolved?.mode, id]);
 
   const reveal = useCallback(() => {
     ledgerRef.current.seal();
-    if (resolved?.mode === "blind") {
-      try {
-        const s = sessionStorage.getItem(BLIND_SEED_KEY);
-        if (s) setBlindSeed(Number(s));
-      } catch { /* seed display is best-effort */ }
-    }
     setPhase("teaching");
-  }, [resolved?.mode]);
+  }, []);
 
   // The scheduler: the only place sim time is requested. Runs only while
   // running/resolving and not paused; cleanup cancels the frame loop, so
@@ -224,7 +238,36 @@ export default function DrillRunner() {
     );
     if (!ok) return;
     lockedRef.current = true;
-    setDecision(ledgerRef.current.current);
+    const locked = ledgerRef.current.current;
+    setDecision(locked);
+    // Blind cycle: sealing the decision IS the submission — the one
+    // event that consumes this drill in the cycle. submitAttempt is
+    // idempotent per (cycle, slug): a replayed drill, a remount, or a
+    // duplicate call can never create a second record or overwrite
+    // the sealed one.
+    if (resolved?.mode === "blind" && locked && scenario) {
+      const storage = browserStorage();
+      if (storage) {
+        const scores = scoreDecision(scenario, locked);
+        const attempt: SubmittedAttempt = {
+          slug: id,
+          actualClassification: scenario.classification,
+          classification: locked.classification,
+          action: locked.action,
+          confidence: effectiveConfidence(locked),
+          readVerdict: scores.classification.verdict,
+          actionVerdict: scores.action.verdict,
+          readScore: scores.classification.score,
+          actionScore: scores.action.score,
+          overall: scores.overall,
+          lockLabel: decisionLockLabel(locked),
+          scenarioSeed: scenario.seed,
+          submittedAt: Date.now(),
+        };
+        const now = Date.now();
+        updatePool(storage, randomRunSeed(), now, (s) => submitAttempt(s, attempt).state);
+      }
+    }
     setPaused(false);
     setPhase("resolving");
   };
@@ -237,16 +280,29 @@ export default function DrillRunner() {
     reveal();
   };
 
+  // Blind cycle: once this drill's decision is sealed and we're on the
+  // review, learn what the queue serves next (for the button label).
+  useEffect(() => {
+    if (phase !== "teaching" || resolved?.mode !== "blind") return;
+    const storage = browserStorage();
+    if (!storage) {
+      setNextSlug(null);
+      return;
+    }
+    const pool = ensurePool(storage, randomRunSeed(), Date.now());
+    setNextSlug(serveNextSlug(pool));
+  }, [phase, resolved?.mode]);
+
   const nextBlindDrill = () => {
-    // The draw never returns the drill already on screen: pushing the
-    // identical URL is a router no-op (no param change → no remount →
-    // the [id] reset below never fires), which made this button look
-    // dead whenever the fresh draw repeated the current drill.
-    const { slug, seed } = drawNextBlindSlug(id, randomRunSeed);
-    try {
-      sessionStorage.setItem(BLIND_SEED_KEY, String(seed));
-    } catch { /* best-effort */ }
-    router.push(`/drills/${slug}`);
+    // The queue decides what's next — never a fresh random draw, so a
+    // submitted drill can't repeat within the cycle. When the cycle is
+    // complete, Next lands on the drills home (cycle results + the
+    // Start New Cycle action). The pool is re-read here, at click
+    // time, so the target reflects the latest committed state.
+    const storage = browserStorage();
+    const pool = storage ? ensurePool(storage, randomRunSeed(), Date.now()) : null;
+    const slug = pool ? serveNextSlug(pool) : null;
+    router.push(slug ? `/drills/${slug}` : "/drills");
   };
 
   if (!resolved || !scenario) {
@@ -537,7 +593,6 @@ export default function DrillRunner() {
           {/* Reproducibility — review stage only */}
           <p style={{ fontSize: 12, color: "#6e7681", marginBottom: 24 }}>
             {resolved.label} · {resolved.mode === "blind" ? "Blind Practice" : "Focused Learning"}
-            {blindSeed !== null ? ` · draw seed ${blindSeed}` : ""}
             {" "}· scenario seed {scenario.seed} · decision locked at sim time {decisionLockLabel(decision)}
           </p>
 
@@ -546,7 +601,7 @@ export default function DrillRunner() {
             {resolved.mode === "blind" ? (
               <button onClick={nextBlindDrill}
                 style={{ padding: "12px 24px", borderRadius: 10, border: "none", background: "#42d879", color: "#06110b", fontWeight: 800, cursor: "pointer", fontSize: 14 }}>
-                Next Blind Drill →
+                {nextSlug === null ? "Cycle Complete — See Results →" : "Next Blind Drill →"}
               </button>
             ) : (
               <Link href="/drills/focused"
@@ -559,8 +614,7 @@ export default function DrillRunner() {
                 lockedRef.current = false;
                 simRef.current = null;
                 setDecision(null);
-                setBlindSeed(null);
-                setPhase("intro");
+                            setPhase("intro");
               }}
               style={{ padding: "12px 24px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "#fff", fontWeight: 600, cursor: "pointer", fontSize: 14 }}>
               Replay This Setup

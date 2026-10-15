@@ -226,6 +226,137 @@ const SCENARIO_DEFS: ScenarioDef[] = [
     breakout: { spikeAboveHod: 0.012, closePosition: 0.55, volMult: 1.8 },
     breakoutAt: 13,
   },
+  {
+    id: "hod-clean-002",
+    classification: "clean",
+    difficulty: "intermediate",
+    title: "Clean HOD Breakout — Long Coil, Retest & Go",
+    description: "A long grind and tight coil under the high, a strong break, a shallow retest that holds, then continuation.",
+    seed: 21005,
+    regimes: [
+      { candles: 11, drift: 0.0011, volatility: 0.0055, volBase: 8200, volRange: 4000, volMoveMult: 2_000_000 },
+      { candles: 6, drift: 0.0001, volatility: 0.0025, volBase: 4800, volRange: 1800, volMoveMult: 1_000_000 },
+      { candles: 1, drift: 0, volatility: 0.004, volBase: 8000, volRange: 3000, volMoveMult: 2_000_000 }, // breakout
+      { candles: 2, drift: -0.0002, volatility: 0.0028, volBase: 7000, volRange: 2500, volMoveMult: 1_500_000 }, // retest
+      { candles: 5, drift: 0.001, volatility: 0.005, volBase: 11500, volRange: 4500, volMoveMult: 2_000_000 },
+    ],
+    breakout: { spikeAboveHod: 0.014, closePosition: 0.82, volMult: 2.8 },
+    breakoutAt: 17,
+  },
+  {
+    id: "hod-clean-003",
+    classification: "clean",
+    difficulty: "beginner",
+    title: "Clean HOD Breakout — Fast Vertical Break",
+    description: "A fast, vertical break out of a short coil — barely any pause at the level.",
+    seed: 21006,
+    regimes: [
+      { candles: 7, drift: 0.0016, volatility: 0.006, volBase: 8600, volRange: 3500, volMoveMult: 2_000_000 },
+      { candles: 3, drift: 0.0001, volatility: 0.003, volBase: 6000, volRange: 2000, volMoveMult: 1_000_000 },
+      { candles: 1, drift: 0, volatility: 0.004, volBase: 8200, volRange: 3000, volMoveMult: 2_000_000 }, // breakout
+      { candles: 7, drift: 0.0012, volatility: 0.0055, volBase: 12500, volRange: 5000, volMoveMult: 2_000_000 },
+    ],
+    breakout: { spikeAboveHod: 0.02, closePosition: 0.88, volMult: 3.2 },
+    breakoutAt: 10,
+  },
+  {
+    id: "hod-weak-002",
+    classification: "weak",
+    difficulty: "intermediate",
+    title: "Weak HOD Breakout — The Slow Bleed",
+    description: "Price pokes above the high on light volume, then slowly bleeds back below it.",
+    seed: 21007,
+    regimes: [
+      { candles: 10, drift: 0.0009, volatility: 0.0065, volBase: 7600, volRange: 3000, volMoveMult: 1_500_000 },
+      { candles: 3, drift: 0, volatility: 0.004, volBase: 6800, volRange: 2000, volMoveMult: 1_000_000 },
+      { candles: 1, drift: 0, volatility: 0.003, volBase: 7500, volRange: 2000, volMoveMult: 1_500_000 }, // breakout
+      { candles: 8, drift: -0.0011, volatility: 0.005, volBase: 7200, volRange: 2800, volMoveMult: 1_500_000 },
+    ],
+    breakout: { spikeAboveHod: 0.006, closePosition: 0.38, volMult: 1.05 },
+    breakoutAt: 13,
+  },
+  {
+    id: "hod-weak-003",
+    classification: "weak",
+    difficulty: "advanced",
+    title: "Weak HOD Breakout — Choppy Poke, No Coil",
+    description: "A choppy, overlapping approach with no coil — the poke above the high has nothing behind it.",
+    seed: 21008,
+    regimes: [
+      { candles: 11, drift: 0.0007, volatility: 0.0095, volBase: 7400, volRange: 3200, volMoveMult: 1_200_000 },
+      { candles: 1, drift: 0, volatility: 0.004, volBase: 7600, volRange: 2200, volMoveMult: 1_200_000 }, // breakout
+      { candles: 7, drift: -0.0004, volatility: 0.008, volBase: 7800, volRange: 3000, volMoveMult: 1_200_000 },
+    ],
+    breakout: { spikeAboveHod: 0.01, closePosition: 0.52, volMult: 1.2 },
+    breakoutAt: 11,
+  },
+  {
+    id: "hod-failed-002",
+    classification: "failed",
+    difficulty: "intermediate",
+    title: "Failed HOD Breakout — Vertical Blow-Off",
+    description: "A vertical blow-off spike far above the high that collapses almost immediately.",
+    seed: 21014,
+    regimes: [
+      { candles: 10, drift: 0.002, volatility: 0.0075, volBase: 8800, volRange: 4000, volMoveMult: 2_000_000 },
+      { candles: 1, drift: 0, volatility: 0.005, volBase: 9000, volRange: 3000, volMoveMult: 2_000_000 }, // trap
+      { candles: 2, drift: -0.006, volatility: 0.007, volBase: 16000, volRange: 6000, volMoveMult: 2_500_000 },
+      { candles: 4, drift: -0.002, volatility: 0.006, volBase: 11000, volRange: 4000, volMoveMult: 2_000_000 },
+    ],
+    breakout: { spikeAboveHod: 0.045, closePosition: 0.15, volMult: 4.5 },
+    breakoutAt: 10,
+  },
+  {
+    id: "hod-failed-003",
+    classification: "failed",
+    difficulty: "advanced",
+    title: "Failed HOD Breakout — Fake Acceptance Trap",
+    description: "The break appears to accept above the high for two candles — then the floor drops out.",
+    seed: 21010,
+    regimes: [
+      { candles: 12, drift: 0.0012, volatility: 0.0055, volBase: 8300, volRange: 3800, volMoveMult: 2_000_000 },
+      { candles: 4, drift: 0.0001, volatility: 0.003, volBase: 8000, volRange: 2200, volMoveMult: 1_200_000 },
+      { candles: 1, drift: 0, volatility: 0.004, volBase: 8800, volRange: 2800, volMoveMult: 2_000_000 }, // trap
+      { candles: 2, drift: 0.0002, volatility: 0.004, volBase: 10500, volRange: 3500, volMoveMult: 1_800_000 }, // fake hold
+      { candles: 5, drift: -0.006, volatility: 0.007, volBase: 14500, volRange: 5500, volMoveMult: 2_500_000 },
+    ],
+    breakout: { spikeAboveHod: 0.024, closePosition: 0.28, volMult: 3.4 },
+    breakoutAt: 16,
+  },
+  {
+    id: "hod-ambiguous-002",
+    classification: "ambiguous",
+    difficulty: "intermediate",
+    title: "Ambiguous HOD Action — Strong Break, No Extension",
+    description: "A genuinely strong break that holds above the high but never extends. Strength without follow-through.",
+    seed: 21011,
+    regimes: [
+      { candles: 9, drift: 0.0011, volatility: 0.006, volBase: 7900, volRange: 3200, volMoveMult: 1_800_000 },
+      { candles: 4, drift: 0, volatility: 0.0035, volBase: 6200, volRange: 2000, volMoveMult: 1_000_000 },
+      { candles: 1, drift: 0, volatility: 0.004, volBase: 8000, volRange: 2600, volMoveMult: 1_800_000 }, // breakout
+      { candles: 2, drift: 0.0003, volatility: 0.0035, volBase: 10500, volRange: 3500, volMoveMult: 1_800_000 },
+      { candles: 5, drift: -0.0002, volatility: 0.003, volBase: 8200, volRange: 2600, volMoveMult: 1_200_000 },
+    ],
+    breakout: { spikeAboveHod: 0.016, closePosition: 0.64, volMult: 1.95 },
+    breakoutAt: 13,
+  },
+  {
+    id: "hod-ambiguous-003",
+    classification: "ambiguous",
+    difficulty: "advanced",
+    title: "Ambiguous HOD Action — The Poke That Wouldn't Fail",
+    description: "A soft poke that dips toward the level, refuses to fail, and goes flat.",
+    seed: 21012,
+    regimes: [
+      { candles: 10, drift: 0.001, volatility: 0.0062, volBase: 7700, volRange: 3000, volMoveMult: 1_800_000 },
+      { candles: 4, drift: 0, volatility: 0.0038, volBase: 7000, volRange: 2200, volMoveMult: 1_200_000 },
+      { candles: 1, drift: 0, volatility: 0.004, volBase: 7900, volRange: 2400, volMoveMult: 1_800_000 }, // breakout
+      { candles: 3, drift: 0, volatility: 0.0035, volBase: 8600, volRange: 2800, volMoveMult: 1_200_000 },
+      { candles: 4, drift: 0.0002, volatility: 0.0038, volBase: 8400, volRange: 2600, volMoveMult: 1_200_000 },
+    ],
+    breakout: { spikeAboveHod: 0.009, closePosition: 0.45, volMult: 1.5 },
+    breakoutAt: 14,
+  },
 ];
 
 export const HOD_SCENARIOS: DrillScenario[] = SCENARIO_DEFS.map(buildScenario);

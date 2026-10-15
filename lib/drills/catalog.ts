@@ -37,16 +37,34 @@ function mulberry32(seed: number): () => number {
 
 /**
  * Neutral drill numbers, keyed by internal scenario id. Deliberately
- * non-sequential and uncorrelated with difficulty order:
- * ascending numbers → difficulties beginner, advanced, beginner,
- * intermediate — no monotonic pattern to decode.
+ * non-sequential and uncorrelated with difficulty order: read by
+ * ascending number, the difficulties run intermediate, beginner,
+ * advanced, advanced, advanced, beginner, intermediate, intermediate,
+ * intermediate, beginner, intermediate, advanced — no monotonic
+ * pattern to decode (asserted by verify-blind).
  */
 const DRILL_NUMBER: Record<string, number> = {
+  "hod-clean-002": 12,
   "hod-weak-001": 23,
+  "hod-failed-003": 29,
   "hod-ambiguous-001": 31,
+  "hod-weak-003": 38,
   "hod-clean-001": 47,
+  "hod-ambiguous-002": 53,
   "hod-failed-001": 58,
+  "hod-weak-002": 64,
+  "hod-clean-003": 71,
+  "hod-failed-002": 85,
+  "hod-ambiguous-003": 96,
 };
+
+/**
+ * Catalog version recorded by drill cycles (lib/drills/cycle.ts). A
+ * cycle's eligibility set is frozen at creation under the catalog
+ * version then current; scenarios added later join at the next cycle
+ * boundary, never mid-cycle. Bump when scenarios are added/removed.
+ */
+export const CATALOG_VERSION = 2;
 
 const pad3 = (n: number) => String(n).padStart(3, "0");
 
@@ -106,6 +124,28 @@ export const FOCUSED_CATALOG: FocusedEntry[] = [
   },
 ];
 
+/** Focused Learning route slug for one specific scenario: "f-047". */
+export function focusedSlugForScenario(scenarioId: string): string {
+  return `f-${pad3(DRILL_NUMBER[scenarioId])}`;
+}
+
+/**
+ * The scenarios of one category as public drills (neutral number +
+ * label only), for the Focused Learning picker. Focused mode names the
+ * category on purpose; the individual drills still carry no title,
+ * description, or difficulty.
+ */
+export function scenariosForCategory(category: BreakoutClassification): PublicDrill[] {
+  return HOD_SCENARIOS.filter((s) => s.classification === category)
+    .map((s) => ({
+      slug: blindSlugFor(s.id),
+      label: `HOD Drill #${pad3(DRILL_NUMBER[s.id])}`,
+      number: DRILL_NUMBER[s.id],
+      candleCount: s.candles.length,
+    }))
+    .sort((a, b) => a.number - b.number);
+}
+
 export type DrillMode = "blind" | "focused";
 
 export interface ResolvedDrill {
@@ -136,7 +176,25 @@ export function resolveDrillSlug(slug: string): ResolvedDrill | undefined {
     };
   }
   if (slug.startsWith("f-")) {
-    const category = slug.slice(2) as BreakoutClassification;
+    const rest = slug.slice(2);
+    // "f-047": one specific scenario, deliberately chosen in Focused
+    // Learning (the picker lists each category's drills by number).
+    if (/^\d+$/.test(rest)) {
+      const num = Number(rest);
+      const entry = Object.entries(DRILL_NUMBER).find(([, n]) => n === num);
+      if (!entry) return undefined;
+      const scenario = getScenario(entry[0]);
+      if (!scenario) return undefined;
+      return {
+        scenario,
+        mode: "focused",
+        label: `HOD Drill #${pad3(num)}`,
+        number: num,
+      };
+    }
+    // "f-clean": the category slug — resolves to the category's first
+    // scenario (kept working for existing links/bookmarks).
+    const category = rest as BreakoutClassification;
     const focused = FOCUSED_CATALOG.find((f) => f.category === category);
     if (!focused) return undefined;
     const scenario = HOD_SCENARIOS.find((s) => s.classification === category);

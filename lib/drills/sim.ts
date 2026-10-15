@@ -49,6 +49,14 @@ export const BEHAVIOR_FOR: Record<string, FlowBehavior> = {
   "hod-weak-001": "weak",
   "hod-failed-001": "failed",
   "hod-ambiguous-001": "ambiguous",
+  "hod-clean-002": "clean",
+  "hod-clean-003": "clean",
+  "hod-weak-002": "weak",
+  "hod-weak-003": "weak",
+  "hod-failed-002": "failed",
+  "hod-failed-003": "failed",
+  "hod-ambiguous-002": "ambiguous",
+  "hod-ambiguous-003": "ambiguous",
 };
 
 /** Max ticks one scheduler frame may advance (bounded catch-up). */
