@@ -266,10 +266,17 @@ for (const s of HOD_SCENARIOS) {
   for (const e of flowEvents(events)) {
     const c = s.candles[e.candleIndex];
     for (const pr of e.prints) {
-      if (pr.price < c.l - 0.01 || pr.price > c.h + 0.01) priceOk = false;
+      // F3/F5 (2026-10-15): prints execute AT the quote — buys at the
+      // best ask, sells at the best bid — and the quote brackets the
+      // last tick by the volatility half-spread (≤3¢) plus tick rounding
+      // (≤0.5¢). The path bound is therefore the candle range extended
+      // by 4¢: prints still cannot appear at prices the market never
+      // quoted, but a buy at the ask may sit up to a half-spread above
+      // the candle's last-tick high, exactly as the book already did.
+      if (pr.price < c.l - 0.04 || pr.price > c.h + 0.04) priceOk = false;
     }
   }
-  check(`${s.id}: print prices stay on the candle's traded path`, priceOk);
+  check(`${s.id}: print prices stay on the candle's traded path (± half-spread)`, priceOk);
 }
 
 // =====================================================================

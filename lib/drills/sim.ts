@@ -116,6 +116,9 @@ export type SimEvent =
       kind: "flow";
       candleIndex: number;
       updateIndex: number;
+      /** Event-derived flow phase for this window (F2). Generic market
+       *  vocabulary only — never the scenario classification. */
+      phase: FlowPhase;
       book: OrderBookSnapshot;
       prints: TradePrint[];
     }
@@ -175,6 +178,7 @@ export class DrillSim {
       phase,
       ts,
       0,
+      this.book ?? undefined,
       ctx
     );
     this.prints = [...seedPrints].reverse().slice(0, PRINT_BUFFER_MAX);
@@ -187,14 +191,29 @@ export class DrillSim {
    * Pure function of the tick stream so far — chunking-invariant.
    */
   private flowContextFor(candleIndex: number): { phase: FlowPhase; ctx: FlowContext } {
-    const state = hodMarketState(
-      this.scenario.hod,
-      this.engine.revealed,
-      this.formingCandle()
-    );
+    const level = this.scenario.hod;
+    const revealed = this.engine.revealed;
+    const live = hodMarketState(level, revealed, this.formingCandle());
+    let state = live;
+    if (live === "rejected") {
+      // Rejection counts for FLOW only once it is confirmed by a
+      // finalized candle: a wick above the level that has since
+      // FINALIZED below it (or an accepted close that a later finalized
+      // candle lost). An intra-candle spike-and-fade inside the cross
+      // candle itself is still the trap forming, not distribution —
+      // the lure (buy tape, supported book, the wall) must survive
+      // until the first close back below the level.
+      const lastFinal = revealed[revealed.length - 1];
+      const confirmed =
+        !!lastFinal &&
+        lastFinal.c < level &&
+        revealed.some((cand) => cand.h > level) &&
+        this.lastPrice < level;
+      if (!confirmed) state = "breaking";
+    }
     const cp = this.scenario.checkpointIndex;
     return {
-      phase: flowPhaseForState(state, candleIndex, cp),
+      phase: flowPhaseForState(state, candleIndex, cp, BEHAVIOR_FOR[this.scenario.id]),
       ctx: { ramp: rampFor(state, candleIndex, cp), state, volC: this.volEmaC },
     };
   }
@@ -315,12 +334,12 @@ export class DrillSim {
 
     const book = generateBook(this.fp, flowTick, this.lastPrice, phase, ts, this.book ?? undefined, ctx);
     this.book = book;
-    const newPrints = generatePrints(this.fp, flowTick, this.lastPrice, windowVol, phase, ts, dir, ctx);
+    const newPrints = generatePrints(this.fp, flowTick, this.lastPrice, windowVol, phase, ts, dir, book, ctx);
     if (newPrints.length > 0) {
       this.prints = [...[...newPrints].reverse(), ...this.prints].slice(0, PRINT_BUFFER_MAX);
     }
     this.windowStartPrice = this.lastPrice;
 
-    return { kind: "flow", candleIndex, updateIndex, book, prints: newPrints };
+    return { kind: "flow", candleIndex, updateIndex, phase, book, prints: newPrints };
   }
 }

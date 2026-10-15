@@ -63,10 +63,21 @@ for (const s of HOD_SCENARIOS) {
     const maxAsk = Math.max(...wallBook.asks.map(a => a.size));
     check("failed: large ask wall in breakout", maxAsk > 1500);
   }
-  // 6. Clean scenario: bids stacked during breakout
+  // 6. Clean scenario: bids stacked during breakout.
+  // F6 (2026-10-15): the breakout imbalance was deliberately damped
+  // from a ~6x class constant to a credible ~2–2.5x, so the old
+  // absolute threshold (best bid > 800) no longer expresses the intent.
+  // The intent — bids clearly stacked over asks at the cross — is now
+  // asserted as depth ratios (measured 2.0–2.3 total, 2.1–2.7 at the
+  // touch across the three clean scenarios).
   if (behavior === "clean") {
     const cleanBook = generateBook(params, 42, s.hod + 0.01, "breakout", 1000);
-    check("clean: stacked bids in breakout", cleanBook.bids[0].size > 800);
+    const bidTot = cleanBook.bids.reduce((a, l) => a + l.size, 0);
+    const askTot = cleanBook.asks.reduce((a, l) => a + l.size, 0);
+    check(
+      "clean: stacked bids in breakout (ratio)",
+      cleanBook.bids[0].size > cleanBook.asks[0].size * 1.5 && bidTot > askTot * 1.8
+    );
   }
   // 7. Weak scenario: thin book
   if (behavior === "weak") {

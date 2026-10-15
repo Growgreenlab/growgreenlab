@@ -215,9 +215,9 @@ function baselineTargets(rng: () => number): { bid: number[]; ask: number[] } {
 function classTargets(
   p: FlowParams,
   tickIndex: number,
+  price: number,
   phase: FlowPhase,
-  rng: () => number,
-  midC: number
+  rng: () => number
 ): { bid: number[]; ask: number[] } {
   let bidTouch = 400, askTouch = 400, bidVar = 300, askVar = 300;
   const bidExtra = [0, 0, 0, 0, 0];
@@ -226,33 +226,66 @@ function classTargets(
   switch (p.behavior) {
     case "clean":
       if (phase === "breakout") {
-        bidTouch = 800; askTouch = 150; bidVar = 400; askVar = 120;
-        bidExtra[0] = 600; bidExtra[1] = 400; // stacked support under the break
+        // F6: strong but credible — depth ratio ≈ 2–2.5, not the old
+        // ~6x class constant. Bids stack, asks stay thin ENOUGH to be
+        // consumed visibly, but the book no longer decides by itself.
+        bidTouch = 700; askTouch = 360; bidVar = 350; askVar = 140;
+        bidExtra[0] = 250; bidExtra[1] = 150; // stacked support under the break
       } else if (phase === "resolution") {
         bidTouch = 600; askTouch = 500;
       }
       break;
     case "weak":
-      if (phase !== "approach") {
-        bidTouch = 150; askTouch = 150; bidVar = 120; askVar = 120;
+      if (phase === "breakout") {
+        bidTouch = 180; askTouch = 180; bidVar = 90; askVar = 90;
+      } else if (phase === "resolution") {
+        bidTouch = 240; askTouch = 240; bidVar = 110; askVar = 110;
       }
       break;
     case "failed":
       if (phase === "breakout") {
         bidTouch = 500; askTouch = 300; bidVar = 300; askVar = 200;
-        // The wall: a large offer two cents above the HOD level. If that
-        // exact rung exists in this ladder its target grows; otherwise the
-        // second ask rung carries extra size (price never moves to fake it).
-        askExtra[1] += 1200;
+        // Absorption at the top: while price trades at/above the level,
+        // heavy supply leans on the near ask rungs — a wall a couple of
+        // cents over the market that buyers must chew through. (The
+        // pinned wall AT level+2¢ is applied in generateBook, which
+        // knows the spread-aware rung index and the previous book — F7.)
+        if (price >= p.level) {
+          askExtra[0] += 700;
+          askExtra[1] += 3000;
+          askExtra[2] += 1200;
+        }
       } else if (phase === "resolution") {
         bidTouch = 150; askTouch = 900; bidVar = 120; askVar = 500;
       }
       break;
     case "ambiguous": {
-      const flicker = Math.sin(tickIndex / 37) > 0 ? 1.6 : 0.6;
-      bidTouch = 400 * flicker; askTouch = 400 / flicker;
-      if (rng() > 0.7) {
-        // Phantom size: a target that appears for one update, then goes.
+      // Redesigned (audit): the old sin(tick/37) "flicker" had a period
+      // longer than the whole approach — a slow swell that fingerprinted
+      // the class. Now the lean is re-randomized PER CANDLE, wobble is
+      // confined within the candle, and approach amplitude is mild.
+      const candleIndex = Math.floor(tickIndex / FLOW_UPDATES_PER_CANDLE);
+      const updateIndex = tickIndex % FLOW_UPDATES_PER_CANDLE;
+      const candleRng = mulberry32(p.seed * 31 + candleIndex * 1013 + 7);
+      const leanBid = candleRng() > 0.5;
+      const wobble =
+        1 + 0.15 * Math.sin((updateIndex / FLOW_UPDATES_PER_CANDLE) * Math.PI * 2 + candleRng() * Math.PI * 2);
+      if (phase === "breakout") {
+        // Designed conflict: alternate the heavy side candle by candle.
+        bidTouch = leanBid ? 640 : 250;
+        askTouch = leanBid ? 250 : 640;
+        bidVar = 260; askVar = 260;
+      } else if (phase === "resolution") {
+        bidTouch = (leanBid ? 520 : 330) * wobble;
+        askTouch = (leanBid ? 330 : 520) * wobble;
+        bidVar = 240; askVar = 240;
+      } else {
+        bidTouch = 400 * wobble;
+        askTouch = 400 / wobble;
+      }
+      if (phase !== "approach" && rng() > 0.7) {
+        // Phantom size (kept — it read as genuinely ambiguous): a target
+        // that appears for one update, then goes. Breakout/resolution only.
         const extra = rng() > 0.5 ? bidExtra : askExtra;
         extra[Math.floor(rng() * 3)] += Math.round(1200 * rng());
       }
@@ -262,12 +295,6 @@ function classTargets(
 
   const bid = rungSizes(bidTouch + rng() * bidVar, bidExtra);
   const ask = rungSizes(askTouch + rng() * askVar, askExtra);
-  if (p.behavior === "failed" && phase === "breakout") {
-    // Exact wall rung, when the ladder contains level + 2 cents.
-    const wallC = Math.round(p.level * 100) + 2;
-    const idx = wallC - midC - 1;
-    if (idx >= 0 && idx < 5) ask[idx] += 2500;
-  }
   return { bid, ask };
 }
 
@@ -279,13 +306,13 @@ function classTargets(
 function depthTargets(
   p: FlowParams,
   tickIndex: number,
+  price: number,
   phase: FlowPhase,
   rng: () => number,
-  midC: number,
   ctx: FlowContext
 ): { bid: number[]; ask: number[] } {
   const pers = personalityFor(p.seed);
-  let { bid, ask } = classTargets(p, tickIndex, phase, rng, midC);
+  let { bid, ask } = classTargets(p, tickIndex, price, phase, rng);
   if (ctx.ramp < 1) {
     const base = baselineTargets(rng);
     bid = bid.map((v, i) => lerp(base.bid[i], v, ctx.ramp));
@@ -334,7 +361,17 @@ export function generateBook(
   const rng = mulberry32(p.seed * 7919 + tickIndex * 104729 + 13);
   const midC = Math.round(price * 100); // last price in cents
   const hs = halfSpreadForVol(c.volC);
-  const targets = depthTargets(p, tickIndex, phase, rng, midC, c);
+  const targets = depthTargets(p, tickIndex, price, phase, rng, c);
+
+  // F7 — Failed's wall, pinned BY PRICE at level + 2¢. It applies while
+  // the ladder actually contains that price (price within a few cents of
+  // the level during the breakout), scaled by personality; persistence
+  // and slow decay are handled in the evolve step below.
+  const wallC = Math.round(p.level * 100) + 2;
+  const wallIdx = wallC - midC - hs;
+  const wallActive =
+    p.behavior === "failed" && phase === "breakout" && wallIdx >= 0 && wallIdx < 5;
+  if (wallActive) targets.ask[wallIdx] += 2500 * pers.wallScale;
 
   // Consumption: if price moved up since the previous book, offers near
   // the touch were eaten into; if it moved down, bids were. Shave the
@@ -347,27 +384,63 @@ export function generateBook(
     if (moved > 0) askShave = Math.max(0.4, 1 - 0.12 * moved);
     if (moved < 0) bidShave = Math.max(0.4, 1 + 0.12 * moved);
   }
+  // F8 — Weak's sellers requote almost instantly: the consumption shave
+  // barely applies to its ask side, so "replenishment" is a readable
+  // dynamic of its own, not just thinness.
+  if (p.behavior === "weak") askShave = Math.max(askShave, 0.92);
   const prevBidByCents = new Map((prev?.bids ?? []).map((l) => [Math.round(l.price * 100), l.size]));
   const prevAskByCents = new Map((prev?.asks ?? []).map((l) => [Math.round(l.price * 100), l.size]));
 
   const stepCap = 0.35 * pers.refillScale;
-  const evolve = (target: number, prevSize: number | undefined, shave: number): number => {
+  // Weak ask refill cap: faster than the standard cap, but never scaled
+  // past 0.45 — beyond that a single-window jump stops looking like
+  // requoting and starts looking like teleporting depth.
+  const askStepCap = p.behavior === "weak" ? 0.45 * Math.min(pers.refillScale, 1) : stepCap;
+  const evolve = (
+    target: number,
+    prevSize: number | undefined,
+    shave: number,
+    cap: number,
+    isWall: boolean
+  ): number => {
     if (prevSize == null) {
       // Fresh rung: start near target.
       return Math.max(1, Math.round(target * (0.85 + rng() * 0.3)));
     }
-    // Bounded step toward target (≤ stepCap of current), then the shave.
-    const step = Math.max(-stepCap * prevSize, Math.min(stepCap * prevSize, target - prevSize));
-    return Math.max(1, Math.round((prevSize + step) * shave * (0.95 + rng() * 0.1)));
+    // Bounded step toward target (≤ cap of current), then the shave.
+    const step = Math.max(-cap * prevSize, Math.min(cap * prevSize, target - prevSize));
+    let size = Math.max(1, Math.round((prevSize + step) * shave * (0.95 + rng() * 0.1)));
+    // F7: once the wall exists at this price it decays slowly (~5% per
+    // window) instead of target-seeking away — a resting order, not a
+    // quote that teleports with the ladder.
+    if (isWall) size = Math.max(size, Math.round(prevSize * 0.95));
+    return size;
   };
+
+  // F7 (cont.): during Failed's breakout at/above the level, large
+  // offers near the touch are STICKY — once size shows at a price it
+  // decays at ~5%/window rather than stepping down when the ladder
+  // re-anchors around it. Absorption you can watch, not a quote that
+  // evaporates as price moves a cent.
+  const stickyAsk =
+    p.behavior === "failed" && phase === "breakout" && price >= p.level;
 
   const bids: OrderBookLevel[] = [];
   const asks: OrderBookLevel[] = [];
   for (let i = 0; i < 5; i++) {
     const bidC = midC - hs - i;
     const askC = midC + hs + i;
-    bids.push({ price: bidC / 100, size: evolve(targets.bid[i], prevBidByCents.get(bidC), bidShave) });
-    asks.push({ price: askC / 100, size: evolve(targets.ask[i], prevAskByCents.get(askC), askShave) });
+    bids.push({ price: bidC / 100, size: evolve(targets.bid[i], prevBidByCents.get(bidC), bidShave, stepCap, false) });
+    asks.push({
+      price: askC / 100,
+      size: evolve(
+        targets.ask[i],
+        prevAskByCents.get(askC),
+        askShave,
+        askStepCap,
+        (wallActive && askC === wallC) || (stickyAsk && i <= 2)
+      ),
+    });
   }
 
   return { bids, asks, timestamp };
@@ -382,6 +455,7 @@ export function generateBook(
 function buyProbFor(
   p: FlowParams,
   tickIndex: number,
+  price: number,
   phase: FlowPhase,
   tickDirection: 1 | -1 | 0,
   ctx: FlowContext
@@ -394,16 +468,31 @@ function buyProbFor(
       classP = phase === "resolution" ? 0.65 : 0.7;
       break;
     case "weak":
-      // Weak = indecisive: tick direction barely moves the needle
-      classP = 0.5 + tickDirection * 0.05;
-      dirWeight = 0.05;
+      if (phase === "resolution" || ctx.state === "rejected") {
+        // F8: once price has faded back below the level, the tape leans
+        // mildly NET SELL — it must not keep printing buy-skewed bounce
+        // tape while the break dies. While still above, stay indecisive.
+        classP = price < p.level ? 0.45 : 0.5;
+        dirWeight = 0.05;
+      } else {
+        // Weak = indecisive: tick direction barely moves the needle
+        classP = 0.5 + tickDirection * 0.05;
+        dirWeight = 0.05;
+      }
       break;
     case "failed":
       classP = phase === "resolution" ? 0.3 : 0.6;
       break;
-    case "ambiguous":
-      classP = 0.5 + Math.sin(tickIndex / 23) * 0.2;
+    case "ambiguous": {
+      // Per-candle re-randomized phase (audit fix): the old global sine
+      // could park near its ceiling for an entire candle, printing the
+      // strongest "buy tape" in the system on the cross. Capped at 0.7.
+      const candleIndex = Math.floor(tickIndex / FLOW_UPDATES_PER_CANDLE);
+      const phaseOff = mulberry32(p.seed * 17 + candleIndex * 6151 + 3)() * Math.PI * 2;
+      classP = 0.5 + 0.18 * Math.sin(tickIndex / 5 + phaseOff);
+      dirWeight = 0.1;
       break;
+    }
   }
   // Tick direction nudges the print side (uptick = buyer-initiated)
   classP += tickDirection * dirWeight;
@@ -414,6 +503,16 @@ function buyProbFor(
     prob = lerp(baseline, classP, ctx.ramp);
   }
   prob += personalityFor(p.seed).buyProbJitter;
+  // Clean: on up-windows at/above the level during the break, buyers
+  // are lifting the offer — floor the bias so the cross-candle tape
+  // backs the story instead of coin-flipping (with F4's smaller, more
+  // numerous prints this concentrates the candle's buy-share).
+  if (p.behavior === "clean" && phase === "breakout" && price >= p.level) {
+    prob = Math.max(prob, tickDirection >= 0 ? 0.82 : 0.68);
+  }
+  if (p.behavior === "ambiguous") {
+    return Math.min(0.7, Math.max(0.28, prob));
+  }
   return Math.min(0.92, Math.max(0.08, prob));
 }
 
@@ -425,10 +524,20 @@ function buyProbFor(
  * `tickVolume` EXACTLY — sum(sizes) === floor(tickVolume) — so Time &
  * Sales always reconciles with candle volume. A window with no traded
  * volume produces no prints (an honest quiet tape, not invented prints).
- * Print count is display aggregation: 1 print per window, 2 during the
- * breakout phase — the underlying window volume is never altered, only
- * grouped. Side classification: scenario behavior/phase bias nudged by
- * the window's actual tick direction (uptick ⇒ buyer-initiated).
+ *
+ * F4 — print COUNT scales with the window's traded volume (~650 shares
+ * per print, clamped 1–8): quiet windows stay sparse, climactic windows
+ * print actively, and per-candle tape statistics concentrate near their
+ * bias instead of swinging on 12 coin flips. The underlying window
+ * volume is never altered, only grouped.
+ *
+ * F3 — prints execute AT the prevailing quote, by side: a buyer-
+ * initiated print is priced at the current best ask, a seller-initiated
+ * print at the current best bid (the book DrillSim just generated for
+ * this window). Side and price location can no longer contradict each
+ * other. Stateless callers without a book fall back to last ± half-spread.
+ * Side classification: scenario behavior/phase bias nudged by the
+ * window's actual tick direction (uptick ⇒ buyer-initiated).
  */
 export function generatePrints(
   p: FlowParams,
@@ -438,6 +547,7 @@ export function generatePrints(
   phase: FlowPhase,
   timestamp: number,
   tickDirection: 1 | -1 | 0,
+  book?: OrderBookSnapshot,
   ctx?: FlowContext
 ): TradePrint[] {
   const c = ctx ?? defaultCtx(phase);
@@ -447,10 +557,14 @@ export function generatePrints(
   let remaining = Math.max(0, Math.floor(tickVolume));
   if (remaining === 0) return prints;
 
-  // One print per window normally; two during the breakout phase when
-  // the tape is genuinely active.
-  const nPrints = Math.min(remaining, phase === "breakout" && rng() > 0.5 ? 2 : 1);
-  const buyProb = buyProbFor(p, tickIndex, phase, tickDirection, c);
+  const nPrints = Math.min(
+    remaining,
+    Math.max(1, Math.min(8, Math.round(tickVolume / 650)))
+  );
+  const buyProb = buyProbFor(p, tickIndex, price, phase, tickDirection, c);
+  const hsC = halfSpreadForVol(c.volC);
+  const askPx = book ? book.asks[0].price : round2(price + hsC / 100);
+  const bidPx = book ? book.bids[0].price : round2(price - hsC / 100);
   for (let i = 0; i < nPrints; i++) {
     const printsLeft = nPrints - i;
     const size =
@@ -462,11 +576,12 @@ export function generatePrints(
           );
     remaining -= size;
 
+    const side = rng() < buyProb ? "buy" : "sell";
     prints.push({
-      price: round2(price + (rng() - 0.5) * 0.01),
+      price: side === "buy" ? askPx : bidPx,
       size,
       timestamp: timestamp + i,
-      side: rng() < buyProb ? "buy" : "sell",
+      side,
     });
   }
   return prints;
@@ -501,9 +616,15 @@ export function phaseForCandle(candleIndex: number, checkpointIndex: number): Fl
 export function flowPhaseForState(
   state: HodMarketState,
   candleIndex: number,
-  checkpointIndex: number
+  checkpointIndex: number,
+  behavior?: FlowBehavior
 ): FlowPhase {
   if (state === "rejected") return "resolution";
+  // Failed's fake acceptance is still the trap being armed: while price
+  // holds above the level, flow stays in breakout character (lure +
+  // wall) until a rejection confirms — distribution keyed to the event,
+  // not to the calendar.
+  if (behavior === "failed" && state === "accepting") return "breakout";
   if (candleIndex > checkpointIndex + 1) return "resolution";
   if (state === "accepting" && candleIndex > checkpointIndex) return "resolution";
   if (state === "breaking" || state === "accepting") return "breakout";
