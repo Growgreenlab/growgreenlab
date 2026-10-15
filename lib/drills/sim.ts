@@ -31,16 +31,20 @@ import type { Candle } from "../types";
 import {
   generateBook,
   generatePrints,
-  phaseForCandle,
+  flowPhaseForState,
+  rampFor,
   flowTimestamp,
   FLOW_UPDATES_PER_CANDLE,
   TICKS_PER_FLOW_UPDATE,
   DRILL_TICKS_PER_CANDLE,
   type FlowBehavior,
+  type FlowContext,
   type FlowParams,
+  type FlowPhase,
   type OrderBookSnapshot,
   type TradePrint,
 } from "./orderflow";
+import { hodMarketState } from "./hodState";
 import type { DrillScenario } from "./types";
 
 /** Scenario id → order-flow behavior. Internal: never shown pre-answer. */
@@ -133,6 +137,10 @@ export class DrillSim {
   private printedVolThisCandle = 0;
   private windowStartPrice: number;
   private lastPrice: number;
+  /** Previous flow window's price (volatility EMA input, F5). */
+  private prevWindowPrice: number;
+  /** Recent per-window volatility EMA, in cents (spread driver, F5). */
+  private volEmaC = 0.6;
   private checkpointSnap: { simTimeMs: number; candleIndex: number } | null = null;
 
   constructor(scenario: DrillScenario) {
@@ -152,12 +160,13 @@ export class DrillSim {
     const hist = scenario.candles[historyCount - 1];
     this.windowStartPrice = hist.c;
     this.lastPrice = hist.c;
+    this.prevWindowPrice = hist.c;
 
     // Seed the panels with the last history candle's flow so Level 2 /
     // Time & Sales aren't empty when the drill starts.
-    const phase = phaseForCandle(historyCount - 1, scenario.checkpointIndex);
+    const { phase, ctx } = this.flowContextFor(historyCount - 1);
     const ts = flowTimestamp(hist.t, FLOW_UPDATES_PER_CANDLE - 1);
-    this.book = generateBook(this.fp, 0, hist.c, phase, ts);
+    this.book = generateBook(this.fp, 0, hist.c, phase, ts, undefined, ctx);
     const seedPrints = generatePrints(
       this.fp,
       0,
@@ -165,9 +174,29 @@ export class DrillSim {
       Math.max(1, Math.round(hist.v / FLOW_UPDATES_PER_CANDLE)),
       phase,
       ts,
-      0
+      0,
+      ctx
     );
     this.prints = [...seedPrints].reverse().slice(0, PRINT_BUFFER_MAX);
+  }
+
+  /**
+   * Flow phase + context for a candle, derived from REVEALED data only:
+   * the HOD event state over finalized candles + the forming candle
+   * (F2), the class-character ramp (F1), and the volatility EMA (F5).
+   * Pure function of the tick stream so far — chunking-invariant.
+   */
+  private flowContextFor(candleIndex: number): { phase: FlowPhase; ctx: FlowContext } {
+    const state = hodMarketState(
+      this.scenario.hod,
+      this.engine.revealed,
+      this.formingCandle()
+    );
+    const cp = this.scenario.checkpointIndex;
+    return {
+      phase: flowPhaseForState(state, candleIndex, cp),
+      ctx: { ramp: rampFor(state, candleIndex, cp), state, volC: this.volEmaC },
+    };
   }
 
   /** Simulated elapsed time (ms) — derived from ticks, never wall clock. */
@@ -272,13 +301,21 @@ export class DrillSim {
         : this.lastPrice < this.windowStartPrice
           ? -1
           : 0;
-    const phase = phaseForCandle(candleIndex, this.scenario.checkpointIndex);
+
+    // F5: fold this window's move into the volatility EMA before the
+    // book is quoted, so active windows widen the spread as they happen.
+    const instVolC = Math.abs(this.lastPrice - this.prevWindowPrice) * 100;
+    this.volEmaC = this.volEmaC * 0.65 + instVolC * 0.35;
+    this.prevWindowPrice = this.lastPrice;
+
+    // F2/F1: phase and class-character ramp from revealed price events.
+    const { phase, ctx } = this.flowContextFor(candleIndex);
     const flowTick = candleIndex * FLOW_UPDATES_PER_CANDLE + updateIndex;
     const ts = flowTimestamp(candle.t, updateIndex);
 
-    const book = generateBook(this.fp, flowTick, this.lastPrice, phase, ts, this.book ?? undefined);
+    const book = generateBook(this.fp, flowTick, this.lastPrice, phase, ts, this.book ?? undefined, ctx);
     this.book = book;
-    const newPrints = generatePrints(this.fp, flowTick, this.lastPrice, windowVol, phase, ts, dir);
+    const newPrints = generatePrints(this.fp, flowTick, this.lastPrice, windowVol, phase, ts, dir, ctx);
     if (newPrints.length > 0) {
       this.prints = [...[...newPrints].reverse(), ...this.prints].slice(0, PRINT_BUFFER_MAX);
     }
