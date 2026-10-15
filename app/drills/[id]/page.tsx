@@ -53,6 +53,7 @@ import {
   formatSimTimeMs, DEFAULT_CONFIDENCE, type DrillDecision,
 } from "../../../lib/drills/decision";
 import { buildReviewModel, scoreDecision } from "../../../lib/drills/scoring";
+import { buildEvaluation, type EvalGrade } from "../../../lib/drills/evaluation";
 import { DrillSim, SimClock } from "../../../lib/drills/sim";
 import { HOD_STATE_LABEL } from "../../../lib/drills/hodState";
 import LwcChart from "../../../components/LwcChart";
@@ -317,6 +318,13 @@ export default function DrillRunner() {
   const sim = simRef.current;
   const review = phase === "teaching" && decision
     ? buildReviewModel(scenario, decision)
+    : null;
+
+  // Decision evaluation (Stage B): teaching phase only — built from
+  // the sealed decision + checkpoint evidence, never rendered before
+  // the reveal and never an input to scoring.
+  const evaluation = phase === "teaching" && decision
+    ? buildEvaluation(scenario, decision, { candleIndex: decision.candleIndex })
     : null;
 
   // HOD header data — revealed data only (engine boundary), never the
@@ -593,6 +601,54 @@ export default function DrillRunner() {
             </ul>
           </div>
 
+          {/* Decision evaluation — additive Stage B section. Grades
+              the decision from checkpoint evidence only; the scoring
+              above is unchanged and remains the source of truth. */}
+          {evaluation && (
+            <div style={{ background: "#0d1117", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 12, padding: 24, marginBottom: 16 }}>
+              <h3 style={{ fontSize: 16, fontWeight: 800, marginBottom: 8 }}>Decision evaluation</h3>
+              <p style={{ fontSize: 15, fontWeight: 700, lineHeight: 1.5, marginBottom: 16 }}>{evaluation.headline}</p>
+              {evaluation.dimensions.map((d) => (
+                <div key={d.key} style={{ marginBottom: 14 }}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}>
+                    <span style={{ fontSize: 13, fontWeight: 800 }}>{d.label}</span>
+                    <EvalGradeChip grade={d.grade} />
+                  </div>
+                  <p style={{ fontSize: 14, lineHeight: 1.6, color: "var(--ggl-muted)", margin: 0 }}>{d.note}</p>
+                </div>
+              ))}
+              {evaluation.didWell.length > 0 && (
+                <div style={{ marginBottom: 14 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "#2ebd85", marginBottom: 6 }}>WHAT YOU DID WELL</div>
+                  <ul style={{ margin: 0, paddingLeft: 20 }}>
+                    {evaluation.didWell.map((w, i) => (
+                      <li key={i} style={{ fontSize: 14, lineHeight: 1.6, marginBottom: 6 }}>{w}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {evaluation.keyMistake && (
+                <div style={{ marginBottom: 14 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "#f6465d", marginBottom: 6 }}>KEY MISTAKE</div>
+                  <p style={{ fontSize: 14, lineHeight: 1.6, margin: 0 }}>{evaluation.keyMistake}</p>
+                </div>
+              )}
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#f0b429", marginBottom: 6 }}>EVIDENCE AT YOUR LOCK</div>
+                <ul style={{ margin: 0, paddingLeft: 20 }}>
+                  {evaluation.evidence.map((e, i) => (
+                    <li key={i} style={{ fontSize: 14, lineHeight: 1.6, marginBottom: 6 }}>{e}</li>
+                  ))}
+                </ul>
+              </div>
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#f0b429", marginBottom: 6 }}>WATCH FOR NEXT TIME</div>
+                <p style={{ fontSize: 14, lineHeight: 1.6, margin: 0 }}>{evaluation.watchFor}</p>
+              </div>
+              <p style={{ fontSize: 12, color: "#6e7681", lineHeight: 1.6, margin: 0 }}>{evaluation.standingLine}</p>
+            </div>
+          )}
+
           {/* Reproducibility — review stage only */}
           <p style={{ fontSize: 12, color: "#6e7681", marginBottom: 24 }}>
             {resolved.label} · {resolved.mode === "blind" ? "Blind Practice" : "Focused Learning"}
@@ -646,6 +702,19 @@ function VerdictChip({ label, tone }: { label: string; tone: "correct" | "partia
   return (
     <span style={{
       display: "inline-block", padding: "4px 14px", borderRadius: 20, fontSize: 13, fontWeight: 700,
+      background: `${color}26`, color,
+    }}>
+      {label}
+    </span>
+  );
+}
+
+function EvalGradeChip({ grade }: { grade: EvalGrade }) {
+  const color = grade === "strong" ? "#2ebd85" : grade === "developing" ? "#f0b429" : "#f6465d";
+  const label = grade === "strong" ? "Strong" : grade === "developing" ? "Developing" : "Weak";
+  return (
+    <span style={{
+      display: "inline-block", padding: "2px 10px", borderRadius: 20, fontSize: 12, fontWeight: 700,
       background: `${color}26`, color,
     }}>
       {label}
