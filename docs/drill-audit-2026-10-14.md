@@ -180,3 +180,82 @@ Speed `s` means **s simulated minutes per wall-clock minute**: one
 1-minute candle forms in `60 / s` wall seconds. 1x is real time.
 Labels [1, 2, 4, 8, 16, 32]x, default 8x (7.5 s per candle). The event
 sequence and final state are identical at every speed.
+
+## Addendum (2026-10-15) — F1–F10 order-flow rebuild
+
+A follow-up audit measured the *live* Level 2 / Time & Sales stream
+(headless DrillSim runs, all 12 scenarios) and found the flow behaviors
+were per-class templates riding on four structural simplifications:
+index-scheduled phases, a fixed 2¢ spread, 1–2 prints per window, and
+print side decoupled from print price. The F1–F10 rebuild (commits
+`480a3a4`, `486ad7e`, and the Stage 3 test commit) replaced that
+architecture while preserving determinism, exact volume partition, and
+the single DrillSim timeline:
+
+- **Event-triggered phases (F2).** DrillSim derives the flow phase per
+  window from `hodMarketState` over revealed candles only
+  (`flowPhaseForState`). "Testing" (coiling at the level) keeps
+  approach character; breakout character begins at the cross itself;
+  distribution begins on the first *finalized* close back below the
+  level — rejection requires a confirming close, so the Failed lure
+  survives inside the cross candle. Failed's fake acceptance keeps
+  breakout character until rejection confirms.
+- **Class-neutral approach (F1).** One shared baseline book and tape
+  bias; class targets blend in via a ramp (`rampFor`: candle distance
+  to the checkpoint, forced up by HOD proximity). Measured after:
+  approach depth 2,497–3,263 and ratio 0.95–1.10 across ALL 12
+  scenarios (Weak was ~1,060 depth before; Ambiguous ratio 1.35–1.72).
+- **Volatility spread (F5).** Half-spread 1–3¢ from a per-window
+  volatility EMA maintained by DrillSim (`halfSpreadForVol`). Quiet
+  approach quotes ≈2¢ total; climactic windows widen to 6¢. Ladder
+  invariants (integer cents, strictly ordered, brackets last price)
+  are unchanged and still asserted per window.
+- **Prints at the quote (F3).** A buy print is priced at the
+  contemporaneous best ask, a sell at the best bid — the book
+  DrillSim just generated for that window. Buy-at-ask went from 11%
+  of buy prints to 100%; side and price can no longer contradict.
+- **Volume-scaled print count (F4).** ~650 shares per print (clamp
+  1–8 per window), exact partition preserved. Per-candle tape now
+  concentrates near its bias: Clean cross-candle buy-share
+  0.49/0.96/0.49 → 0.76/0.85/0.73 (with the at/above-level breakout
+  buy-probability floor).
+- **Damped Clean book (F6).** Breakout depth ratio ≈ 2.2–2.6 (was
+  5.8–6.9, with ask totals a memorizable 543–555; now 1,011–1,210
+  under personality jitter).
+- **Price-pinned Failed wall (F7).** A wall target at level+2¢ while
+  the ladder contains it, heavy sticky supply on the near ask rungs
+  while price is at/above the level, and a ~5%/window decay floor so
+  resting size persists instead of re-keying away. Wall presence in
+  at/above-HOD breakout windows: 3% / 50%-of-2 / 21% → 79% / 100% / 62%.
+- **Weak fade + replenishment (F8).** Resolution tape leans mildly
+  net-sell once price is below the level (bleed scenarios' resolution
+  buy-share 0.67/0.60 → 0.48/0.53; weak-001 0.37 → 0.41), and Weak's
+  asks requote near-instantly (consumption-shave floor 0.92, faster
+  ask step cap) so replenishment is a dynamic, not just thinness.
+- **Per-scenario personality (F9).** Deterministic scalars from the
+  scenario seed (`personalityFor`: depth scale 0.85–1.20, touch
+  jitter, tape-bias jitter ±0.04, refill scale, wall scale). Class
+  means stay in band; the shared statistical fingerprint is gone.
+- **Ambiguous redesign.** The class fingerprint was a sine with a
+  ~232-window period (longer than the approach). The lean is now
+  re-randomized per candle, wobble is within-candle, buy-probability
+  is capped at 0.7 with a per-candle phase offset, and the breakout
+  book alternates its heavy side candle by candle (designed conflict).
+  Approach depth CV 0.38–0.44 → 0.16–0.19; lag-1 autocorrelation
+  0.73–0.79 → 0.09–0.35; cross-candle tape 0.81/0.95 → 0.57/0.43.
+  Phantom size is kept, gated to breakout/resolution.
+- **Path-level tests (F10).** `lib/drills/verify-flowpath.ts` asserts
+  against the evolved book along real price paths: wall presence,
+  distribution timing vs the first sub-HOD close, spread band and
+  responsiveness, exact volume conservation, 100% quote-priced
+  prints, approach-neutrality bands, and class-story bands.
+
+Checkpoint leakage re-analysis (after): no single approach-phase
+metric deterministically separates any class (best one-vs-rest
+threshold rules reach at most 11/12 and each is broken by another
+class's range). At the checkpoint, book+tape *in aggregate* identify
+Clean (the designed confident read); per-window values overlap
+broadly — 86% of individual Clean breakout windows fall inside the
+value range spanned by other classes' windows — and no single metric
+separates Weak / Failed / Ambiguous from each other at the snapshot
+a user actually sees.
