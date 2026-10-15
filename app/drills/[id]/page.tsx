@@ -54,16 +54,17 @@ import {
 } from "../../../lib/drills/decision";
 import { buildReviewModel, scoreDecision } from "../../../lib/drills/scoring";
 import {
-  buildEvaluation, snapshotOrderFlow,
+  buildEvaluation, snapshotOrderFlow, EVALUATION_STANDING_LINE,
   type EvalGrade, type FlowSnapshot,
 } from "../../../lib/drills/evaluation";
 import { DrillSim, SimClock } from "../../../lib/drills/sim";
+import { DRILL_TICKS_PER_CANDLE } from "../../../lib/drills/orderflow";
 import { HOD_STATE_LABEL } from "../../../lib/drills/hodState";
 import LwcChart from "../../../components/LwcChart";
 import Level2Panel from "../../../components/Level2Panel";
 import TimeSalesPanel from "../../../components/TimeSalesPanel";
 
-type DrillPhase = "intro" | "running" | "checkpoint" | "resolving" | "teaching";
+type DrillPhase = "intro" | "running" | "checkpoint" | "resolving" | "teaching" | "review";
 
 
 const CLASS_OPTIONS: { id: DecisionClassification; label: string }[] = [
@@ -141,6 +142,12 @@ export default function DrillRunner() {
   // teaching-screen evaluation; null = no snapshot, evaluation omits
   // flow evidence entirely.
   const [flowSnap, setFlowSnap] = useState<FlowSnapshot | null>(null);
+  // Decision-point review (P1): a SECOND DrillSim reconstructed at
+  // the checkpoint for post-drill study. It never touches the live
+  // sim, the ledger, or the decision — Back to results re-renders the
+  // teaching screen from the same untouched state.
+  const [reviewRevealed, setReviewRevealed] = useState(false);
+  const [reviewPlaying, setReviewPlaying] = useState(false);
   // Blind cycle: the queue's next slug once this drill is submitted
   // (undefined = not loaded yet, null = cycle complete).
   const [nextSlug, setNextSlug] = useState<string | null | undefined>(undefined);
@@ -153,6 +160,8 @@ export default function DrillRunner() {
 
   const simRef = useRef<DrillSim | null>(null);
   const clockRef = useRef<SimClock | null>(null);
+  const reviewSimRef = useRef<DrillSim | null>(null);
+  const reviewClockRef = useRef<SimClock | null>(null);
   const ledgerRef = useRef<DecisionLedger>(new DecisionLedger());
   const lockedRef = useRef(false);
   const speedRef = useRef(speed);
@@ -164,6 +173,10 @@ export default function DrillRunner() {
   useEffect(() => {
     simRef.current = null;
     clockRef.current = null;
+    reviewSimRef.current = null;
+    reviewClockRef.current = null;
+    setReviewRevealed(false);
+    setReviewPlaying(false);
     ledgerRef.current = new DecisionLedger();
     lockedRef.current = false;
     setPhase("intro");
@@ -197,6 +210,10 @@ export default function DrillRunner() {
     }
     simRef.current = new DrillSim(scenario);
     clockRef.current = new SimClock();
+    reviewSimRef.current = null;
+    reviewClockRef.current = null;
+    setReviewRevealed(false);
+    setReviewPlaying(false);
     setSelClass(null);
     setSelAction(null);
     setConfidence(DEFAULT_CONFIDENCE);
@@ -316,6 +333,76 @@ export default function DrillRunner() {
     reveal();
   };
 
+  // ── Decision-point review (P1) ──────────────────────────────────
+  // Reconstruct the checkpoint moment in a SECOND DrillSim: a fresh
+  // sim for the same scenario advanced candle-by-candle to the exact
+  // tick the checkpoint candle finalized — the tick the decision's
+  // snapshot was stamped on. One-candle chunks land exactly on candle
+  // boundaries, and DrillSim's determinism contract (state is a pure
+  // function of ticks advanced) makes the reconstruction identical to
+  // the live run at that tick: same candles, same book, same tape
+  // (pinned in verify-eval section I). Held paused: no scheduler runs
+  // in the review phase until the trader reveals the outcome.
+  const enterReview = () => {
+    if (!scenario || !decision) return;
+    const rs = new DrillSim(scenario);
+    while (!rs.checkpointReached && !rs.atEnd) {
+      rs.advance(DRILL_TICKS_PER_CANDLE);
+    }
+    reviewSimRef.current = rs;
+    reviewClockRef.current = new SimClock();
+    setReviewRevealed(false);
+    setReviewPlaying(false);
+    setChartFocused(false);
+    setUiVersion((v) => v + 1);
+    setPhase("review");
+  };
+
+  const exitReview = () => {
+    // Back to results: the teaching screen re-renders from the same
+    // untouched decision/review/evaluation state. The review sim is
+    // discarded; nothing about the results can change by visiting.
+    setReviewPlaying(false);
+    reviewSimRef.current = null;
+    reviewClockRef.current = null;
+    setReviewRevealed(false);
+    setPhase("teaching");
+  };
+
+  const skipReviewToEnd = () => {
+    const rs = reviewSimRef.current;
+    if (!rs) return;
+    rs.advanceToEnd();
+    setReviewPlaying(false);
+    setUiVersion((v) => v + 1);
+  };
+
+  // Review playback — the ONLY place review-sim time is requested,
+  // and only after the trader reveals the outcome. Same SimClock
+  // pacing as the live scheduler; reaching the scenario end stops it.
+  useEffect(() => {
+    if (phase !== "review" || !reviewPlaying) return;
+    const rs = reviewSimRef.current;
+    const clock = reviewClockRef.current;
+    if (!rs || !clock) return;
+    clock.reset();
+    let raf = 0;
+    const loop = (now: number) => {
+      const due = clock.frame(now, speedRef.current);
+      if (due > 0) {
+        rs.advance(due);
+        setUiVersion((v) => v + 1);
+        if (rs.atEnd) {
+          setReviewPlaying(false);
+          return;
+        }
+      }
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [phase, reviewPlaying, id]);
+
   // Blind cycle: once this drill's decision is sealed and we're on the
   // review, learn what the queue serves next (for the button label).
   useEffect(() => {
@@ -354,6 +441,19 @@ export default function DrillRunner() {
   const review = phase === "teaching" && decision
     ? buildReviewModel(scenario, decision)
     : null;
+
+  // Decision-point review data — the review sim's OWN revealed
+  // boundary, read exactly like the live run reads its sim. Before
+  // the reveal this can only ever show candles up to the checkpoint:
+  // the review sim has not advanced past it.
+  const reviewSim = phase === "review" ? reviewSimRef.current : null;
+  const reviewEngine = reviewSim?.engine ?? null;
+  const reviewCandles = reviewEngine ? reviewEngine.displayCandles : [];
+  const reviewPrice = reviewEngine ? reviewEngine.displayPrice : scenario.candles[0].o;
+  const reviewHodLive = reviewEngine ? reviewEngine.hod : scenario.hod;
+  const reviewState = reviewSim ? reviewSim.marketState : "approaching";
+  const reviewDistPct = ((reviewPrice - scenario.hod) / scenario.hod) * 100;
+  const reviewAtEnd = reviewSim ? reviewSim.atEnd : false;
 
   // Decision evaluation (Stage B): teaching phase only — built from
   // the sealed decision + checkpoint evidence, never rendered before
@@ -752,10 +852,18 @@ export default function DrillRunner() {
                 More Focused Drills →
               </Link>
             )}
+            <button onClick={enterReview}
+              style={{ padding: "12px 24px", borderRadius: 10, border: "1px solid rgba(66,216,121,0.55)", background: "rgba(66,216,121,0.12)", color: "#fff", fontWeight: 700, cursor: "pointer", fontSize: 14 }}>
+              Review Decision Point
+            </button>
             <button onClick={() => {
                 ledgerRef.current.startNewAttempt();
                 lockedRef.current = false;
                 simRef.current = null;
+                reviewSimRef.current = null;
+                reviewClockRef.current = null;
+                setReviewRevealed(false);
+                setReviewPlaying(false);
                 setDecision(null);
                 setFlowSnap(null);
                             setPhase("intro");
@@ -769,6 +877,148 @@ export default function DrillRunner() {
             </Link>
           </div>
         </div>
+      )}
+
+      {phase === "review" && decision && reviewSim && reviewEngine && (
+        <>
+          {/* Sealed decision banner — the trader's OWN locked record
+              only. The scenario's classification, the score, and every
+              teaching surface stay on the results screen; nothing here
+              can reveal them or any post-checkpoint candle. */}
+          <div style={{
+            background: "#0d1117", border: "1px solid rgba(66,216,121,0.35)",
+            borderRadius: 12, padding: 20, marginBottom: 12,
+          }}>
+            <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: 1.5, color: "#42d879", marginBottom: 6 }}>
+              DECISION POINT — REVIEW
+            </div>
+            <div style={{ fontSize: 13, color: "var(--ggl-muted)", marginBottom: 4 }}>
+              YOUR DECISION · locked at sim time {decisionLockLabel(decision)}
+              {` · confidence ${effectiveConfidence(decision)}/5`}
+            </div>
+            <div style={{ fontSize: 20, fontWeight: 800, marginBottom: 8 }}>
+              {DECISION_CLASS_LABEL[decision.classification]} — {ACTION_LABEL[decision.action]}
+            </div>
+            <p style={{ fontSize: 14, color: "var(--ggl-muted)", lineHeight: 1.6, marginBottom: 16 }}>
+              {reviewRevealed
+                ? "The outcome is revealed: the market below now plays out everything that happened after your lock."
+                : "The market is reconstructed exactly as it stood at your lock — chart, Level 2, and Time & Sales paused at the checkpoint. Nothing after the checkpoint exists here until you reveal the outcome."}
+            </p>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              {!reviewRevealed ? (
+                <button onClick={() => { setReviewRevealed(true); setReviewPlaying(true); }}
+                  style={{ padding: "10px 22px", borderRadius: 10, border: "none", background: "#42d879", color: "#06110b", fontWeight: 800, cursor: "pointer", fontSize: 14 }}>
+                  Reveal Outcome →
+                </button>
+              ) : !reviewAtEnd ? (
+                <>
+                  <button onClick={() => setReviewPlaying((p) => !p)}
+                    style={{ padding: "10px 18px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "#fff", cursor: "pointer", fontSize: 14 }}>
+                    {reviewPlaying ? "Pause" : "Play"}
+                  </button>
+                  <label style={{ fontSize: 12, color: "var(--ggl-muted)" }}>Speed</label>
+                  <select value={speed} onChange={(e) => setSpeed(Number(e.target.value))}
+                    style={{ padding: "4px 8px", borderRadius: 6, background: "#0d1117", color: "#fff", border: "1px solid rgba(255,255,255,0.15)" }}>
+                    {[1, 2, 4, 8, 16, 32].map((s) => <option key={s} value={s}>{s}x</option>)}
+                  </select>
+                  <button onClick={skipReviewToEnd}
+                    style={{ padding: "10px 18px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "#fff", cursor: "pointer", fontSize: 14 }}>
+                    Skip to End
+                  </button>
+                </>
+              ) : null}
+              <button onClick={exitReview}
+                style={{ padding: "10px 18px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "#fff", cursor: "pointer", fontSize: 14 }}>
+                Back to Results
+              </button>
+            </div>
+          </div>
+
+          {/* HOD readout — the review sim's revealed data only. */}
+          <div style={{
+            display: "flex", gap: 20, alignItems: "center", marginBottom: 10, flexWrap: "wrap",
+            padding: "8px 14px", background: "#0d1117",
+            border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8, fontSize: 13,
+          }}>
+            <span><span style={{ color: "#f0b429", fontWeight: 700 }}>HOD (breakout level):</span> <strong>${scenario.hod.toFixed(2)}</strong></span>
+            <span><span style={{ color: "var(--ggl-muted)" }}>Session high (live):</span> <strong>${reviewHodLive.toFixed(2)}</strong></span>
+            <span><span style={{ color: "var(--ggl-muted)" }}>Current:</span> <strong>${reviewPrice.toFixed(2)}</strong></span>
+            <span><span style={{ color: "var(--ggl-muted)" }}>Distance to HOD:</span> <strong style={{ color: reviewPrice >= scenario.hod ? "#2ebd85" : "#f0b429" }}>
+              {reviewPrice >= scenario.hod ? "+" : "−"}${Math.abs(reviewPrice - scenario.hod).toFixed(2)} ({reviewDistPct >= 0 ? "+" : ""}{reviewDistPct.toFixed(2)}%)
+            </strong></span>
+            <span><span style={{ color: "var(--ggl-muted)" }}>State:</span> <strong>{HOD_STATE_LABEL[reviewState]}</strong></span>
+            <span><span style={{ color: "var(--ggl-muted)" }}>Sim time:</span> <strong>{fmtSimTime(reviewSim.simTimeMs)}</strong>{reviewRevealed ? "" : " · Paused at checkpoint"}</span>
+            <button onClick={() => setChartFocused((f) => !f)} aria-pressed={chartFocused}
+              style={{ marginLeft: "auto", padding: "6px 14px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.15)", background: chartFocused ? "rgba(66,216,121,0.15)" : "transparent", color: "#fff", cursor: "pointer", fontSize: 13 }}>
+              {chartFocused ? "Exit focus" : "Expand chart"}
+            </button>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: chartFocused ? "1fr" : "1fr 300px", gap: 12 }} className="drill-grid">
+            <div style={{ minHeight: chartFocused ? 520 : 380 }}>
+              <LwcChart
+                candles={reviewCandles}
+                revealedCount={reviewCandles.length}
+                sessionKey={scenario.id}
+                countdown={null}
+                lastPrice={reviewPrice}
+                brackets={{ plannedSL: null, plannedTP: null, activeSL: null, activeTP: null }}
+                referenceLevels={[{ price: scenario.hod, label: "HOD", color: "#f0b429" }]}
+                fitOnLoad={true}
+                onPlannedDrag={() => {}}
+                onActiveDrag={() => {}}
+                drawings={[]}
+                onDrawingsChange={() => {}}
+                drawingTool="select"
+                onDrawingToolChange={() => {}}
+              />
+            </div>
+            {!chartFocused && (
+            <div className="drill-side-panels" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <div className="drill-desktop-panels" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                <Level2Panel book={reviewSim.book} level={scenario.hod} />
+                <TimeSalesPanel prints={reviewSim.prints} />
+              </div>
+              <div className="drill-mobile-tabs" style={{ display: "none" }}>
+                <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                  <button onClick={() => setMobileTab("l2")}
+                    style={{ flex: 1, padding: 8, borderRadius: 8, border: "1px solid rgba(255,255,255,0.15)", background: mobileTab === "l2" ? "rgba(66,216,121,0.15)" : "transparent", color: "#fff", cursor: "pointer" }}>
+                    Level 2
+                  </button>
+                  <button onClick={() => setMobileTab("ts")}
+                    style={{ flex: 1, padding: 8, borderRadius: 8, border: "1px solid rgba(255,255,255,0.15)", background: mobileTab === "ts" ? "rgba(66,216,121,0.15)" : "transparent", color: "#fff", cursor: "pointer" }}>
+                    Time &amp; Sales
+                  </button>
+                </div>
+                {mobileTab === "l2" ? <Level2Panel book={reviewSim.book} level={scenario.hod} /> : <TimeSalesPanel prints={reviewSim.prints} />}
+              </div>
+            </div>
+            )}
+          </div>
+
+          {/* End state after the reveal completes: decision quality
+              vs outcome, then back to the full results. Deliberately
+              carries no score and no classification — those live on
+              the teaching screen this returns to. */}
+          {reviewRevealed && reviewAtEnd && (
+            <div style={{
+              background: "#0d1117", border: "1px solid rgba(255,255,255,0.08)",
+              borderRadius: 12, padding: 20, marginTop: 12, marginBottom: 32,
+            }}>
+              <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 8 }}>Outcome revealed</div>
+              <p style={{ fontSize: 14, lineHeight: 1.6, color: "var(--ggl-muted)", marginBottom: 12 }}>
+                Everything after your lock is now on the chart. Judge the decision by the
+                evidence that existed at the checkpoint — not by what the market did next:
+                a disciplined decision can still lose, and a poor one can still win.
+              </p>
+              <p style={{ fontSize: 12, color: "#6e7681", lineHeight: 1.6, marginBottom: 16 }}>{EVALUATION_STANDING_LINE}</p>
+              <button onClick={exitReview}
+                style={{ padding: "12px 24px", borderRadius: 10, border: "none", background: "#42d879", color: "#06110b", fontWeight: 800, cursor: "pointer", fontSize: 14 }}>
+                Back to Results
+              </button>
+            </div>
+          )}
+        </>
       )}
 
       <style>{`

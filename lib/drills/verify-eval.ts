@@ -481,6 +481,55 @@ console.log("\n=== H. Order-flow evidence (P1): snapshot math + gated flow notes
   }
 }
 
+console.log("\n=== I. Decision-point review reconstruction (P1): deterministic + capped ===");
+{
+  // The review phase rebuilds the checkpoint moment exactly the way
+  // the runner does: a fresh DrillSim advanced one candle per step
+  // until the checkpoint is reached. These checks pin that the
+  // reconstruction is tick-for-tick identical to a run advanced one
+  // tick at a time (the finest chunking), and that the series the
+  // review renders contains nothing beyond the checkpoint.
+  for (const s of HOD_SCENARIOS) {
+    const a = new DrillSim(s);
+    while (!a.checkpointSnapshot && !a.atEnd) a.advance(1);
+    const b = new DrillSim(s);
+    while (!b.checkpointReached && !b.atEnd) b.advance(DRILL_TICKS_PER_CANDLE);
+
+    check(`review reconstruction stops at the same tick (${s.id})`,
+      b.ticksElapsed === a.ticksElapsed && b.ticksElapsed > 0);
+    check(`review reconstruction: identical checkpoint snapshot (${s.id})`,
+      JSON.stringify(b.checkpointSnapshot) === JSON.stringify(a.checkpointSnapshot));
+    check(`review reconstruction: identical book + tape aggregates (${s.id})`,
+      JSON.stringify(snapshotOrderFlow(b.book, b.prints)) ===
+      JSON.stringify(snapshotOrderFlow(a.book, a.prints)));
+    check(`review reconstruction: identical last print + tape depth (${s.id})`,
+      JSON.stringify(b.prints[0]) === JSON.stringify(a.prints[0]) &&
+      b.prints.length === a.prints.length);
+    check(`review reconstruction: identical revealed closes (${s.id})`,
+      JSON.stringify(b.engine.revealed.map((c) => c.c)) ===
+      JSON.stringify(a.engine.revealed.map((c) => c.c)));
+    check(`review reconstruction: identical capped display series (${s.id})`,
+      JSON.stringify(b.engine.displayCandles) === JSON.stringify(a.engine.displayCandles));
+
+    // The cap: finalized candles run 0..checkpointIndex; at most one
+    // further entry may exist — the forming stub of the NEXT candle,
+    // which must carry zero volume (nothing traded past the lock).
+    const disp = b.engine.displayCandles;
+    const cp = s.checkpointIndex;
+    check(`review cap: series ends at the checkpoint candle (${s.id})`,
+      disp.length <= cp + 2 &&
+      disp[cp].t === s.candles[cp].t && disp[cp].c === s.candles[cp].c &&
+      (disp.length < cp + 2 || (disp[cp + 1].t === s.candles[cp + 1].t && disp[cp + 1].v === 0)));
+    check(`review cap: no candle in the series postdates the checkpoint except the empty stub (${s.id})`,
+      disp.every((c, i) => i <= cp || c.v === 0));
+
+    // Reveal path: the same sim then runs to the true scenario end.
+    b.advanceToEnd();
+    check(`review reveal: advances to the scenario end (${s.id})`,
+      b.atEnd && b.engine.revealed.length === s.candles.length);
+  }
+}
+
 console.log("\n=== Wording precision (2026-10-15 browser-QA fixes) ===");
 {
   // Article agreement: "an Ambiguous", never "a Ambiguous".
