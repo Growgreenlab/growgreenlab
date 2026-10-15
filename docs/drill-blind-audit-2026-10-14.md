@@ -173,3 +173,41 @@ of the picker/runner (that no classification string appears in the
 rendered DOM pre-reveal), mobile layout in a real viewport, and the
 click-through flow (checkpoint select → lock → resolving → teaching,
 reset-during-resolving, Next Blind Drill navigation).
+
+## 5. Post-QA fixes (browser QA round 1 on `65d915c`)
+
+- **Next Blind Drill looked dead.** Root cause: the button pushed the
+  URL of a fresh random draw; whenever the draw repeated the drill
+  already on screen (1-in-4 per click), the push targeted the identical
+  URL — a router no-op: no param change, no remount, and the `[id]`
+  reset effect never fired, so the review stayed up. Fix:
+  `drawNextBlindSlug` (catalog.ts) redraws until the slug differs,
+  with a bounded catalog fallback; the URL now always changes, so the
+  runner always remounts into a fresh intro. (Focused mode's "Next" is
+  a plain Link to `/drills/focused` — a different route, unaffected.)
+- **Lock time could read two ways.** The page stamped the decision
+  from the LIVE sim clock at click time. The scheduler advances in
+  frames of up to 48 ticks and only notices the checkpoint afterwards,
+  so the live clock can sit up to ~23.5 sim-seconds past the checkpoint
+  candle's close — a frame-dependent value, distinct from the candle
+  boundary the review also reported. Fix: DrillSim captures a
+  checkpoint snapshot (simTimeMs + candleIndex) at the exact tick the
+  checkpoint candle finalizes; `buildDecision` stamps that; both
+  review surfaces render one canonical string, `decisionLockLabel`
+  ("10:00 · candle 15"), derived only from the ledger record.
+- **Default confidence vanished.** An untouched slider recorded no
+  confidence (state was null → `undefined`), and the review rendered
+  the confidence chip only when a value existed. Fix: confidence state
+  starts at `DEFAULT_CONFIDENCE` (3); `buildDecision` always stamps
+  the effective value; the review always shows it via
+  `effectiveConfidence`.
+- **Draw clustering — investigated, mechanism sound (no change).** QA
+  saw only d-031/d-047 in 6 picker presses. Empirical check over the
+  ACTUAL seed path (uniform 31-bit seeds, as `randomRunSeed` produces;
+  200k trials, plus 20k via an independent splitmix32 stream):
+  first-draw quartiles ≈ 25% each (e.g. 5034/4878/5013/5075 per 5000
+  expected) — no bias. The observed sample also fits chance: the
+  probability that 6 uniform draws land within SOME single pair of
+  scenarios is ≈9.2%, and dead Next clicks (defect 1) repeat the
+  current drill in any press log. A deterministic realistic-seed
+  distribution test now pins this in verify-blind §8.

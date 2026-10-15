@@ -20,7 +20,7 @@ import type { DecisionClassification, IntendedAction } from "./types";
 export interface DrillDecision {
   classification: DecisionClassification;
   action: IntendedAction;
-  /** Optional 1-5 self-assessed confidence. */
+  /** 1-5 self-assessed confidence (the default is stamped when untouched). */
   confidence?: number;
   /** Simulation time (ms on the sim timeline) when the decision locked. */
   simTimeMs: number;
@@ -28,6 +28,66 @@ export interface DrillDecision {
   candleIndex: number;
   /** Epoch ms when the decision was recorded. */
   recordedAt: number;
+}
+
+/**
+ * The confidence slider's resting position. A decision locked without
+ * touching the slider still carries this value — the effective
+ * confidence is part of the locked record, never absent, so the review
+ * can always display it.
+ */
+export const DEFAULT_CONFIDENCE = 3;
+
+/** The confidence in force for a decision (default when none was set). */
+export function effectiveConfidence(d: DrillDecision): number {
+  return d.confidence ?? DEFAULT_CONFIDENCE;
+}
+
+/** The one formatter for sim-timeline ms, shared by every display. */
+export function formatSimTimeMs(ms: number): string {
+  const totalSec = Math.floor(ms / 1000);
+  const mm = String(Math.floor(totalSec / 60)).padStart(2, "0");
+  const ss = String(totalSec % 60).padStart(2, "0");
+  return `${mm}:${ss}`;
+}
+
+/**
+ * Canonical rendering of WHEN a decision locked, derived only from the
+ * ledger record ("10:00 · candle 15"). Every surface that reports the
+ * lock time (review header, reproducibility footer) renders this exact
+ * string, so the recorded timestamp can never appear as two different
+ * values for the same decision. (The live header clock is a different,
+ * running quantity and is labelled simply "Sim time".)
+ */
+export function decisionLockLabel(d: DrillDecision): string {
+  return `${formatSimTimeMs(d.simTimeMs)} · candle ${d.candleIndex + 1}`;
+}
+
+export interface DecisionDraft {
+  classification: DecisionClassification;
+  action: IntendedAction;
+  /** Null/undefined = slider untouched → the default is stamped. */
+  confidence?: number | null;
+}
+
+/**
+ * Build the record the ledger locks. `at` must be the sim's checkpoint
+ * snapshot (DrillSim.checkpointSnapshot) so the stamped time is the
+ * checkpoint candle's close, not the frame-dependent live clock.
+ */
+export function buildDecision(
+  draft: DecisionDraft,
+  at: { simTimeMs: number; candleIndex: number },
+  recordedAt: number = Date.now()
+): DrillDecision {
+  return {
+    classification: draft.classification,
+    action: draft.action,
+    confidence: draft.confidence ?? DEFAULT_CONFIDENCE,
+    simTimeMs: at.simTimeMs,
+    candleIndex: at.candleIndex,
+    recordedAt,
+  };
 }
 
 export class DecisionLedger {

@@ -19,14 +19,17 @@
 import { HOD_SCENARIOS, getScenario } from "./scenarios";
 import {
   BLIND_CATALOG, FOCUSED_CATALOG, resolveDrillSlug,
-  pickBlindScenario, blindSlugForSeed,
+  pickBlindScenario, blindSlugForSeed, drawNextBlindSlug,
 } from "./catalog";
-import { DecisionLedger, type DrillDecision } from "./decision";
+import {
+  DecisionLedger, buildDecision, effectiveConfidence, decisionLockLabel,
+  formatSimTimeMs, DEFAULT_CONFIDENCE, type DrillDecision,
+} from "./decision";
 import {
   scoreClassification, scoreAction, scoreDecision, buildReviewModel, missedKeyFor,
 } from "./scoring";
 import { gradeAnswer, type DecisionClassification, type IntendedAction } from "./types";
-import { DrillSim } from "./sim";
+import { DrillSim, historyCountFor } from "./sim";
 import { DRILL_TICKS_PER_CANDLE } from "./orderflow";
 
 let pass = 0, fail = 0;
@@ -255,6 +258,130 @@ const byClass = Object.fromEntries(HOD_SCENARIOS.map((s) => [s.classification, s
   });
   check("ambiguous correct read surfaces the 'correct' teaching text",
     (amb.missed ?? "").toLowerCase().includes("correct"));
+}
+
+// ── 7. QA regressions: checkpoint snapshot, lock label, confidence ──
+{
+  // The decision timestamp is the checkpoint candle's close, captured by
+  // DrillSim at the exact finalization tick — NOT the live clock at
+  // click time, which the frame scheduler can carry up to a frame past
+  // the boundary. Awkward 7-tick chunks force that overshoot here.
+  for (const s of HOD_SCENARIOS) {
+    const sim = new DrillSim(s);
+    check(`no snapshot before the checkpoint (${s.id})`, sim.checkpointSnapshot === null);
+    let guard = 0;
+    while (!sim.checkpointReached && guard++ < 100_000) sim.advance(7);
+    const snap = sim.checkpointSnapshot;
+    check(`snapshot captured at the checkpoint (${s.id})`, snap !== null);
+    check(`snapshot candle is the checkpoint candle (${s.id})`,
+      snap?.candleIndex === s.checkpointIndex);
+    const liveCandles = s.checkpointIndex - historyCountFor(s) + 1;
+    check(`snapshot time is the exact candle boundary (${s.id})`,
+      snap?.simTimeMs === liveCandles * 60_000);
+    const snapJson = JSON.stringify(snap);
+    sim.advance(480); // live clock moves well past the checkpoint…
+    check(`snapshot never moves after capture (${s.id})`,
+      JSON.stringify(sim.checkpointSnapshot) === snapJson);
+    const led = new DecisionLedger();
+    led.record(buildDecision({ classification: "clean", action: "enter", confidence: null }, snap!));
+    check(`locked decision keeps the snapshot values (${s.id})`,
+      led.current?.simTimeMs === snap!.simTimeMs && led.current?.candleIndex === snap!.candleIndex);
+  }
+
+  // One canonical derivation renders the lock time everywhere.
+  check("formatSimTimeMs renders mm:ss",
+    formatSimTimeMs(0) === "00:00" && formatSimTimeMs(600_000) === "10:00" && formatSimTimeMs(645_000) === "10:45");
+  const dEx: DrillDecision = {
+    classification: "weak", action: "wait", confidence: 3,
+    simTimeMs: 600_000, candleIndex: 14, recordedAt: 1,
+  };
+  check("decisionLockLabel renders time + candle from the record alone",
+    decisionLockLabel(dEx) === "10:00 · candle 15");
+
+  // Confidence: untouched slider → the default is IN the record, and the
+  // review's effective value therefore always exists.
+  check("slider default is 3/5", DEFAULT_CONFIDENCE === 3);
+  check("buildDecision stamps the default when confidence is untouched",
+    buildDecision({ classification: "clean", action: "enter", confidence: null }, { simTimeMs: 1, candleIndex: 1 }).confidence === DEFAULT_CONFIDENCE);
+  check("buildDecision stamps the default when confidence is omitted",
+    buildDecision({ classification: "clean", action: "enter" }, { simTimeMs: 1, candleIndex: 1 }).confidence === DEFAULT_CONFIDENCE);
+  check("buildDecision preserves an explicit confidence",
+    buildDecision({ classification: "clean", action: "enter", confidence: 5 }, { simTimeMs: 1, candleIndex: 1 }).confidence === 5);
+  check("effectiveConfidence reads the stamped value",
+    effectiveConfidence(buildDecision({ classification: "clean", action: "enter", confidence: 2 }, { simTimeMs: 1, candleIndex: 1 })) === 2);
+  check("effectiveConfidence falls back to the default for legacy records",
+    effectiveConfidence({ classification: "clean", action: "enter", simTimeMs: 1, candleIndex: 1, recordedAt: 1 }) === DEFAULT_CONFIDENCE);
+}
+
+// ── 8. QA regressions: next-drill draw + realistic seed space ────────
+{
+  // One seed per slug, found by scanning the picker's own mapping.
+  const seedForSlug = new Map<string, number>();
+  for (let seed = 0; seed < 10_000 && seedForSlug.size < BLIND_CATALOG.length; seed++) {
+    const slug = blindSlugForSeed(seed);
+    if (!seedForSlug.has(slug)) seedForSlug.set(slug, seed);
+  }
+  check("a seed exists for every blind slug", seedForSlug.size === BLIND_CATALOG.length);
+
+  for (const d of BLIND_CATALOG) {
+    const sameSeed = seedForSlug.get(d.slug)!;
+    const other = BLIND_CATALOG.find((x) => x.slug !== d.slug)!;
+    const otherSeed = seedForSlug.get(other.slug)!;
+    // Adversarial source: repeats the CURRENT drill's draw, then yields.
+    let calls = 0;
+    const adversarial = () => (++calls <= 3 ? sameSeed : otherSeed);
+    const got = drawNextBlindSlug(d.slug, adversarial);
+    check(`next draw skips repeats of the current drill (${d.slug})`,
+      got.slug === other.slug && got.seed === otherSeed);
+    // Degenerate source: NEVER yields a different drill → bounded
+    // fallback must still land on a different drill.
+    const stuck = drawNextBlindSlug(d.slug, () => sameSeed);
+    check(`next draw escapes a stuck seed source (${d.slug})`,
+      stuck.slug !== d.slug && !!resolveDrillSlug(stuck.slug));
+  }
+
+  // Deterministic stream of realistic run seeds (uniform 31-bit values,
+  // the distribution randomRunSeed produces) via splitmix32, so this
+  // test is reproducible — no Math.random in tests.
+  const realisticSeed = (() => {
+    let a = 987654321 >>> 0;
+    return () => {
+      a = (a + 0x9e3779b9) | 0;
+      let t = a ^ (a >>> 16);
+      t = Math.imul(t, 0x21f0aaad);
+      t ^= t >>> 15;
+      t = Math.imul(t, 0x735a2d97);
+      t ^= t >>> 15;
+      return Math.floor(((t >>> 0) / 4294967296) * 2 ** 31);
+    };
+  })();
+
+  // Check 4 (browser QA): the pick over the REALISTIC seed space must
+  // be uniform — the sequential-seed test in §3 alone would not catch a
+  // bias that only appears for large 31-bit seeds.
+  const counts: Record<string, number> = {};
+  const N = 20_000;
+  for (let i = 0; i < N; i++) {
+    const c = pickBlindScenario(realisticSeed()).scenario.classification;
+    counts[c] = (counts[c] ?? 0) + 1;
+  }
+  for (const c of CLASSES) {
+    check(`realistic-seed pick ~uniform for ${c} (${counts[c]}/${N})`,
+      counts[c] >= 4250 && counts[c] <= 5750);
+  }
+  // And the next-drill draw over realistic seeds never serves the
+  // current drill, while reaching every other drill.
+  for (const d of BLIND_CATALOG) {
+    const served = new Set<string>();
+    let neverCurrent = true;
+    for (let i = 0; i < 600; i++) {
+      const { slug } = drawNextBlindSlug(d.slug, realisticSeed);
+      if (slug === d.slug) neverCurrent = false;
+      served.add(slug);
+    }
+    check(`next draw never repeats current (${d.slug})`, neverCurrent);
+    check(`next draw reaches all other drills from (${d.slug})`, served.size === BLIND_CATALOG.length - 1);
+  }
 }
 
 console.log(`\n=== BLIND RESULT: ${pass} passed, ${fail} failed ===`);

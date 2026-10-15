@@ -177,3 +177,28 @@ export function blindSlugForSeed(seed: number): string {
 export function randomRunSeed(): number {
   return Math.floor(Math.random() * 2 ** 31);
 }
+
+/**
+ * Draw the NEXT blind drill from the review screen. The draw MUST NOT
+ * return the drill the user is already on: navigating to the identical
+ * /drills/[id] URL is a no-op in the router (no param change, no
+ * remount, no state reset), which left the "Next Blind Drill" button
+ * looking dead whenever the fresh draw repeated the current slug
+ * (a 1-in-4 chance per click). Draws repeat seeds until the slug
+ * differs; the bounded fallback walks the catalog so even a degenerate
+ * seed source can never strand the user on the same drill.
+ */
+export function drawNextBlindSlug(
+  currentSlug: string,
+  nextSeed: () => number
+): { slug: string; seed: number } {
+  for (let attempt = 0; attempt < 16; attempt++) {
+    const seed = nextSeed();
+    const slug = blindSlugForSeed(seed);
+    if (slug !== currentSlug) return { slug, seed };
+  }
+  const idx = BLIND_CATALOG.findIndex((d) => d.slug === currentSlug);
+  const fallback =
+    BLIND_CATALOG[(idx + 1) % BLIND_CATALOG.length] ?? BLIND_CATALOG[0];
+  return { slug: fallback.slug, seed: nextSeed() };
+}

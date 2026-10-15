@@ -125,6 +125,7 @@ export class DrillSim {
   private printedVolThisCandle = 0;
   private windowStartPrice: number;
   private lastPrice: number;
+  private checkpointSnap: { simTimeMs: number; candleIndex: number } | null = null;
 
   constructor(scenario: DrillScenario) {
     this.scenario = scenario;
@@ -175,6 +176,20 @@ export class DrillSim {
     return this.engine.index >= this.scenario.checkpointIndex;
   }
 
+  /**
+   * The decision timestamp for the checkpoint: sim time + candle index
+   * captured at the EXACT tick the checkpoint candle finalized. The UI
+   * scheduler advances in whole frames (up to MAX_FRAME_TICKS) and only
+   * notices the checkpoint after the frame, so the live sim clock can
+   * sit up to a frame past the candle boundary when the modal opens —
+   * decisions must be stamped with this snapshot, never with the live
+   * (frame-dependent) clock, so the recorded lock time is a property
+   * of the scenario, identical wherever it is displayed.
+   */
+  get checkpointSnapshot(): { simTimeMs: number; candleIndex: number } | null {
+    return this.checkpointSnap;
+  }
+
   /** The live forming candle snapshot, or null when none is forming. */
   formingCandle(): Candle | null {
     const dc = this.engine.displayCandles;
@@ -205,6 +220,15 @@ export class DrillSim {
           candleIndex: this.engine.index,
           candle: this.engine.currentCandle,
         });
+        if (
+          this.checkpointSnap === null &&
+          this.engine.index >= this.scenario.checkpointIndex
+        ) {
+          this.checkpointSnap = {
+            simTimeMs: this.simTimeMs,
+            candleIndex: this.engine.index,
+          };
+        }
         this.ticksInCandle = 0;
         this.printedVolThisCandle = 0;
         this.windowStartPrice = price;

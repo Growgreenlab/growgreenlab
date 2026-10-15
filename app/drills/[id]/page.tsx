@@ -33,12 +33,15 @@ import { useEffect, useRef, useState, useCallback, type CSSProperties } from "re
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import {
-  resolveDrillSlug, blindSlugForSeed, randomRunSeed,
+  resolveDrillSlug, drawNextBlindSlug, randomRunSeed,
 } from "../../../lib/drills/catalog";
 import type {
   BreakoutClassification, DecisionClassification, IntendedAction,
 } from "../../../lib/drills/types";
-import { DecisionLedger, type DrillDecision } from "../../../lib/drills/decision";
+import {
+  DecisionLedger, buildDecision, decisionLockLabel, effectiveConfidence,
+  formatSimTimeMs, DEFAULT_CONFIDENCE, type DrillDecision,
+} from "../../../lib/drills/decision";
 import { buildReviewModel } from "../../../lib/drills/scoring";
 import { DrillSim, SimClock } from "../../../lib/drills/sim";
 import { hodMarketState, HOD_STATE_LABEL } from "../../../lib/drills/hodState";
@@ -84,12 +87,10 @@ const ACTION_LABEL: Record<IntendedAction, string> = {
   skip: "Skip",
 };
 
-function fmtSimTime(ms: number): string {
-  const totalSec = Math.floor(ms / 1000);
-  const mm = String(Math.floor(totalSec / 60)).padStart(2, "0");
-  const ss = String(totalSec % 60).padStart(2, "0");
-  return `${mm}:${ss}`;
-}
+// One formatter for every sim-time display (lib/drills/decision.ts),
+// so the live clock and the locked-decision record can never drift
+// into two different renderings of a timestamp.
+const fmtSimTime = formatSimTimeMs;
 
 const chipStyle = (active: boolean): CSSProperties => ({
   padding: "12px 16px", borderRadius: 10,
@@ -111,7 +112,7 @@ export default function DrillRunner() {
   const [, setUiVersion] = useState(0); // render pump
   const [selClass, setSelClass] = useState<DecisionClassification | null>(null);
   const [selAction, setSelAction] = useState<IntendedAction | null>(null);
-  const [confidence, setConfidence] = useState<number | null>(null);
+  const [confidence, setConfidence] = useState<number>(DEFAULT_CONFIDENCE);
   const [decision, setDecision] = useState<DrillDecision | null>(null);
   const [blindSeed, setBlindSeed] = useState<number | null>(null);
   const [mobileTab, setMobileTab] = useState<"l2" | "ts">("l2");
@@ -134,7 +135,7 @@ export default function DrillRunner() {
     setPhase("intro");
     setSelClass(null);
     setSelAction(null);
-    setConfidence(null);
+    setConfidence(DEFAULT_CONFIDENCE);
     setDecision(null);
     setBlindSeed(null);
     setPaused(false);
@@ -151,7 +152,7 @@ export default function DrillRunner() {
     clockRef.current = new SimClock();
     setSelClass(null);
     setSelAction(null);
-    setConfidence(null);
+    setConfidence(DEFAULT_CONFIDENCE);
     setDecision(null);
     setBlindSeed(null);
     setPaused(false);
@@ -211,14 +212,16 @@ export default function DrillRunner() {
   const lockDecision = () => {
     const sim = simRef.current;
     if (!sim || !selClass || !selAction || lockedRef.current) return;
-    const ok = ledgerRef.current.record({
-      classification: selClass,
-      action: selAction,
-      confidence: confidence ?? undefined,
+    // Stamp the decision with the sim's checkpoint snapshot — the exact
+    // tick the checkpoint candle finalized — not the live clock, which
+    // the frame scheduler may have carried past the candle boundary.
+    const at = sim.checkpointSnapshot ?? {
       simTimeMs: sim.simTimeMs,
       candleIndex: sim.engine.index,
-      recordedAt: Date.now(),
-    });
+    };
+    const ok = ledgerRef.current.record(
+      buildDecision({ classification: selClass, action: selAction, confidence }, at)
+    );
     if (!ok) return;
     lockedRef.current = true;
     setDecision(ledgerRef.current.current);
@@ -235,11 +238,15 @@ export default function DrillRunner() {
   };
 
   const nextBlindDrill = () => {
-    const seed = randomRunSeed();
+    // The draw never returns the drill already on screen: pushing the
+    // identical URL is a router no-op (no param change → no remount →
+    // the [id] reset below never fires), which made this button look
+    // dead whenever the fresh draw repeated the current drill.
+    const { slug, seed } = drawNextBlindSlug(id, randomRunSeed);
     try {
       sessionStorage.setItem(BLIND_SEED_KEY, String(seed));
     } catch { /* best-effort */ }
-    router.push(`/drills/${blindSlugForSeed(seed)}`);
+    router.push(`/drills/${slug}`);
   };
 
   if (!resolved || !scenario) {
@@ -433,10 +440,10 @@ export default function DrillRunner() {
                 </div>
                 <div style={{ marginBottom: 16 }}>
                   <label style={{ fontSize: 13, color: "var(--ggl-muted)", display: "block", marginBottom: 6 }}>
-                    Confidence (optional): {confidence ?? "—"}/5
+                    Confidence: {confidence}/5
                   </label>
                   <input type="range" min={1} max={5} step={1}
-                    value={confidence ?? 3}
+                    value={confidence}
                     onChange={(e) => setConfidence(Number(e.target.value))}
                     style={{ width: "100%" }} />
                 </div>
@@ -466,8 +473,8 @@ export default function DrillRunner() {
             borderLeft: `4px solid ${review.scores.classification.verdict === "correct" ? "#2ebd85" : review.scores.classification.verdict === "partial" ? "#f0b429" : "#f6465d"}`,
           }}>
             <div style={{ fontSize: 13, color: "var(--ggl-muted)", marginBottom: 4 }}>
-              YOUR DECISION · locked at sim time {fmtSimTime(decision.simTimeMs)}
-              {decision.confidence ? ` · confidence ${decision.confidence}/5` : ""}
+              YOUR DECISION · locked at sim time {decisionLockLabel(decision)}
+              {` · confidence ${effectiveConfidence(decision)}/5`}
             </div>
             <div style={{ fontSize: 20, fontWeight: 800, marginBottom: 12 }}>
               {DECISION_CLASS_LABEL[decision.classification]} — {ACTION_LABEL[decision.action]}
@@ -531,7 +538,7 @@ export default function DrillRunner() {
           <p style={{ fontSize: 12, color: "#6e7681", marginBottom: 24 }}>
             {resolved.label} · {resolved.mode === "blind" ? "Blind Practice" : "Focused Learning"}
             {blindSeed !== null ? ` · draw seed ${blindSeed}` : ""}
-            {" "}· scenario seed {scenario.seed} · decision locked at sim time {fmtSimTime(decision.simTimeMs)}, candle {decision.candleIndex + 1}
+            {" "}· scenario seed {scenario.seed} · decision locked at sim time {decisionLockLabel(decision)}
           </p>
 
           {/* Actions */}
