@@ -245,11 +245,12 @@ function recognitionDimension(
   verdict: ClassificationVerdict
 ): EvaluationDimension {
   const actual = CLASS_LABEL[scenario.classification as DecisionClassification] ?? scenario.classification;
+  const art = /^[aeiou]/i.test(actual) ? "an" : "a";
   let note: string;
   if (verdict === "correct") {
-    note = `Correct read — this was a ${actual} setup, and you named it before the reveal.`;
+    note = `Correct read — this was ${art} ${actual} setup, and you named it before the reveal.`;
   } else if (verdict === "partial" && answer === "ambiguous") {
-    note = `You answered "Ambiguous / No Trade" on a ${actual} setup. Honest, and never scored as a confident wrong answer — but the tells were on the tape (see the evidence).`;
+    note = `You answered "Ambiguous / No Trade" on ${art} ${actual} setup. Honest, and never scored as a confident wrong answer — but the tells were on the tape (see the evidence).`;
   } else if (verdict === "partial") {
     note = `A committed read (${ANSWER_LABEL[answer]}) on a genuinely ambiguous setup. Partial credit: the evidence supported no single answer, so the lesson is in the review, not the label.`;
   } else {
@@ -277,7 +278,7 @@ function timingDimension(
       if (facts.trapKind === "rejectionClose") {
         note = `Trap error: candle ${facts.rejectionIndex + 1} had already spiked above ${$(level)} and closed back below it before your lock — the rejection had printed, and the entry bought into it.`;
       } else if (facts.trapKind === "spikeFailedToClose") {
-        note = `Trap error: the spike candle ran to ${$(facts.breakoutHigh ?? level)} on ${facts.volMultiple != null ? x(facts.volMultiple) : "climax"} volume but never closed above ${$(level)} — it stalled at the level with a long upper wick. The entry chased a test that had not confirmed.`;
+        note = `Trap error: the spike candle ran to ${$(facts.breakoutHigh ?? level)} on ${facts.volMultiple != null ? x(facts.volMultiple) : "climax"} volume, but the spike itself never closed above ${$(level)} — it stalled at the level with a long upper wick. The entry treated that stalled spike as confirmation.`;
       } else if (facts.trapKind === "climaxWick") {
         note = `Trap error: the spike to ${$(facts.breakoutHigh ?? level)} came on climax volume (${facts.volMultiple != null ? x(facts.volMultiple) : "2×+"} the prior average) and left a dominant upper wick — exhaustion evidence was on the tape at your lock, and the entry chased the top of it.`;
       } else {
@@ -504,7 +505,7 @@ function buildKeyMistake(
       return `The trap entry: candle ${facts.rejectionIndex + 1} had already closed back below the level after spiking through it, and the entry bought into that rejection anyway.`;
     }
     if (facts.trapKind === "spikeFailedToClose") {
-      return `The trap entry: the spike never earned a close above ${$(level)}, and the entry chased it regardless — commitment without confirmation.`;
+      return `The trap entry: the spike itself never closed above ${$(level)} — it stalled at the level with a long upper wick — and the entry chased it as if the test had confirmed.`;
     }
     if (facts.trapKind === "climaxWick") {
       return `The trap entry: chasing a climax-volume spike whose upper wick showed sellers unloading at the highs — the costliest seat in this drill.`;

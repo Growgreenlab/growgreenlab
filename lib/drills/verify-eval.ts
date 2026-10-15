@@ -298,5 +298,25 @@ for (const s of HOD_SCENARIOS) {
       .includes("not a prediction of real-world profitability"));
 }
 
+console.log("\n=== Wording precision (2026-10-15 browser-QA fixes) ===");
+{
+  // Article agreement: "an Ambiguous", never "a Ambiguous".
+  const amb = byId.get("hod-ambiguous-001")!;
+  const evA = buildEvaluation(amb, decisionFor(amb, "ambiguous", "wait", 2));
+  const rec = evA.dimensions.find((d) => d.key === "recognition");
+  check("recognition note uses 'an Ambiguous'", !!rec && rec.note.includes("an Ambiguous setup"));
+  check("recognition note never says 'a Ambiguous'", !!rec && !rec.note.includes("a Ambiguous"));
+
+  // failed-003: its checkpoint candle (the fake acceptance) DID close above
+  // the level, so the trap wording must scope the no-close claim to the
+  // spike candle itself — never an unscoped "without confirmation" claim.
+  const f3 = byId.get("hod-failed-003")!;
+  const evF = buildEvaluation(f3, decisionFor(f3, "clean", "enter", 5));
+  const tim = evF.dimensions.find((d) => d.key === "timing");
+  check("failed-003 trap note scopes the claim to the spike itself", !!tim && tim.note.includes("the spike itself never closed above"));
+  check("failed-003 keyMistake scopes the claim to the spike itself", !!evF.keyMistake && evF.keyMistake.includes("the spike itself never closed above"));
+  check("failed-003 trap wording drops 'commitment without confirmation'", (!tim || !tim.note.includes("commitment without confirmation")) && !(evF.keyMistake ?? "").includes("commitment without confirmation"));
+}
+
 console.log(`\n=== EVAL RESULT: ${pass} passed, ${fail} failed ===`);
 process.exit(fail > 0 ? 1 : 0);
