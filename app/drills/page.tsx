@@ -60,15 +60,14 @@ export default function DrillsPage() {
   const cycleNumber = (pool?.archives.length ?? 0) + 1;
 
   return (
-    <div style={{ maxWidth: 900, margin: "0 auto", padding: "32px 16px" }}>
-      <h1 style={{ fontSize: 28, fontWeight: 800, marginBottom: 8 }}>
+    <div style={{ maxWidth: 900, margin: "0 auto", padding: "32px 16px calc(32px + env(safe-area-inset-bottom, 0px))" }}>
+      <h1 style={{ fontSize: "clamp(24px, 6.5vw, 28px)", fontWeight: 800, marginBottom: 8 }}>
         Breakout Recognition
       </h1>
       <p style={{ color: "var(--ggl-muted)", fontSize: 15, marginBottom: 24, maxWidth: 640 }}>
-        Train your eye to read breakouts. Watch the market develop across
-        chart, volume, Level 2, and Time &amp; Sales — then classify what
-        you see and commit to a decision before the outcome is revealed.
-        Order flow is simulated for training.
+        Train your eye to recognize breakouts using charts, volume,
+        Level 2 and Time &amp; Sales. Make your decision before the
+        outcome is revealed. Order flow is simulated for training.
       </p>
 
       {/* Blind Practice — the default mode */}
@@ -84,14 +83,28 @@ export default function DrillsPage() {
         <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: 1.5, color: "#42d879", marginBottom: 6 }}>
           BLIND PRACTICE
         </div>
-        <p style={{ fontSize: 14, color: "var(--ggl-muted)", marginBottom: 16, maxWidth: 620 }}>
-          No labels, no hints, no difficulty ratings. Blind Practice runs
-          in cycles over the full drill pool: every drill appears exactly
-          once per cycle, in a shuffled order known only to the queue. A
-          drill counts when you lock in a decision — opening one and
-          leaving doesn&apos;t use it up, and an interrupted drill is
-          served again first. Your progress is saved on this device.
+        <p style={{ fontSize: 14, color: "var(--ggl-muted)", marginBottom: 10, maxWidth: 620 }}>
+          No labels, no hints, no difficulty ratings — just the chart,
+          the book, and your decision.
         </p>
+        <details style={{ marginBottom: 16 }}>
+          <summary
+            style={{
+              fontSize: 13, fontWeight: 700, color: "var(--ggl-muted)",
+              cursor: "pointer", padding: "8px 0", width: "fit-content",
+            }}
+          >
+            How it works
+          </summary>
+          <p style={{ fontSize: 14, color: "var(--ggl-muted)", marginTop: 8, maxWidth: 620 }}>
+            Blind Practice runs in cycles over the full drill pool: every
+            drill appears exactly once per cycle, in a shuffled order
+            known only to the queue. A drill counts when you lock in a
+            decision — opening one and leaving doesn&apos;t use it up,
+            and an interrupted drill is served again first. Your
+            progress is saved on this device.
+          </p>
+        </details>
 
         {pool === null || active === null || results === null ? (
           <p style={{ fontSize: 14, color: "var(--ggl-muted)" }}>Loading your cycle…</p>
@@ -153,7 +166,7 @@ export default function DrillsPage() {
             </div>
             <div style={{
               height: 8, borderRadius: 4, background: "rgba(255,255,255,0.08)",
-              overflow: "hidden", marginBottom: 16, maxWidth: 420,
+              overflow: "hidden", marginBottom: 16,
             }}>
               <div style={{
                 height: "100%", background: "#42d879",
@@ -164,6 +177,7 @@ export default function DrillsPage() {
               <>
                 <Link
                   href={`/drills/${nextSlug}`}
+                  className="ggl-drill-cta"
                   style={{
                     display: "inline-block", padding: "12px 28px", borderRadius: 10,
                     background: "#42d879", color: "#06110b", fontSize: 15,

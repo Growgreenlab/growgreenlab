@@ -959,6 +959,24 @@ body.ws-active .footer { display: none; }
   .ggl-btn-lg { padding: 12px 20px; font-size: 14px; }
 }
 
+/* Narrow phones (≤480px): keep the header uncrowded with ≥44px tap
+   targets, and give the drills landing CTA a full-width target.
+   Scoped to this media query only — wider layouts are unaffected. */
+@media (max-width: 480px) {
+  .ggl-nav-inner { padding: 10px 12px; gap: 10px; }
+  .ggl-brand { min-width: 0; }
+  .ggl-brand-logo { height: 26px; max-width: 140px; object-fit: contain; }
+  .ggl-nav-actions { gap: 8px; min-width: 0; }
+  .ggl-nav-actions .ggl-btn { min-height: 44px; }
+  .ggl-menu-btn { width: 44px; height: 44px; min-width: 44px; min-height: 44px; flex-shrink: 0; }
+  .ggl-user-badge { max-width: 110px; min-width: 0; }
+  .ggl-mobile-menu .ggl-btn { min-height: 44px; }
+  .ggl-drill-cta {
+    display: block; width: 100%; min-height: 48px;
+    box-sizing: border-box; text-align: center;
+  }
+}
+
 /* ============================================================
    MOBILE TRADING WORKSPACE — chart-first layout
    Chart dominates (~52% of viewport), controls compact below.
