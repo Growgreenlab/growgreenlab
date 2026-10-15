@@ -128,6 +128,8 @@ export class DrillSim {
   readonly scenario: DrillScenario;
   readonly engine: ReplayEngine;
   private readonly fp: FlowParams;
+  /** Candles pre-revealed at drill start; live events begin here. */
+  private readonly historyCount: number;
 
   /** Live ticks advanced since start (the sim's position on its timeline). */
   ticksElapsed = 0;
@@ -144,6 +146,12 @@ export class DrillSim {
   private prevWindowPrice: number;
   /** Recent per-window volatility EMA, in cents (spread driver, F5). */
   private volEmaC = 0.6;
+  /** Previous emitted window's flow phase (distribution ramp, #1). */
+  private lastFlowPhase: FlowPhase | null = null;
+  /** Consecutive Failed-resolution windows since the phase last
+   *  entered resolution; drives ctx.distRamp. Starts "fully ramped"
+   *  so no ramp is owed until a transition actually happens. */
+  private distRampStep = FLOW_UPDATES_PER_CANDLE;
   private checkpointSnap: { simTimeMs: number; candleIndex: number } | null = null;
 
   constructor(scenario: DrillScenario) {
@@ -154,6 +162,7 @@ export class DrillSim {
       behavior: BEHAVIOR_FOR[scenario.id] ?? "ambiguous",
     };
     const historyCount = historyCountFor(scenario);
+    this.historyCount = historyCount;
     this.engine = new ReplayEngine(
       scenario.candles,
       100_000,
@@ -210,12 +219,54 @@ export class DrillSim {
         revealed.some((cand) => cand.h > level) &&
         this.lastPrice < level;
       if (!confirmed) state = "breaking";
+    } else if (
+      BEHAVIOR_FOR[this.scenario.id] === "failed" &&
+      this.touchRejectionOpen(revealed)
+    ) {
+      // Residual #1 — the exact-touch gap: hodMarketState needs a
+      // strict cross (a close or wick ABOVE the level) to say
+      // "rejected", so a test that reached the level exactly and fell
+      // back (failed-003: candle 9 closes AT the level, candle 10
+      // closes below it) never confirms there — and the book stayed
+      // a neutral approach book for the whole grind that followed,
+      // minutes after supply had in fact leaned in. For Failed's flow
+      // that failed test IS the rejection chapter: distribution
+      // character applies while the chapter is open. Scoped to the
+      // failed behavior — every class's coil contains failed first
+      // tests, and for them that is ordinary approach behavior, not
+      // distribution (measured: a generic version recolored clean
+      // and weak coils and diluted their cross-candle tape).
+      state = "rejected";
     }
     const cp = this.scenario.checkpointIndex;
     return {
       phase: flowPhaseForState(state, candleIndex, cp, BEHAVIOR_FOR[this.scenario.id]),
       ctx: { ramp: rampFor(state, candleIndex, cp), state, volC: this.volEmaC },
     };
+  }
+
+  /**
+   * Residual #1 — is a Failed "test rejection" chapter open? True
+   * when the most recent LIVE chapter at the level is a decisive test
+   * that failed: a live candle (at/after the pre-revealed history)
+   * reached the level and closed at/near it, every finalized candle
+   * since closed below it, the last finalized candle closed below it,
+   * and the live price still hovers under the level (within ~1.5% —
+   * if price falls away hard, the chapter is over). A later close at
+   * or above the level (re-acceptance) closes the chapter. Pure
+   * function of revealed candles + last price.
+   */
+  private touchRejectionOpen(revealed: Candle[]): boolean {
+    const level = this.scenario.hod;
+    const lastFinal = revealed[revealed.length - 1];
+    if (!lastFinal || lastFinal.c >= level) return false;
+    if (this.lastPrice >= level || this.lastPrice < level * 0.985) return false;
+    for (let j = revealed.length - 1; j >= this.historyCount; j--) {
+      const c = revealed[j];
+      if (c.c >= level) return false; // (re-)acceptance close: chapter closed
+      if (c.h >= level && c.c >= level * 0.995) return true; // decisive test
+    }
+    return false;
   }
 
   /** Simulated elapsed time (ms) — derived from ticks, never wall clock. */
@@ -329,6 +380,15 @@ export class DrillSim {
 
     // F2/F1: phase and class-character ramp from revealed price events.
     const { phase, ctx } = this.flowContextFor(candleIndex);
+    // Residual #1: Failed's distribution ramps in over the first
+    // candle after the phase (re-)enters resolution. Window-counted,
+    // so it is a pure function of the tick stream (chunking-invariant).
+    if (phase === "resolution" && BEHAVIOR_FOR[this.scenario.id] === "failed") {
+      if (this.lastFlowPhase !== "resolution") this.distRampStep = 0;
+      ctx.distRamp = Math.min(1, (this.distRampStep + 1) / FLOW_UPDATES_PER_CANDLE);
+      this.distRampStep += 1;
+    }
+    this.lastFlowPhase = phase;
     const flowTick = candleIndex * FLOW_UPDATES_PER_CANDLE + updateIndex;
     const ts = flowTimestamp(candle.t, updateIndex);
 

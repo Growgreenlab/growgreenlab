@@ -70,6 +70,17 @@ export interface FlowContext {
   state: HodMarketState;
   /** Recent per-window volatility, EMA of |Δprice| in cents (F5). */
   volC: number;
+  /**
+   * 0..1 — Failed's distribution ramp (residual #1 fix): for the
+   * first candle after a rejection CONFIRMS, DrillSim feeds a rising
+   * ramp and the book's evolution step caps are elevated (~1.4x), so
+   * it converges on the distribution targets promptly — within the
+   * first post-confirmation candle — without teleporting (targets
+   * themselves never blend backward toward the lure book; if the book
+   * is already distributed, the ramp is a no-op). Absent / 1 = steady
+   * state (and all stateless callers).
+   */
+  distRamp?: number;
 }
 
 /** Deterministic PRNG (same algorithm as lib/engine.ts). */
@@ -119,6 +130,15 @@ export interface FlowPersonality {
   refillScale: number;
   /** Failed-wall size multiplier (0.85–1.20). */
   wallScale: number;
+  /**
+   * Book-balance jitter (residual #2b): bid-side / ask-side target
+   * multipliers drawn independently, applied outside the approach, so
+   * the bid/ask ratio a scenario shows varies per scenario (no
+   * class-constant fingerprint) while class means stay in band.
+   * Drawn LAST so every pre-existing scalar keeps its per-seed value.
+   */
+  balanceBid: number;
+  balanceAsk: number;
 }
 
 export function personalityFor(seed: number): FlowPersonality {
@@ -130,6 +150,8 @@ export function personalityFor(seed: number): FlowPersonality {
     buyProbJitter: (rng() - 0.5) * 0.08,
     refillScale: 0.85 + rng() * 0.3,
     wallScale: 0.85 + rng() * 0.35,
+    balanceBid: 0.86 + rng() * 0.34,
+    balanceAsk: 0.88 + rng() * 0.27,
   };
 }
 
@@ -229,8 +251,12 @@ function classTargets(
         // F6: strong but credible — depth ratio ≈ 2–2.5, not the old
         // ~6x class constant. Bids stack, asks stay thin ENOUGH to be
         // consumed visibly, but the book no longer decides by itself.
-        bidTouch = 700; askTouch = 360; bidVar = 350; askVar = 140;
-        bidExtra[0] = 250; bidExtra[1] = 150; // stacked support under the break
+        // Residual #2b trim: slightly less extreme still (mean ratio
+        // toward ~2.2) — conviction stays obvious in aggregate, but
+        // the per-scenario balance jitter (depthTargets) decides how
+        // strong any one drill's book looks.
+        bidTouch = 680; askTouch = 370; bidVar = 350; askVar = 150;
+        bidExtra[0] = 235; bidExtra[1] = 140; // stacked support under the break
       } else if (phase === "resolution") {
         bidTouch = 600; askTouch = 500;
       }
@@ -318,10 +344,15 @@ function depthTargets(
     bid = bid.map((v, i) => lerp(base.bid[i], v, ctx.ramp));
     ask = ask.map((v, i) => lerp(base.ask[i], v, ctx.ramp));
   }
+  // Residual #2b — per-scenario book-balance jitter outside the
+  // approach (the approach stays the pure shared baseline): the ratio
+  // a scenario shows is its own, not a class constant.
+  const balBid = phase === "approach" ? 1 : pers.balanceBid;
+  const balAsk = phase === "approach" ? 1 : pers.balanceAsk;
   const scaleBid = pers.depthScale, scaleAsk = pers.depthScale;
   return {
-    bid: bid.map((v, i) => v * scaleBid * (i === 0 ? pers.touchJitterBid : 1)),
-    ask: ask.map((v, i) => v * scaleAsk * (i === 0 ? pers.touchJitterAsk : 1)),
+    bid: bid.map((v, i) => v * scaleBid * balBid * (i === 0 ? pers.touchJitterBid : 1)),
+    ask: ask.map((v, i) => v * scaleAsk * balAsk * (i === 0 ? pers.touchJitterAsk : 1)),
   };
 }
 
@@ -391,7 +422,11 @@ export function generateBook(
   const prevBidByCents = new Map((prev?.bids ?? []).map((l) => [Math.round(l.price * 100), l.size]));
   const prevAskByCents = new Map((prev?.asks ?? []).map((l) => [Math.round(l.price * 100), l.size]));
 
-  const stepCap = 0.35 * pers.refillScale;
+  // Residual #1: while Failed's distribution ramp is rising, step
+  // caps are elevated (~1.4x) so the book tracks the blending targets
+  // without lag — still bounded per window (no teleporting depth).
+  const rampBoost = c.distRamp != null && c.distRamp < 1 ? 1.4 : 1;
+  const stepCap = 0.35 * pers.refillScale * rampBoost;
   // Weak ask refill cap: faster than the standard cap, but never scaled
   // past 0.45 — beyond that a single-window jump stops looking like
   // requoting and starts looking like teleporting depth.
@@ -465,7 +500,11 @@ function buyProbFor(
   let dirWeight = 0.15; // how much tick direction nudges print side
   switch (p.behavior) {
     case "clean":
-      classP = phase === "resolution" ? 0.65 : 0.7;
+      // Residual #2a: in the approach the blend target is a COIL bias
+      // (0.62), not the full breakout bias — pre-cross, buyers are
+      // interested but not yet lifting offers, so the ramped-in tape
+      // must not already print at breakout conviction.
+      classP = phase === "resolution" ? 0.65 : phase === "approach" ? 0.62 : 0.7;
       break;
     case "weak":
       if (phase === "resolution" || ctx.state === "rejected") {
@@ -494,12 +533,19 @@ function buyProbFor(
       break;
     }
   }
-  // Tick direction nudges the print side (uptick = buyer-initiated)
-  classP += tickDirection * dirWeight;
+  // Tick direction nudges the print side (uptick = buyer-initiated).
+  // Residual #2a: in the approach the nudge is DAMPED by the un-ramped
+  // share — every scenario drifts toward its level, so a full-strength
+  // nudge leans the whole approach tape buyer-heavy before any
+  // evidence exists (Clean approach means measured 0.58–0.60 while
+  // Weak/Ambiguous sat at 0.37–0.51). At ramp 1 (coil/event states)
+  // the tape responds at full strength again.
+  const dirScale = phase === "approach" ? 1 - 0.65 * (1 - ctx.ramp) : 1;
+  classP += tickDirection * dirWeight * dirScale;
 
   let prob = classP;
   if (phase === "approach") {
-    const baseline = 0.5 + tickDirection * 0.15;
+    const baseline = 0.5 + tickDirection * 0.15 * dirScale;
     prob = lerp(baseline, classP, ctx.ramp);
   }
   prob += personalityFor(p.seed).buyProbJitter;

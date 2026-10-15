@@ -259,3 +259,81 @@ broadly — 86% of individual Clean breakout windows fall inside the
 value range spanned by other classes' windows — and no single metric
 separates Weak / Failed / Ambiguous from each other at the snapshot
 a user actually sees.
+
+## Follow-up addendum (2026-10-15, owner-approved residuals #1 + #2)
+
+**Residual #1 — failed-003's post-rejection book transition.** The
+audit-era probe segmented failed-003 from candle 10 — and the root
+cause turned out to be upstream of evolution speed: candle 9 closes
+AT the level (10.15 = HOD) and candle 10 closes below it, a decisive
+test that the strict-cross state semantics (`h > level`) never
+confirm, so the grind that followed (candles 11–15) ran a neutral
+approach book (ratios 1.03 / 0.97 / 0.92) while supply had leaned in.
+Fix, in `sim.ts`: a Failed-scoped "test rejection" chapter —
+`touchRejectionOpen` — opens when the most recent LIVE chapter at
+the level is a decisive test (reached the level, closed at/near it)
+with only sub-level closes since, the last close below, and price
+hovering within ~1.5% under the level; a close at/above the level
+(re-acceptance) closes the chapter. In `orderflow.ts`, the first
+candle after any (re-)entry into Failed resolution runs a
+distribution ramp (`ctx.distRamp`): evolution step caps elevated
+~1.4x so the book converges on the distribution targets promptly.
+Targets never blend backward toward the lure book (an early blend
+draft measurably re-supported failed-001's already-distributed book,
+0.18 → 0.65 in the confirming candle — removed). Measured,
+failed-003 per-candle mean ratio: candle 10 (confirming) 0.95,
+candle 11: 1.03 → **0.19**, 12: 0.97 → **0.17**, 13: 0.92 → **0.14**;
+the cross candle (16) and fake acceptance (17–19) keep their lure
+book (1.24 / 1.18 / 0.89 / 0.27), and the main rejection is unchanged
+(0.30 / 0.20 / 0.19 / 0.16). failed-001 / failed-002 trajectories are
+unchanged (0.21 / 0.19 in their first post-confirmation candles).
+Every other scenario's phase timeline is byte-identical to before —
+the chapter is Failed-scoped precisely because every class's coil
+contains failed first tests, and for them that is approach behavior
+(a generic version measurably recolored clean/weak coils and
+diluted clean-001's cross-candle tape 0.76 → 0.68; reverted).
+Trade-off, stated plainly: failed-003's grind now carries an
+event-earned bearish flow tell (distribution after a failed test at
+the level) before its checkpoint; the checkpoint read still turns
+on judging the fake acceptance that follows.
+
+**Residual #2a — Clean approach tape lean.** Two causally-honest
+softeners in `buyProbFor`: the tick-direction nudge is damped by
+the un-ramped share in the approach (×0.35 deep, full strength at
+ramp 1), and Clean's approach blend target is a coil bias (0.62),
+not the breakout bias (0.70). Clean approach buy-share class mean:
+0.590 → **0.552** (0.567 / 0.527 / 0.561); Failed still overlaps
+(failed-001 0.575 sits inside Clean's range), so no threshold on
+approach tape identifies Clean.
+
+**Residual #2b — Clean checkpoint aggregates.** Clean's breakout
+targets trimmed (bid touch 700 → 680, extras 250/150 → 235/140,
+ask touch 360 → 370) and a per-scenario book-balance jitter added
+(`personalityFor.balanceBid/balanceAsk`, drawn last so existing
+per-seed scalars are unchanged; applied outside the approach).
+Clean breakout depth-ratio means: 2.45 / 2.61 / 2.15 → **1.94 /
+2.32 / 2.06** (class mean 2.40 → 2.11, still inside the credible
+~2.0–2.6 band and the [1.7, 3.2] path-test band); per-window
+overlap improved — **95%** of individual Clean breakout windows
+now fall inside the ratio range spanned by other classes' windows
+(was 86%). Honest limit: the best single-metric AGGREGATE rule
+still reaches 12/12 for Clean (brkRatio; also brkBuyShr and
+crossBuyShr separate, before and after, at full-phase and at
+checkpoint-time segmentation). With three scenarios per class, any
+consistent designed conviction gap yields a perfect threshold on
+some mean; closing it would require overlap on every aggregate at
+once — i.e. a Clean breakout book under the 1.7 readability floor
+or breakout tape under the 0.65 cross floor — breaking the class's
+defined decision-moment readability, which the owner explicitly
+protected. The moat narrowed (min-gap 0.73 → 0.51 on brkRatio) and
+what a trainee actually sees window-to-window overlaps more, not
+less. Reported as partially met, deliberately not forced.
+
+Tests: verify-flowpath gains a §6 block (+15 checks: chapter
+anchoring, no-distribution-before-confirmation, bend/trajectory
+bounds, chapter closing on re-acceptance, post-confirmation bounds
+for all three failed scenarios, Clean approach-lean bound +
+Failed-overlap). No pre-existing assertion was modified. Totals:
+1,603 → **1,618** checks, all green; determinism (chunking
+invariance) and exact volume conservation re-verified inside the
+suites; `tsc --noEmit` clean; `next build` passes.

@@ -16,8 +16,8 @@
  *    classes must be readable in aggregate, never one constant)
  */
 import { HOD_SCENARIOS } from "./scenarios";
-import { DrillSim, BEHAVIOR_FOR } from "./sim";
-import { TICKS_PER_FLOW_UPDATE } from "./orderflow";
+import { DrillSim, BEHAVIOR_FOR, historyCountFor } from "./sim";
+import { TICKS_PER_FLOW_UPDATE, FLOW_UPDATES_PER_CANDLE } from "./orderflow";
 import type { DrillScenario } from "./types";
 import type { SimEvent } from "./sim";
 
@@ -241,6 +241,89 @@ console.log("\n=== Print frequency ===");
   check("breakout prints more frequently than approach", b > a * 1.1);
   check("resolution prints more frequently than approach", r > a * 1.1);
   check("quiet approach stays sparse (<= 2 prints/window)", a <= 2);
+}
+
+// =====================================================================
+// 6. RESIDUAL #1 — FAILED TEST-REJECTION CHAPTER + DISTRIBUTION RAMP,
+//    AND RESIDUAL #2a — CLEAN APPROACH LEAN
+// =====================================================================
+console.log("\n=== Residual #1: failed rejection trajectories ===");
+for (const s of HOD_SCENARIOS) {
+  if (BEHAVIOR_FOR[s.id] !== "failed") continue;
+  const wins = allWins.get(s.id)!;
+  const cp = s.checkpointIndex;
+  const firstSub = s.candles.findIndex((cand, i) => i >= cp - 1 && cand.c < s.hod);
+  const post = wins.filter((w) => w.ci > firstSub && w.ci <= firstSub + 2);
+  const postRatio = mean(post.map((w) => w.bidTot / w.askTot));
+  check(`${s.id}: book is distributed within 2 candles of the main confirming close (mean ratio < 0.35)`,
+    post.length > 0 && postRatio < 0.35);
+}
+{
+  // failed-003 (grind trap): candle 9 closes AT the level, candle 10
+  // closes below — a decisive test the strict cross semantics never
+  // confirm. The flow chapter must open on that confirming close, the
+  // book must bend within one candle, and the lure must survive both
+  // before it and at the real cross that follows.
+  const s = HOD_SCENARIOS.find((x) => x.id === "hod-failed-003")!;
+  const hist = historyCountFor(s);
+  const wins = allWins.get(s.id)!;
+  const confirmIdx = s.candles.findIndex(
+    (c, i) => i >= hist && c.h >= s.hod && c.c < s.hod && c.c >= s.hod * 0.995
+  );
+  check("failed-003: decisive live test found (chapter anchor exists)", confirmIdx === 10);
+  const at = (ci: number) => wins.filter((w) => w.ci === ci);
+  const ratioAt = (ci: number) => mean(at(ci).map((w) => w.bidTot / w.askTot));
+  const resAt = (ci: number) => at(ci).filter((w) => w.phase === "resolution").length;
+  check("failed-003: no distribution before the confirming close",
+    wins.filter((w) => w.ci < confirmIdx && w.phase === "resolution").length === 0);
+  check("failed-003: no premature distribution on the test candle itself (mean ratio > 0.85)",
+    ratioAt(confirmIdx - 1) > 0.85);
+  check("failed-003: confirming candle does not teleport (mean ratio > 0.7)",
+    ratioAt(confirmIdx) > 0.7);
+  check("failed-003: ratio bends below 0.85 within the first post-confirmation candle",
+    ratioAt(confirmIdx + 1) < 0.85);
+  const bend = at(confirmIdx + 1).map((w) => w.bidTot / w.askTot);
+  check("failed-003: >= 80% of first post-confirmation windows are ask-heavy",
+    bend.filter((r) => r < 0.85).length / bend.length >= 0.8);
+  const first3 = wins.filter((w) => w.ci > confirmIdx && w.ci <= confirmIdx + 3);
+  check("failed-003: approaches the distribution band within 3 candles (mean ratio < 0.6)",
+    mean(first3.map((w) => w.bidTot / w.askTot)) < 0.6);
+  check("failed-003: chapter closes for the re-break (no resolution windows at the checkpoint candle)",
+    resAt(s.checkpointIndex) === 0);
+  check("failed-003: cross candle stays lure (<= 2 resolution windows before the spike)",
+    resAt(s.checkpointIndex - 1) <= 2);
+  // The confirming candle's own resolution window, if any, is its
+  // FINAL window (emitted on the finalizing tick — after the close).
+  const sim = new DrillSim(s);
+  let lastWinUi = -1, resUiAtConfirm: number[] = [];
+  let g = 0;
+  while (!sim.atEnd && g++ < 100000) {
+    for (const e of sim.advance(TICKS_PER_FLOW_UPDATE)) {
+      if (e.kind === "flow" && e.candleIndex === confirmIdx && e.phase === "resolution") {
+        resUiAtConfirm.push(e.updateIndex);
+      }
+      if (e.kind === "flow") lastWinUi = e.updateIndex;
+    }
+  }
+  void lastWinUi;
+  check("failed-003: confirming candle's resolution window is post-close only",
+    resUiAtConfirm.every((ui) => ui === FLOW_UPDATES_PER_CANDLE - 1));
+}
+
+console.log("\n=== Residual #2a: clean approach lean ===");
+{
+  const byClass = new Map<string, number[]>();
+  for (const s of HOD_SCENARIOS) {
+    const appr = allWins.get(s.id)!.filter((w) => w.phase === "approach");
+    const arr = byClass.get(BEHAVIOR_FOR[s.id]) ?? [];
+    arr.push(buyShare(appr));
+    byClass.set(BEHAVIOR_FOR[s.id], arr);
+  }
+  const cleanMean = mean(byClass.get("clean")!);
+  console.log(`  approach buy-share class means: clean ${cleanMean.toFixed(3)}, weak ${mean(byClass.get("weak")!).toFixed(3)}, failed ${mean(byClass.get("failed")!).toFixed(3)}, ambiguous ${mean(byClass.get("ambiguous")!).toFixed(3)}`);
+  check("clean approach tape lean softened (class mean <= 0.57)", cleanMean <= 0.57);
+  check("failed approach tape overlaps clean (no reliable approach shortcut)",
+    Math.max(...byClass.get("failed")!) >= Math.min(...byClass.get("clean")!));
 }
 
 console.log(`\n=== FLOWPATH RESULT: ${pass} passed, ${fail} failed ===`);
