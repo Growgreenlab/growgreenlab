@@ -32,6 +32,7 @@
 import type { DrillScenario, DecisionClassification, IntendedAction } from "./types";
 import type { DrillDecision } from "./decision";
 import { effectiveConfidence } from "./decision";
+import type { OrderBookSnapshot, TradePrint } from "./orderflow";
 import {
   scoreClassification, scoreAction,
   type ClassificationVerdict, type ActionVerdict,
@@ -48,7 +49,11 @@ export interface EvaluationDimension {
 
 export interface EvaluationReport {
   dimensions: EvaluationDimension[];
-  /** 2–4 short factual lines, checkpoint-time observables only. */
+  /**
+   * Short factual lines, checkpoint-time observables only: 2–4 candle
+   * lines, plus 1–3 order-flow lines when a lock-time flow snapshot
+   * was provided in the checkpoint context.
+   */
   evidence: string[];
   headline: string;
   /** What the trader did well (a correct no-trade is a positive here). */
@@ -67,6 +72,13 @@ export const EVALUATION_STANDING_LINE =
 export interface CheckpointContext {
   /** Engine candle index stamped at the lock (the checkpoint snapshot). */
   candleIndex?: number;
+  /**
+   * Order-flow aggregates captured at the lock tick (see
+   * snapshotOrderFlow). Optional: when absent or invalid, the report
+   * is exactly the candle-evidence report — flow lines and flow note
+   * acknowledgments are omitted, never invented.
+   */
+  flow?: FlowSnapshot | null;
 }
 
 // ── Field validation (missing data degrades, never invents) ─────────
@@ -236,6 +248,154 @@ const WATCH_FOR: Record<DecisionClassification, string> = {
   ambiguous:
     "Watch for one side to resolve — a close that extends with volume, or a close back under the level. Until one prints, there is no signal to act on.",
 };
+
+// ── Order-flow snapshot: the book + tape at the lock tick ───────────
+
+/**
+ * Aggregates of the Level 2 book and Time & Sales buffer exactly as
+ * they stood when the decision locked. Computed by the runner at the
+ * lock tick (BEFORE the outcome resolves) from DrillSim's live book
+ * and print buffer — the same objects the panels were rendering — and
+ * handed to buildEvaluation as data. The sealed ledger is NOT extended
+ * with this; it is session state, like the checkpoint snapshot.
+ *
+ * Facts vs interpretations: a FlowSnapshot carries numbers only. The
+ * evidence lines built from it state numbers only; any reading of what
+ * the flow suggested lives in a dimension note, phrased as suggestion.
+ * Nothing here can support a claim about WHO was trading — size and
+ * side aggregates say nothing about participation by any class of
+ * trader, and no output of this module makes such a claim.
+ */
+export interface FlowSnapshot {
+  /** Total size across all bid levels. */
+  bidSize: number;
+  /** Total size across all ask levels. */
+  askSize: number;
+  /** bidSize ÷ askSize; null when nothing is offered. */
+  bidAskRatio: number | null;
+  /** Share of printed volume initiated on the buy side (0..1); null when no volume printed. */
+  tapeBuyShare: number | null;
+  /** Number of prints in the tape buffer provided. */
+  printCount: number;
+  /** Best ask − best bid, in cents; null when either side is empty. */
+  spreadCents: number | null;
+}
+
+/**
+ * Pure aggregation of a book + print buffer into a FlowSnapshot.
+ * Reads only its inputs, mutates nothing, and degrades field-by-field:
+ * a missing book yields zero totals and a null spread; an empty tape
+ * yields a null buy share. It never throws.
+ */
+export function snapshotOrderFlow(
+  book: OrderBookSnapshot | null | undefined,
+  prints: readonly TradePrint[] | null | undefined
+): FlowSnapshot {
+  let bidSize = 0;
+  let askSize = 0;
+  let spreadCents: number | null = null;
+  if (book) {
+    for (const l of book.bids ?? []) {
+      if (l && Number.isFinite(l.size)) bidSize += Math.max(0, l.size);
+    }
+    for (const l of book.asks ?? []) {
+      if (l && Number.isFinite(l.size)) askSize += Math.max(0, l.size);
+    }
+    const bestBid = book.bids?.[0]?.price;
+    const bestAsk = book.asks?.[0]?.price;
+    if (Number.isFinite(bestBid) && Number.isFinite(bestAsk)) {
+      spreadCents = Math.max(0, Math.round(((bestAsk as number) - (bestBid as number)) * 100));
+    }
+  }
+  let buyVol = 0;
+  let totalVol = 0;
+  let printCount = 0;
+  if (Array.isArray(prints)) {
+    printCount = prints.length;
+    for (const p of prints) {
+      if (!p || !Number.isFinite(p.size)) continue;
+      const v = Math.max(0, p.size);
+      totalVol += v;
+      if (p.side === "buy") buyVol += v;
+    }
+  }
+  return {
+    bidSize,
+    askSize,
+    bidAskRatio: askSize > 0 ? bidSize / askSize : null,
+    tapeBuyShare: totalVol > 0 ? buyVol / totalVol : null,
+    printCount,
+    spreadCents,
+  };
+}
+
+/** A context flow value is used only if every field is sane — else absent. */
+function asFlow(v: unknown): FlowSnapshot | null {
+  if (!v || typeof v !== "object") return null;
+  const f = v as Partial<FlowSnapshot>;
+  const num = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n);
+  if (!num(f.bidSize) || !num(f.askSize) || f.bidSize < 0 || f.askSize < 0) return null;
+  if (!(f.bidAskRatio === null || (num(f.bidAskRatio) && f.bidAskRatio > 0))) return null;
+  if (!(f.tapeBuyShare === null || (num(f.tapeBuyShare) && f.tapeBuyShare >= 0 && f.tapeBuyShare <= 1))) return null;
+  if (!num(f.printCount) || !Number.isInteger(f.printCount) || f.printCount < 0) return null;
+  if (!(f.spreadCents === null || (num(f.spreadCents) && f.spreadCents >= 0))) return null;
+  // No data at all (empty book AND empty tape) carries no evidence.
+  if (f.bidSize + f.askSize <= 0 && f.printCount === 0) return null;
+  return f as FlowSnapshot;
+}
+
+const fmtSize = (n: number): string =>
+  Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+const pct = (share: number): string => `${Math.round(share * 100)}%`;
+
+// One-sided flow thresholds: beyond these the book or tape is read as
+// leaning decisively one way. Inside the band the flow is treated as
+// mixed and NO acknowledgment is made — flow color is evidence-gated
+// exactly like the trap mechanisms.
+const ASK_HEAVY_RATIO = 0.6;
+const BID_HEAVY_RATIO = 1.7;
+const SELL_TAPE_SHARE = 0.35;
+const BUY_TAPE_SHARE = 0.65;
+
+const flowAskHeavy = (f: FlowSnapshot) => f.bidAskRatio != null && f.bidAskRatio <= ASK_HEAVY_RATIO;
+const flowBidHeavy = (f: FlowSnapshot) => f.bidAskRatio != null && f.bidAskRatio >= BID_HEAVY_RATIO;
+const flowSellTape = (f: FlowSnapshot) => f.tapeBuyShare != null && f.tapeBuyShare <= SELL_TAPE_SHARE;
+const flowBuyTape = (f: FlowSnapshot) => f.tapeBuyShare != null && f.tapeBuyShare >= BUY_TAPE_SHARE;
+
+/** Phrase for supply-leaning flow at the lock, or null when not one-sided. */
+function flowAgainstPhrase(f: FlowSnapshot): string | null {
+  const parts: string[] = [];
+  if (flowAskHeavy(f)) parts.push(`the ask outweighed the bid ${x(1 / (f.bidAskRatio as number))}`);
+  if (flowSellTape(f)) parts.push(`only ${pct(f.tapeBuyShare as number)} of the tape printed on the buy side`);
+  return parts.length ? parts.join(" and ") : null;
+}
+
+/** Phrase for demand-leaning flow at the lock, or null when not one-sided. */
+function flowWithPhrase(f: FlowSnapshot): string | null {
+  const parts: string[] = [];
+  if (flowBidHeavy(f)) parts.push(`the bid outweighed the ask ${x(f.bidAskRatio as number)}`);
+  if (flowBuyTape(f)) parts.push(`${pct(f.tapeBuyShare as number)} of the tape printed on the buy side`);
+  return parts.length ? parts.join(" and ") : null;
+}
+
+/** Flow FACT lines (numbers only), 1–3, each gated on its data existing. */
+function flowEvidenceLines(f: FlowSnapshot): string[] {
+  const lines: string[] = [];
+  if (f.bidSize + f.askSize > 0) {
+    let line = `At the lock, the Level 2 book showed ${fmtSize(f.bidSize)} shares bid against ${fmtSize(f.askSize)} offered`;
+    if (f.bidAskRatio != null) line += ` — a bid/ask ratio of ${x(f.bidAskRatio)}`;
+    lines.push(`${line}.`);
+    if (f.spreadCents != null) {
+      lines.push(`The quoted spread at the lock was ${f.spreadCents}¢.`);
+    }
+  }
+  if (f.printCount > 0 && f.tapeBuyShare != null) {
+    lines.push(
+      `Time & Sales into the lock: ${pct(f.tapeBuyShare)} of printed volume was on the buy side across ${f.printCount} prints.`
+    );
+  }
+  return lines.slice(0, 3);
+}
 
 // ── Dimensions ───────────────────────────────────────────────────────
 
@@ -612,9 +772,38 @@ export function buildEvaluation(
   const isTrap = scenario.classification === "failed" && action === "enter";
   const cls = (scenario.classification ?? "ambiguous") as DecisionClassification;
 
+  // Order-flow acknowledgment (only with a valid lock-time snapshot):
+  // notes gain a sentence when the flow decisively agreed with — or
+  // argued against — the decision. Grades never move because of flow;
+  // mixed flow earns no sentence at all. Interpretations are phrased
+  // as what the evidence suggested, never as certainty.
+  const flow = asFlow(checkpointContext?.flow);
+  if (flow) {
+    const disc = dimensions.find((dd) => dd.key === "discipline");
+    const tim = dimensions.find((dd) => dd.key === "timing");
+    const against = flowAgainstPhrase(flow);
+    const withFlow = flowWithPhrase(flow);
+    if (action === "enter" && (cls === "failed" || cls === "weak") && against && disc) {
+      disc.note +=
+        ` The flow at your lock pointed the same way — ${against} — which suggested supply, not demand, was setting the terms at the level.`;
+    } else if (
+      action != null && action !== "enter" &&
+      (cls === "failed" || cls === "weak" || cls === "ambiguous") &&
+      against && disc &&
+      (actionVerdict === "appropriate" || actionVerdict === "acceptable")
+    ) {
+      disc.note += ` The flow backed standing aside: ${against}.`;
+    }
+    if (action === "enter" && cls === "clean" && withFlow && tim) {
+      tim.note += ` The book and tape agreed at the lock: ${withFlow}.`;
+    }
+  }
+
   return {
     dimensions,
-    evidence: evidenceLines(scenario, facts),
+    evidence: flow
+      ? [...evidenceLines(scenario, facts), ...flowEvidenceLines(flow)]
+      : evidenceLines(scenario, facts),
     headline: buildHeadline(classVerdict, actionVerdict, isTrap, dimensions),
     didWell: buildDidWell(
       scenario, answer, action, classVerdict, actionVerdict, facts, calibration, confidence

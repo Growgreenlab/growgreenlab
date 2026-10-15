@@ -53,7 +53,10 @@ import {
   formatSimTimeMs, DEFAULT_CONFIDENCE, type DrillDecision,
 } from "../../../lib/drills/decision";
 import { buildReviewModel, scoreDecision } from "../../../lib/drills/scoring";
-import { buildEvaluation, type EvalGrade } from "../../../lib/drills/evaluation";
+import {
+  buildEvaluation, snapshotOrderFlow,
+  type EvalGrade, type FlowSnapshot,
+} from "../../../lib/drills/evaluation";
 import { DrillSim, SimClock } from "../../../lib/drills/sim";
 import { HOD_STATE_LABEL } from "../../../lib/drills/hodState";
 import LwcChart from "../../../components/LwcChart";
@@ -133,6 +136,11 @@ export default function DrillRunner() {
   const [selAction, setSelAction] = useState<IntendedAction | null>(null);
   const [confidence, setConfidence] = useState<number>(DEFAULT_CONFIDENCE);
   const [decision, setDecision] = useState<DrillDecision | null>(null);
+  // Order-flow aggregates captured at the lock tick (session state —
+  // the sealed ledger is NOT extended with them). Feeds only the
+  // teaching-screen evaluation; null = no snapshot, evaluation omits
+  // flow evidence entirely.
+  const [flowSnap, setFlowSnap] = useState<FlowSnapshot | null>(null);
   // Blind cycle: the queue's next slug once this drill is submitted
   // (undefined = not loaded yet, null = cycle complete).
   const [nextSlug, setNextSlug] = useState<string | null | undefined>(undefined);
@@ -163,6 +171,7 @@ export default function DrillRunner() {
     setSelAction(null);
     setConfidence(DEFAULT_CONFIDENCE);
     setDecision(null);
+    setFlowSnap(null);
     setNextSlug(undefined);
     setPaused(false);
     setPanelCollapsed(false);
@@ -192,6 +201,7 @@ export default function DrillRunner() {
     setSelAction(null);
     setConfidence(DEFAULT_CONFIDENCE);
     setDecision(null);
+    setFlowSnap(null);
     setPaused(false);
     setPanelCollapsed(false);
     setChartFocused(false);
@@ -259,6 +269,13 @@ export default function DrillRunner() {
     lockedRef.current = true;
     const locked = ledgerRef.current.current;
     setDecision(locked);
+    // Capture the order-flow aggregates NOW — the exact lock tick,
+    // before resolving advances the sim another frame. The book and
+    // print buffer are the same objects the panels were rendering at
+    // the checkpoint, so the evaluation cites the evidence the trader
+    // actually saw. Numbers only; the sim replaces (never mutates)
+    // these objects as it advances, and the snapshot is plain data.
+    setFlowSnap(snapshotOrderFlow(sim.book, sim.prints));
     // Blind cycle: sealing the decision IS the submission — the one
     // event that consumes this drill in the cycle. submitAttempt is
     // idempotent per (cycle, slug): a replayed drill, a remount, or a
@@ -342,7 +359,7 @@ export default function DrillRunner() {
   // the sealed decision + checkpoint evidence, never rendered before
   // the reveal and never an input to scoring.
   const evaluation = phase === "teaching" && decision
-    ? buildEvaluation(scenario, decision, { candleIndex: decision.candleIndex })
+    ? buildEvaluation(scenario, decision, { candleIndex: decision.candleIndex, flow: flowSnap })
     : null;
 
   // HOD header data — revealed data only (engine boundary), never the
@@ -740,6 +757,7 @@ export default function DrillRunner() {
                 lockedRef.current = false;
                 simRef.current = null;
                 setDecision(null);
+                setFlowSnap(null);
                             setPhase("intro");
               }}
               style={{ padding: "12px 24px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "#fff", fontWeight: 600, cursor: "pointer", fontSize: 14 }}>

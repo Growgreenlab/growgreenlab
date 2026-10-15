@@ -12,9 +12,11 @@ import { HOD_SCENARIOS } from "./scenarios";
 import { buildDecision, type DrillDecision } from "./decision";
 import type { DecisionClassification, IntendedAction, DrillScenario } from "./types";
 import {
-  buildEvaluation, checkpointFacts, EVALUATION_STANDING_LINE,
-  type EvaluationReport,
+  buildEvaluation, checkpointFacts, snapshotOrderFlow, EVALUATION_STANDING_LINE,
+  type EvaluationReport, type FlowSnapshot,
 } from "./evaluation";
+import { DrillSim } from "./sim";
+import { DRILL_TICKS_PER_CANDLE, type OrderBookSnapshot, type TradePrint } from "./orderflow";
 
 let pass = 0, fail = 0;
 function check(name: string, cond: boolean) {
@@ -271,7 +273,7 @@ for (const s of HOD_SCENARIOS) {
 }
 
 // ── G. Content hygiene across a decision matrix ─────────────────────
-const PROFIT = /profit|guarantee|win rate|p&l|money back/i;
+const PROFIT = /profit|guarantee|win rate|p&l|money back|institution/i;
 for (const s of HOD_SCENARIOS) {
   const cls = s.classification as DecisionClassification;
   const variants: DrillDecision[] = [
@@ -296,6 +298,187 @@ for (const s of HOD_SCENARIOS) {
   check(`standing line disclaims outcome/profitability (${s.id})`,
     buildEvaluation(s, variants[0], { candleIndex: s.checkpointIndex }).standingLine
       .includes("not a prediction of real-world profitability"));
+}
+
+console.log("\n=== H. Order-flow evidence (P1): snapshot math + gated flow notes ===");
+{
+  // — snapshotOrderFlow: exact aggregation on constructed inputs —
+  const book: OrderBookSnapshot = {
+    bids: [{ price: 10.0, size: 300 }, { price: 9.99, size: 200 }],
+    asks: [{ price: 10.02, size: 100 }, { price: 10.03, size: 400 }],
+    timestamp: 1,
+  };
+  const prints: TradePrint[] = [
+    { price: 10.02, size: 300, timestamp: 3, side: "buy" },
+    { price: 10.0, size: 100, timestamp: 2, side: "sell" },
+    { price: 10.02, size: 100, timestamp: 1, side: "buy" },
+  ];
+  const snap = snapshotOrderFlow(book, prints);
+  check("snapshot: bid/ask totals", snap.bidSize === 500 && snap.askSize === 500);
+  check("snapshot: ratio", snap.bidAskRatio === 1);
+  check("snapshot: spread cents from best bid/ask", snap.spreadCents === 2);
+  check("snapshot: tape buy share by volume", snap.tapeBuyShare === 0.8);
+  check("snapshot: print count", snap.printCount === 3);
+
+  const empty = snapshotOrderFlow(null, []);
+  check("snapshot: null book + empty tape degrades field-by-field",
+    empty.bidSize === 0 && empty.askSize === 0 && empty.bidAskRatio === null &&
+    empty.spreadCents === null && empty.tapeBuyShare === null && empty.printCount === 0);
+  const noAsk = snapshotOrderFlow({ bids: [{ price: 10, size: 50 }], asks: [], timestamp: 0 }, prints);
+  check("snapshot: empty ask side → ratio null, spread null",
+    noAsk.bidAskRatio === null && noAsk.spreadCents === null && noAsk.bidSize === 50);
+  const noVol = snapshotOrderFlow(book, [{ price: 10, size: 0, timestamp: 0, side: "buy" }]);
+  check("snapshot: zero-volume tape → buy share null, count kept",
+    noVol.tapeBuyShare === null && noVol.printCount === 1);
+
+  const bookBefore = JSON.stringify(book);
+  const printsBefore = JSON.stringify(prints);
+  const snap2 = snapshotOrderFlow(book, prints);
+  check("snapshot: pure (inputs unmutated, repeat call identical)",
+    JSON.stringify(book) === bookBefore && JSON.stringify(prints) === printsBefore &&
+    JSON.stringify(snap2) === JSON.stringify(snap));
+
+  // — Absent / invalid flow: output byte-identical to the pre-flow build —
+  for (const s of HOD_SCENARIOS) {
+    const cls = s.classification as DecisionClassification;
+    const d = decisionFor(s, cls, APPROPRIATE[cls], 4);
+    const base = JSON.stringify(buildEvaluation(s, d, { candleIndex: s.checkpointIndex }));
+    check(`flow undefined == absent (${s.id})`,
+      JSON.stringify(buildEvaluation(s, d, { candleIndex: s.checkpointIndex, flow: undefined })) === base);
+    check(`flow null == absent (${s.id})`,
+      JSON.stringify(buildEvaluation(s, d, { candleIndex: s.checkpointIndex, flow: null })) === base);
+  }
+  {
+    const s = byId.get("hod-clean-001")!;
+    const d = decisionFor(s, "clean", "enter", 5);
+    const base = JSON.stringify(buildEvaluation(s, d, { candleIndex: s.checkpointIndex }));
+    const garbage: unknown[] = [
+      { bidSize: NaN, askSize: 100, bidAskRatio: 1, tapeBuyShare: 0.5, printCount: 3, spreadCents: 2 },
+      { bidSize: -5, askSize: 100, bidAskRatio: 1, tapeBuyShare: 0.5, printCount: 3, spreadCents: 2 },
+      { bidSize: 100, askSize: 100, bidAskRatio: 1, tapeBuyShare: 1.4, printCount: 3, spreadCents: 2 },
+      { bidSize: 100, askSize: 100, bidAskRatio: 1, tapeBuyShare: 0.5, printCount: 2.5, spreadCents: 2 },
+      { bidSize: 0, askSize: 0, bidAskRatio: null, tapeBuyShare: null, printCount: 0, spreadCents: null },
+      "not a snapshot",
+    ];
+    for (const [i, g] of garbage.entries()) {
+      check(`invalid flow #${i} treated as absent`,
+        JSON.stringify(buildEvaluation(s, d, { candleIndex: s.checkpointIndex, flow: g as FlowSnapshot })) === base);
+    }
+  }
+
+  // — Flow fact lines: numbers only, gated on data presence —
+  const ASK_HEAVY: FlowSnapshot = { bidSize: 400, askSize: 1600, bidAskRatio: 0.25, tapeBuyShare: 0.2, printCount: 40, spreadCents: 3 };
+  const BID_HEAVY: FlowSnapshot = { bidSize: 2100, askSize: 1000, bidAskRatio: 2.1, tapeBuyShare: 0.74, printCount: 36, spreadCents: 2 };
+  const NEUTRAL: FlowSnapshot = { bidSize: 1100, askSize: 1000, bidAskRatio: 1.1, tapeBuyShare: 0.5, printCount: 22, spreadCents: 2 };
+  {
+    const s = byId.get("hod-clean-001")!;
+    const d = decisionFor(s, "clean", "enter", 5);
+    const noFlow = buildEvaluation(s, d, { candleIndex: s.checkpointIndex });
+    const withFlow = buildEvaluation(s, d, { candleIndex: s.checkpointIndex, flow: BID_HEAVY });
+    check("flow: book fact line cites the totals + ratio",
+      withFlow.evidence.some((e) => e.includes("2,100 shares bid against 1,000 offered") && e.includes("bid/ask ratio of 2.1×")));
+    check("flow: spread fact line", withFlow.evidence.some((e) => e.includes("spread at the lock was 2¢")));
+    check("flow: tape fact line cites buy share + print count",
+      withFlow.evidence.some((e) => e.includes("74% of printed volume was on the buy side across 36 prints")));
+    check("flow: fact lines append after the candle lines (candle lines untouched)",
+      withFlow.evidence.length === noFlow.evidence.length + 3 &&
+      JSON.stringify(withFlow.evidence.slice(0, noFlow.evidence.length)) === JSON.stringify(noFlow.evidence));
+  }
+
+  // — Contradictory flow acknowledgments (evidence-gated, notes only) —
+  {
+    const s = byId.get("hod-failed-002")!;
+    const d = decisionFor(s, "clean", "enter", 5);
+    const noFlow = buildEvaluation(s, d, { candleIndex: s.checkpointIndex });
+    const withFlow = buildEvaluation(s, d, { candleIndex: s.checkpointIndex, flow: ASK_HEAVY });
+    check("failed+enter + ask-heavy flow: discipline note acknowledges the contradiction",
+      (dim(withFlow, "discipline")?.note ?? "").includes("pointed the same way") &&
+      (dim(withFlow, "discipline")?.note ?? "").includes("the ask outweighed the bid 4.0×"));
+    check("failed+enter + flow: grades unchanged by flow",
+      JSON.stringify(withFlow.dimensions.map((dd) => dd.grade)) ===
+      JSON.stringify(noFlow.dimensions.map((dd) => dd.grade)));
+    check("failed+enter + flow: keyMistake unchanged (flow never rewrites it)",
+      withFlow.keyMistake === noFlow.keyMistake);
+  }
+  {
+    const s = byId.get("hod-weak-001")!;
+    const d = decisionFor(s, "clean", "enter", 3);
+    const SELL_TAPE: FlowSnapshot = { bidSize: 1000, askSize: 1000, bidAskRatio: 1, tapeBuyShare: 0.25, printCount: 30, spreadCents: 2 };
+    const withFlow = buildEvaluation(s, d, { candleIndex: s.checkpointIndex, flow: SELL_TAPE });
+    check("weak+enter + sell tape: discipline note cites the tape",
+      (dim(withFlow, "discipline")?.note ?? "").includes("only 25% of the tape printed on the buy side"));
+  }
+  {
+    const s = byId.get("hod-weak-002")!;
+    const d = decisionFor(s, "weak", "wait", 3);
+    const withFlow = buildEvaluation(s, d, { candleIndex: s.checkpointIndex, flow: ASK_HEAVY });
+    check("weak+wait + ask-heavy flow: discipline note says the flow backed standing aside",
+      (dim(withFlow, "discipline")?.note ?? "").includes("backed standing aside"));
+  }
+  {
+    const s = byId.get("hod-clean-001")!;
+    const d = decisionFor(s, "clean", "enter", 5);
+    const withFlow = buildEvaluation(s, d, { candleIndex: s.checkpointIndex, flow: BID_HEAVY });
+    check("clean+enter + bid-heavy flow: timing note records book/tape agreement",
+      (dim(withFlow, "timing")?.note ?? "").includes("book and tape agreed") &&
+      (dim(withFlow, "timing")?.note ?? "").includes("the bid outweighed the ask 2.1×"));
+  }
+  {
+    // Mixed flow earns NO acknowledgment — but its fact lines still show.
+    const s = byId.get("hod-failed-002")!;
+    const d = decisionFor(s, "clean", "enter", 5);
+    const noFlow = buildEvaluation(s, d, { candleIndex: s.checkpointIndex });
+    const withFlow = buildEvaluation(s, d, { candleIndex: s.checkpointIndex, flow: NEUTRAL });
+    check("neutral flow: discipline note byte-identical to no-flow (no invented acknowledgment)",
+      dim(withFlow, "discipline")?.note === dim(noFlow, "discipline")?.note);
+    check("neutral flow: fact lines still appended",
+      withFlow.evidence.length > noFlow.evidence.length);
+  }
+
+  // — Flow purity: post-checkpoint candles still cannot move output —
+  for (const s of HOD_SCENARIOS) {
+    const cls = s.classification as DecisionClassification;
+    const d = decisionFor(s, cls, APPROPRIATE[cls], 4);
+    const ctx = { candleIndex: s.checkpointIndex, flow: ASK_HEAVY };
+    const base = JSON.stringify(buildEvaluation(s, d, ctx));
+    const tailMutated: DrillScenario = {
+      ...s,
+      candles: s.candles.map((c, i) =>
+        i > s.checkpointIndex ? { ...c, o: 99, h: 999, l: 0.01, c: 500, v: 1_000_000_000 } : c),
+    };
+    check(`flow output identical with mutated tail (${s.id})`,
+      JSON.stringify(buildEvaluation(tailMutated, d, ctx)) === base);
+  }
+
+  // — The runner's real capture path: a live DrillSim at its checkpoint —
+  {
+    const s = byId.get("hod-failed-003")!;
+    const sim = new DrillSim(s);
+    while (!sim.checkpointReached && !sim.atEnd) sim.advance(DRILL_TICKS_PER_CANDLE);
+    const liveSnap = snapshotOrderFlow(sim.book, sim.prints);
+    check("live sim snapshot: book totals positive, prints captured",
+      liveSnap.bidSize > 0 && liveSnap.askSize > 0 && liveSnap.printCount > 0 && liveSnap.tapeBuyShare != null);
+    const d = decisionFor(s, "clean", "enter", 5);
+    const r = buildEvaluation(s, d, { candleIndex: s.checkpointIndex, flow: liveSnap });
+    check("live sim snapshot: evaluation cites the Level 2 book",
+      r.evidence.some((e) => e.includes("Level 2 book showed")));
+  }
+
+  // — No participation claims anywhere in flow output —
+  {
+    const flows: FlowSnapshot[] = [ASK_HEAVY, BID_HEAVY, NEUTRAL];
+    let prose = "";
+    for (const s of HOD_SCENARIOS) {
+      const cls = s.classification as DecisionClassification;
+      for (const f of flows) {
+        const r = buildEvaluation(s, decisionFor(s, cls, "enter", 5), { candleIndex: s.checkpointIndex, flow: f });
+        prose += [r.headline, r.watchFor, r.keyMistake ?? "", ...r.didWell, ...r.evidence,
+          ...r.dimensions.map((dd) => dd.note)].join(" ");
+      }
+    }
+    check("no institutional/participation claims in any flow output", !/institution/i.test(prose));
+    check("no profitability language in any flow output", !PROFIT.test(prose));
+  }
 }
 
 console.log("\n=== Wording precision (2026-10-15 browser-QA fixes) ===");
