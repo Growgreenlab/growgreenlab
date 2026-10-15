@@ -76,7 +76,8 @@ export const DRILL_TICKS_PER_CANDLE = 120;
 /**
  * Order-flow cadence: moderate pace — alive like a real terminal but
  * readable. Tied to tick position (deterministic), not wall-clock.
- * At 8x drill speed this yields ~5 book updates/sec.
+ * At the 8x default (16 ticks/sec) this yields ~1.6 book updates/sec;
+ * the windows are tick-indexed, so the sequence is identical at any speed.
  */
 export const FLOW_UPDATES_PER_CANDLE = 12;
 export const TICKS_PER_FLOW_UPDATE = DRILL_TICKS_PER_CANDLE / FLOW_UPDATES_PER_CANDLE; // 10
@@ -90,112 +91,155 @@ export function flowTimestamp(candleT: number, updateIndex: number): number {
 }
 
 /**
+ * Depth target for one side of the book: the size the market "wants" to
+ * show at the touch for this behavior + phase. Rung i decays with distance.
+ * Scenario story-telling lives here and ONLY here:
+ *  - clean: balanced approach → thin asks + stacked bids on the break →
+ *    healthy two-sided book once price is accepted.
+ *  - weak: thin everywhere, nobody commits.
+ *  - failed: normal approach → heavy offers (the wall) on the break →
+ *    bids pulled, offers stacked in resolution (distribution).
+ *  - ambiguous: targets oscillate (flicker) with update index.
+ */
+function depthTargets(
+  p: FlowParams,
+  tickIndex: number,
+  phase: FlowPhase,
+  rng: () => number,
+  midC: number
+): { bid: number[]; ask: number[] } {
+  const rung = (touch: number, extra: number[]) =>
+    Array.from({ length: 5 }, (_, i) => (touch + (extra[i] ?? 0)) / (1 + i * 0.6));
+  let bidTouch = 400, askTouch = 400, bidVar = 300, askVar = 300;
+  const bidExtra = [0, 0, 0, 0, 0];
+  const askExtra = [0, 0, 0, 0, 0];
+
+  switch (p.behavior) {
+    case "clean":
+      if (phase === "breakout") {
+        bidTouch = 800; askTouch = 150; bidVar = 400; askVar = 120;
+        bidExtra[0] = 600; bidExtra[1] = 400; // stacked support under the break
+      } else if (phase === "resolution") {
+        bidTouch = 600; askTouch = 500;
+      }
+      break;
+    case "weak":
+      bidTouch = 150; askTouch = 150; bidVar = 120; askVar = 120;
+      break;
+    case "failed":
+      if (phase === "breakout") {
+        bidTouch = 500; askTouch = 300; bidVar = 300; askVar = 200;
+        // The wall: a large offer two cents above the HOD level. If that
+        // exact rung exists in this ladder its target grows; otherwise the
+        // second ask rung carries extra size (price never moves to fake it).
+        askExtra[1] += 1200;
+      } else if (phase === "resolution") {
+        bidTouch = 150; askTouch = 900; bidVar = 120; askVar = 500;
+      }
+      break;
+    case "ambiguous": {
+      const flicker = Math.sin(tickIndex / 37) > 0 ? 1.6 : 0.6;
+      bidTouch = 400 * flicker; askTouch = 400 / flicker;
+      if (rng() > 0.7) {
+        // Phantom size: a target that appears for one update, then goes.
+        const extra = rng() > 0.5 ? bidExtra : askExtra;
+        extra[Math.floor(rng() * 3)] += Math.round(1200 * rng());
+      }
+      break;
+    }
+  }
+
+  const bid = rung(bidTouch + rng() * bidVar, bidExtra);
+  const ask = rung(askTouch + rng() * askVar, askExtra);
+  if (p.behavior === "failed" && phase === "breakout") {
+    // Exact wall rung, when the ladder contains level + 2 cents.
+    const wallC = Math.round(p.level * 100) + 2;
+    const idx = wallC - midC - 1;
+    if (idx >= 0 && idx < 5) ask[idx] += 2500;
+  }
+  return { bid, ask };
+}
+
+/**
  * Generate a Level 2 snapshot for a given tick.
+ *
+ * Ladder construction (audit RC3): prices are built in INTEGER CENTS
+ * around the rounded last price — best bid = mid − 1¢, best ask = mid + 1¢,
+ * rungs step exactly 1¢. Strictly ordered, unique, and bracketing the last
+ * trade price by construction (|round2(price) − price| ≤ 0.5¢ < 1¢).
+ *
+ * Sizes (audit RC3): when `prev` is supplied, each rung EVOLVES from the
+ * previous snapshot — bounded steps toward the behavior/phase depth
+ * target, with consumption shaving on the side price moved through and
+ * replenishment drift back toward target. No teleporting depth.
  *
  * @param p flow params
  * @param tickIndex global tick index (deterministic)
  * @param price current tick price (from the engine — single source of truth)
  * @param phase scenario phase at this tick
  * @param timestamp ms epoch for display
+ * @param prev previous snapshot, when the caller tracks one (DrillSim does)
  */
 export function generateBook(
   p: FlowParams,
   tickIndex: number,
   price: number,
   phase: FlowPhase,
-  timestamp: number
+  timestamp: number,
+  prev?: OrderBookSnapshot
 ): OrderBookSnapshot {
-  const tickSize = p.tickSize ?? 0.01;
   const rng = mulberry32(p.seed * 7919 + tickIndex * 104729 + 13);
-  const distToLevel = price - p.level; // >0 means above HOD
+  const midC = Math.round(price * 100); // last price in cents
+  const targets = depthTargets(p, tickIndex, phase, rng, midC);
 
-  // Base sizes — tuned per behavior and phase below
-  const bids: OrderBookLevel[] = [];
-  const asks: OrderBookLevel[] = [];
-
-  for (let i = 0; i < 5; i++) {
-    const bidPrice = round2(price - tickSize * (i + 1) - rng() * tickSize);
-    const askPrice = round2(price + tickSize * (i + 1) + rng() * tickSize);
-    bids.push({ price: bidPrice, size: 0 });
-    asks.push({ price: askPrice, size: 0 });
+  // Consumption: if price moved up since the previous book, offers near
+  // the touch were eaten into; if it moved down, bids were. Shave the
+  // affected side's evolution this update (replenishment is the drift
+  // back toward target on later updates).
+  let askShave = 1, bidShave = 1;
+  if (prev) {
+    const prevMidC = Math.round(((prev.bids[0].price + prev.asks[0].price) / 2) * 100);
+    const moved = midC - prevMidC;
+    if (moved > 0) askShave = Math.max(0.4, 1 - 0.12 * moved);
+    if (moved < 0) bidShave = Math.max(0.4, 1 + 0.12 * moved);
   }
+  const prevBidByCents = new Map((prev?.bids ?? []).map((l) => [Math.round(l.price * 100), l.size]));
+  const prevAskByCents = new Map((prev?.asks ?? []).map((l) => [Math.round(l.price * 100), l.size]));
 
-  // Scenario-driven size logic
-  const setSizes = (
-    bidBase: number, askBase: number,
-    bidVar: number, askVar: number
-  ) => {
-    for (let i = 0; i < 5; i++) {
-      // Depth decays with distance from touch
-      const decay = 1 / (1 + i * 0.6);
-      bids[i].size = Math.max(1, Math.round((bidBase + rng() * bidVar) * decay));
-      asks[i].size = Math.max(1, Math.round((askBase + rng() * askVar) * decay));
+  const evolve = (target: number, prevSize: number | undefined, shave: number): number => {
+    if (prevSize == null) {
+      // Fresh rung: start near target.
+      return Math.max(1, Math.round(target * (0.85 + rng() * 0.3)));
     }
+    // Bounded step toward target (≤ ±35% of current), then the shave.
+    const step = Math.max(-0.35 * prevSize, Math.min(0.35 * prevSize, target - prevSize));
+    return Math.max(1, Math.round((prevSize + step) * shave * (0.95 + rng() * 0.1)));
   };
 
-  switch (p.behavior) {
-    case "clean":
-      if (phase === "approach") {
-        // Balanced book, moderate depth both sides
-        setSizes(400, 400, 300, 300);
-      } else if (phase === "breakout") {
-        // Asks being consumed: thin near touch, bids stacking underneath
-        setSizes(800, 150, 400, 120);
-        // Concentrated bid support just under price
-        bids[0].size += 600;
-        bids[1].size += 400;
-      } else {
-        // Resolution: healthy two-sided book, price accepted higher
-        setSizes(600, 500, 300, 300);
-      }
-      break;
-
-    case "weak":
-      // Thin book throughout — nobody's committed
-      setSizes(150, 150, 120, 120);
-      break;
-
-    case "failed":
-      if (phase === "approach") {
-        setSizes(400, 400, 300, 300);
-      } else if (phase === "breakout") {
-        // Trap: looks like buying, but a wall sits above
-        setSizes(500, 300, 300, 200);
-        // The wall — large offer just above the level
-        const wallIdx = distToLevel >= 0 ? 1 : 0;
-        asks[wallIdx].size += 2500;
-        asks[wallIdx].price = round2(p.level + tickSize * 2);
-      } else {
-        // Resolution: bids pull, offers stack — distribution
-        setSizes(150, 900, 120, 500);
-      }
-      break;
-
-    case "ambiguous":
-      // Flickering: depth oscillates, no persistent conviction
-      {
-        const flicker = Math.sin(tickIndex / 37) > 0 ? 1.6 : 0.6;
-        setSizes(400 * flicker, 400 / flicker, 300, 300);
-        // Occasional phantom size that appears and vanishes
-        if (rng() > 0.7) {
-          const side = rng() > 0.5 ? bids : asks;
-          side[Math.floor(rng() * 3)].size += Math.round(1200 * rng());
-        }
-      }
-      break;
-  }
-
-  // Spread sanity: best ask must exceed best bid
-  if (asks[0].price <= bids[0].price) {
-    asks[0].price = round2(bids[0].price + tickSize);
+  const bids: OrderBookLevel[] = [];
+  const asks: OrderBookLevel[] = [];
+  for (let i = 0; i < 5; i++) {
+    const bidC = midC - (i + 1);
+    const askC = midC + (i + 1);
+    bids.push({ price: bidC / 100, size: evolve(targets.bid[i], prevBidByCents.get(bidC), bidShave) });
+    asks.push({ price: askC / 100, size: evolve(targets.ask[i], prevAskByCents.get(askC), askShave) });
   }
 
   return { bids, asks, timestamp };
 }
 
 /**
- * Generate trade prints for a tick, derived from the tick's volume.
- * Print count and side bias follow the scenario behavior and phase.
+ * Generate trade prints for one flow window, from the volume the engine
+ * ACTUALLY traded in that window.
+ *
+ * Accounting contract (audit RC4): the returned print sizes partition
+ * `tickVolume` EXACTLY — sum(sizes) === floor(tickVolume) — so Time &
+ * Sales always reconciles with candle volume. A window with no traded
+ * volume produces no prints (an honest quiet tape, not invented prints).
+ * Print count is display aggregation: 1 print per window, 2 during the
+ * breakout phase — the underlying window volume is never altered, only
+ * grouped. Side classification: scenario behavior/phase bias nudged by
+ * the window's actual tick direction (uptick ⇒ buyer-initiated).
  */
 export function generatePrints(
   p: FlowParams,
@@ -209,15 +253,21 @@ export function generatePrints(
   const rng = mulberry32(p.seed * 104729 + tickIndex * 7919 + 77);
   const prints: TradePrint[] = [];
 
-  // One print per update normally; two during the breakout phase when
-  // the tape is genuinely active. At 60 updates/candle this streams
-  // like a real terminal without flooding.
-  const nPrints = phase === "breakout" && rng() > 0.5 ? 2 : 1;
-  // Add natural size variation so prints don't look robotic
-  let remaining = Math.max(1, Math.round(tickVolume * (0.4 + rng() * 1.2)));
+  let remaining = Math.max(0, Math.floor(tickVolume));
+  if (remaining === 0) return prints;
+
+  // One print per window normally; two during the breakout phase when
+  // the tape is genuinely active.
+  const nPrints = Math.min(remaining, phase === "breakout" && rng() > 0.5 ? 2 : 1);
   for (let i = 0; i < nPrints; i++) {
-    const isLast = i === nPrints - 1;
-    const size = isLast ? remaining : Math.max(1, Math.round(remaining * (0.2 + rng() * 0.5)));
+    const printsLeft = nPrints - i;
+    const size =
+      printsLeft === 1
+        ? remaining
+        : Math.min(
+            remaining - (printsLeft - 1), // keep ≥1 share for each later print
+            Math.max(1, Math.round(remaining * (0.2 + rng() * 0.5)))
+          );
     remaining -= size;
 
     // Side bias by behavior + phase + tick direction

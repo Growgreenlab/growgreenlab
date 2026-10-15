@@ -5,34 +5,30 @@
  *
  * State machine: intro → running → checkpoint (paused) → resolving → teaching.
  *
- * Synchronization: a single tick loop drives the ReplayEngine; on every tick
- * the chart (via engine.displayCandles), Level 2, and Time & Sales all update
- * from the same tick state. The engine's `revealed` boundary guarantees no
- * future data leaks before the checkpoint.
+ * Synchronization (see docs/drill-audit-2026-10-14.md): ONE simulation
+ * owner (DrillSim, lib/drills/sim.ts) wraps the shared ReplayEngine.
+ * A requestAnimationFrame scheduler converts wall time to ticks via
+ * SimClock (bounded catch-up: stalls slow the drill, they never burst),
+ * and DrillSim derives the chart (engine.displayCandles), Level 2, and
+ * Time & Sales from the same tick stream. Pause stops the scheduler —
+ * no ticks are requested, so no sim-driven state can change. Speed
+ * rescales wall pacing only; the event sequence is speed-independent.
+ *
+ * Speed definition: s× = s simulated minutes per wall-clock minute
+ * (one 1-minute candle forms in 60/s seconds; 1x is real time).
  */
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { getScenario, HOD_SCENARIOS } from "../../../lib/drills/scenarios";
 import { gradeAnswer, type DrillAnswer, type BreakoutClassification } from "../../../lib/drills/types";
-import {
-  generateBook, generatePrints, phaseForCandle, flowTimestamp,
-  FLOW_UPDATES_PER_CANDLE, TICKS_PER_FLOW_UPDATE, DRILL_TICKS_PER_CANDLE,
-  type OrderBookSnapshot, type TradePrint, type FlowBehavior,
-} from "../../../lib/drills/orderflow";
-import { ReplayEngine } from "../../../lib/engine";
+import { DrillSim, SimClock } from "../../../lib/drills/sim";
+import { hodMarketState, HOD_STATE_LABEL } from "../../../lib/drills/hodState";
 import LwcChart from "../../../components/LwcChart";
 import Level2Panel from "../../../components/Level2Panel";
 import TimeSalesPanel from "../../../components/TimeSalesPanel";
 
 type DrillPhase = "intro" | "running" | "checkpoint" | "resolving" | "teaching";
-
-const BEHAVIOR_FOR: Record<string, FlowBehavior> = {
-  "hod-clean-001": "clean",
-  "hod-weak-001": "weak",
-  "hod-failed-001": "failed",
-  "hod-ambiguous-001": "ambiguous",
-};
 
 const ANSWER_OPTIONS: { id: DrillAnswer; label: string }[] = [
   { id: "clean", label: "Clean Breakout" },
@@ -49,6 +45,19 @@ const CLASS_LABEL: Record<BreakoutClassification, string> = {
   ambiguous: "Ambiguous",
 };
 
+const DIFFICULTY_LABEL: Record<string, string> = {
+  beginner: "Beginner",
+  intermediate: "Intermediate",
+  advanced: "Advanced",
+};
+
+function fmtSimTime(ms: number): string {
+  const totalSec = Math.floor(ms / 1000);
+  const mm = String(Math.floor(totalSec / 60)).padStart(2, "0");
+  const ss = String(totalSec % 60).padStart(2, "0");
+  return `${mm}:${ss}`;
+}
+
 export default function DrillRunner() {
   const params = useParams();
   const router = useRouter();
@@ -57,126 +66,95 @@ export default function DrillRunner() {
 
   const [phase, setPhase] = useState<DrillPhase>("intro");
   const [speed, setSpeed] = useState(8);
-  const [tickVersion, setTickVersion] = useState(0); // re-render trigger
+  const [paused, setPaused] = useState(false);
+  const [, setUiVersion] = useState(0); // render pump
   const [answer, setAnswer] = useState<DrillAnswer | null>(null);
   const [confidence, setConfidence] = useState<number | null>(null);
-  const [book, setBook] = useState<OrderBookSnapshot | null>(null);
-  const [prints, setPrints] = useState<TradePrint[]>([]);
   const [mobileTab, setMobileTab] = useState<"l2" | "ts">("l2");
 
-  const engineRef = useRef<ReplayEngine | null>(null);
-  const tickCountRef = useRef(0);
-  const ticksThisCandleRef = useRef(0);
-  const lastCandleIndexRef = useRef(-1);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const simRef = useRef<DrillSim | null>(null);
+  const clockRef = useRef<SimClock | null>(null);
   const answeredRef = useRef(false);
-  const prevPriceRef = useRef<number>(0);
+  const speedRef = useRef(speed);
+  speedRef.current = speed;
 
-  // Init engine when starting — reveal historical context so the user
-  // sees the approach/consolidation structure before live formation.
-  const startDrill = useCallback(() => {
-    if (!scenario) return;
-    const historyCount = Math.max(2, Math.floor(scenario.checkpointIndex * 0.4));
-    engineRef.current = new ReplayEngine(scenario.candles, 100_000, historyCount, DRILL_TICKS_PER_CANDLE);
-    tickCountRef.current = 0;
-    ticksThisCandleRef.current = 0;
-    lastCandleIndexRef.current = historyCount - 1;
+  // Scenario switch: Next.js may reuse this component across /drills/[id]
+  // changes — never let a previous scenario's sim, phase, or answer leak
+  // into the new one (audit RC9).
+  useEffect(() => {
+    simRef.current = null;
+    clockRef.current = null;
     answeredRef.current = false;
-    prevPriceRef.current = scenario.candles[historyCount].o;
+    setPhase("intro");
     setAnswer(null);
     setConfidence(null);
-    // Seed the order-flow panels with the last history candle's state
-    // so Level 2 / Time & Sales aren't empty at drill start.
-    const fp0 = { seed: scenario.seed, level: scenario.hod, behavior: BEHAVIOR_FOR[scenario.id] };
-    const histCandle = scenario.candles[historyCount - 1];
-    const histPhase = phaseForCandle(historyCount - 1, scenario.checkpointIndex);
-    setBook(generateBook(fp0, 0, histCandle.c, histPhase, flowTimestamp(histCandle.t, FLOW_UPDATES_PER_CANDLE - 1)));
-    setPrints(generatePrints(fp0, 0, histCandle.c, Math.max(1, Math.round(histCandle.v / FLOW_UPDATES_PER_CANDLE)), histPhase, flowTimestamp(histCandle.t, FLOW_UPDATES_PER_CANDLE - 1), 0).reverse());
+    setPaused(false);
+    setUiVersion(0);
+  }, [id]);
+
+  const startDrill = useCallback(() => {
+    if (!scenario) return;
+    simRef.current = new DrillSim(scenario);
+    clockRef.current = new SimClock();
+    answeredRef.current = false;
+    setAnswer(null);
+    setConfidence(null);
+    setPaused(false);
+    setUiVersion((v) => v + 1);
     setPhase("running");
   }, [scenario]);
 
-  // Tick loop
+  // The scheduler: the only place sim time is requested. Runs only while
+  // running/resolving and not paused; cleanup cancels the frame loop, so
+  // unmounts, phase changes, and pauses can never leave a timer behind.
   useEffect(() => {
-    if (phase !== "running" && phase !== "resolving") return;
-    const engine = engineRef.current;
-    if (!engine || !scenario) return;
+    if ((phase !== "running" && phase !== "resolving") || paused) return;
+    const sim = simRef.current;
+    const clock = clockRef.current;
+    if (!sim || !clock) return;
+    clock.reset();
 
-    const tickMs = 1000 / ((DRILL_TICKS_PER_CANDLE / 60) * speed);
-    timerRef.current = setInterval(() => {
-      const eng = engineRef.current;
-      if (!eng) return;
-      const prevPrice = prevPriceRef.current;
-      const r = eng.tick();
-      const price = eng.displayPrice;
-      const dir: 1 | -1 | 0 = price > prevPrice ? 1 : price < prevPrice ? -1 : 0;
-      prevPriceRef.current = price;
-      tickCountRef.current += 1;
-
-      // Reset per-candle tick counter when a new candle starts forming
-      const formingIdx = eng.index + 1;
-      if (formingIdx !== lastCandleIndexRef.current) {
-        lastCandleIndexRef.current = formingIdx;
-        ticksThisCandleRef.current = 0;
+    let raf = 0;
+    let lastUiPush = 0;
+    const loop = (now: number) => {
+      const due = clock.frame(now, speedRef.current);
+      if (due > 0) {
+        const events = sim.advance(due);
+        const nowMs = performance.now();
+        // Re-render on flow/finalize events, or at ~7 Hz for the live
+        // price line — panels never re-render per tick (audit RC10).
+        if (events.length > 0 || nowMs - lastUiPush >= 150) {
+          lastUiPush = nowMs;
+          setUiVersion((v) => v + 1);
+        }
+        if (!answeredRef.current && sim.checkpointReached) {
+          setPhase("checkpoint");
+          return; // no further frame: the scheduler stops with the phase
+        }
+        if (sim.atEnd) {
+          setPhase("teaching");
+          return;
+        }
       }
-      ticksThisCandleRef.current += 1;
-      const ticksThisCandle = ticksThisCandleRef.current;
-
-      // Order flow updates at a controlled, deterministic cadence:
-      // 8 updates per candle, tied to tick position — readable at any speed.
-      if (ticksThisCandle % TICKS_PER_FLOW_UPDATE === 0) {
-        const updateIndex = Math.min(
-          FLOW_UPDATES_PER_CANDLE - 1,
-          Math.floor(ticksThisCandle / TICKS_PER_FLOW_UPDATE)
-        );
-        const flowPhase = phaseForCandle(eng.index, scenario.checkpointIndex);
-        const fp = { seed: scenario.seed, level: scenario.hod, behavior: BEHAVIOR_FOR[scenario.id] };
-        const candle = scenario.candles[Math.min(formingIdx, scenario.candles.length - 1)];
-        const ts = flowTimestamp(candle.t, updateIndex);
-        const flowTick = formingIdx * 1000 + updateIndex; // deterministic per update
-        const newBook = generateBook(fp, flowTick, price, flowPhase, ts);
-        const tickVol = Math.max(1, Math.round(candle.v / FLOW_UPDATES_PER_CANDLE));
-        const newPrints = generatePrints(fp, flowTick, price, tickVol, flowPhase, ts, dir);
-        setBook(newBook);
-        setPrints((prev) => [...newPrints.reverse(), ...prev].slice(0, 60));
-      }
-      // Throttle React re-renders: update at most every 6 ticks so high
-      // speeds stay smooth. The chart series updates efficiently per tick
-      // internally; this just limits component re-renders.
-      if (ticksThisCandle % 6 === 0 || r.finalized) {
-        setTickVersion((v) => v + 1);
-      }
-
-      // Checkpoint: pause when the checkpoint candle is finalized
-      if (!answeredRef.current && eng.index >= scenario.checkpointIndex) {
-        if (timerRef.current) clearInterval(timerRef.current);
-        setPhase("checkpoint");
-        return;
-      }
-      // End of scenario
-      if (r.atEnd || eng.atEnd) {
-        if (timerRef.current) clearInterval(timerRef.current);
-        setPhase("teaching");
-      }
-    }, Math.max(16, tickMs));
-
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
+      raf = requestAnimationFrame(loop);
     };
-  }, [phase, speed, scenario]);
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [phase, paused, id]);
 
   const submitAnswer = (a: DrillAnswer) => {
     if (answeredRef.current || !scenario) return;
     answeredRef.current = true;
     setAnswer(a);
+    setPaused(false);
     setPhase("resolving");
   };
 
   const skipToResult = () => {
-    const eng = engineRef.current;
-    if (!eng) return;
-    if (timerRef.current) clearInterval(timerRef.current);
-    while (!eng.atEnd) eng.step();
-    setTickVersion((v) => v + 1);
+    const sim = simRef.current;
+    if (!sim) return;
+    sim.advanceToEnd();
+    setUiVersion((v) => v + 1);
     setPhase("teaching");
   };
 
@@ -189,20 +167,52 @@ export default function DrillRunner() {
     );
   }
 
-  const engine = engineRef.current;
+  const sim = simRef.current;
   const grading = answer ? gradeAnswer(scenario, answer) : null;
   const nextScenario = HOD_SCENARIOS[(HOD_SCENARIOS.findIndex((s) => s.id === scenario.id) + 1) % HOD_SCENARIOS.length];
 
+  // HOD header data — revealed data only (engine boundary), never the
+  // scenario's future candles.
+  const engine = sim?.engine ?? null;
+  const displayCandles = engine ? engine.displayCandles : [];
+  const livePrice = engine ? engine.displayPrice : scenario.candles[0].o;
+  const liveHod = engine ? engine.hod : scenario.hod;
+  const forming = sim ? sim.formingCandle() : null;
+  const hodState = engine
+    ? hodMarketState(scenario.hod, engine.revealed, forming)
+    : "approaching";
+  const distPct = ((livePrice - scenario.hod) / scenario.hod) * 100;
+
+  const inRun = phase === "running" || phase === "resolving" || phase === "checkpoint";
+
   return (
     <div style={{ maxWidth: 1200, margin: "0 auto", padding: "16px" }}>
-      {/* Header */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+      {/* Header — neutral title until the teaching screen (audit RC8):
+          the runner never announces the classification mid-drill. */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
         <div>
           <Link href="/drills" style={{ fontSize: 13, color: "var(--ggl-muted)" }}>← All drills</Link>
-          <h1 style={{ fontSize: 20, fontWeight: 800, margin: "4px 0 0" }}>{scenario.title}</h1>
+          <h1 style={{ fontSize: 20, fontWeight: 800, margin: "4px 0 0" }}>
+            {phase === "teaching" ? scenario.title : "HOD Breakout Drill"}
+            <span style={{ fontSize: 12, fontWeight: 600, color: "var(--ggl-muted)", marginLeft: 10 }}>
+              {DIFFICULTY_LABEL[scenario.difficulty]}
+            </span>
+          </h1>
         </div>
         {(phase === "running" || phase === "resolving") && (
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <span style={{ fontSize: 12, color: "var(--ggl-muted)" }}>
+              Sim time <strong style={{ color: "#fff" }}>{sim ? fmtSimTime(sim.simTimeMs) : "00:00"}</strong>
+              {" · "}{paused ? "Paused" : phase === "resolving" ? "Resolving" : "Running"}
+            </span>
+            <button onClick={() => setPaused((p) => !p)}
+              style={{ padding: "6px 14px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "#fff", cursor: "pointer", fontSize: 13 }}>
+              {paused ? "Resume" : "Pause"}
+            </button>
+            <button onClick={startDrill}
+              style={{ padding: "6px 14px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "#fff", cursor: "pointer", fontSize: 13 }}>
+              Reset
+            </button>
             <label style={{ fontSize: 12, color: "var(--ggl-muted)" }}>Speed</label>
             <select value={speed} onChange={(e) => setSpeed(Number(e.target.value))}
               style={{ padding: "4px 8px", borderRadius: 6, background: "#0d1117", color: "#fff", border: "1px solid rgba(255,255,255,0.15)" }}>
@@ -217,14 +227,26 @@ export default function DrillRunner() {
           </div>
         )}
       </div>
+      {(phase === "running" || phase === "resolving") && (
+        <div style={{ fontSize: 11, color: "var(--ggl-muted)", marginTop: -6, marginBottom: 10 }}>
+          Speed: 1x = real time (one simulated minute per 60 seconds). Higher speeds compress wall-clock time only — the market sequence is identical at every speed.
+        </div>
+      )}
 
       {phase === "intro" && (
         <div style={{ background: "#0d1117", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 12, padding: 24, maxWidth: 640 }}>
           <p style={{ fontSize: 15, marginBottom: 12 }}>{scenario.description}</p>
-          <p style={{ fontSize: 14, color: "var(--ggl-muted)", marginBottom: 20 }}>
+          <p style={{ fontSize: 14, color: "var(--ggl-muted)", marginBottom: 12 }}>
             Watch the market develop. At the key moment you&apos;ll be asked to
             classify the breakout — then see how it actually played out and learn
             from the evidence. Order flow panels are simulated for training.
+          </p>
+          <p style={{ fontSize: 14, color: "var(--ggl-muted)", marginBottom: 20 }}>
+            Controls: Pause/Resume and Reset are in the header while the drill
+            runs, and Speed can be changed at any time — it only changes how
+            fast the same market replays. Some candles of history are already
+            on the chart so you can see the approach into the HOD level
+            (the gold line) before live action starts.
           </p>
           <button onClick={startDrill}
             style={{ padding: "12px 32px", borderRadius: 10, border: "none", background: "#42d879", color: "#06110b", fontSize: 15, fontWeight: 800, cursor: "pointer" }}>
@@ -233,28 +255,31 @@ export default function DrillRunner() {
         </div>
       )}
 
-      {(phase === "running" || phase === "resolving" || phase === "checkpoint") && engine && (
+      {inRun && sim && engine && (
         <>
-          {/* HOD readout */}
+          {/* HOD readout: reference level vs live session high are
+              different things and are labelled as such. */}
           <div style={{
-            display: "flex", gap: 20, alignItems: "center", marginBottom: 10,
+            display: "flex", gap: 20, alignItems: "center", marginBottom: 10, flexWrap: "wrap",
             padding: "8px 14px", background: "#0d1117",
             border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8, fontSize: 13,
           }}>
-            <span><span style={{ color: "#f0b429", fontWeight: 700 }}>HOD:</span> <strong>${scenario.hod.toFixed(2)}</strong></span>
-            <span><span style={{ color: "var(--ggl-muted)" }}>Current:</span> <strong>${engine.displayPrice.toFixed(2)}</strong></span>
-            <span><span style={{ color: "var(--ggl-muted)" }}>Distance:</span> <strong style={{ color: engine.displayPrice >= scenario.hod ? "#2ebd85" : "#f0b429" }}>
-              ${Math.abs(engine.displayPrice - scenario.hod).toFixed(2)} {engine.displayPrice >= scenario.hod ? "above" : "below"}
+            <span><span style={{ color: "#f0b429", fontWeight: 700 }}>HOD (breakout level):</span> <strong>${scenario.hod.toFixed(2)}</strong></span>
+            <span><span style={{ color: "var(--ggl-muted)" }}>Session high (live):</span> <strong>${liveHod.toFixed(2)}</strong></span>
+            <span><span style={{ color: "var(--ggl-muted)" }}>Current:</span> <strong>${livePrice.toFixed(2)}</strong></span>
+            <span><span style={{ color: "var(--ggl-muted)" }}>Distance to HOD:</span> <strong style={{ color: livePrice >= scenario.hod ? "#2ebd85" : "#f0b429" }}>
+              {livePrice >= scenario.hod ? "+" : "−"}${Math.abs(livePrice - scenario.hod).toFixed(2)} ({distPct >= 0 ? "+" : ""}{distPct.toFixed(2)}%)
             </strong></span>
+            <span><span style={{ color: "var(--ggl-muted)" }}>State:</span> <strong>{HOD_STATE_LABEL[hodState]}</strong></span>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 300px", gap: 12 }} className="drill-grid">
             <div style={{ minHeight: 380 }}>
               <LwcChart
-                candles={scenario.candles}
-                revealedCount={engine.index + 1}
+                candles={displayCandles}
+                revealedCount={displayCandles.length}
                 sessionKey={scenario.id}
                 countdown={null}
-                lastPrice={engine.displayPrice}
+                lastPrice={livePrice}
                 brackets={{ plannedSL: null, plannedTP: null, activeSL: null, activeTP: null }}
                 referenceLevels={[{ price: scenario.hod, label: "HOD", color: "#f0b429" }]}
                 fitOnLoad={true}
@@ -268,8 +293,8 @@ export default function DrillRunner() {
             </div>
             <div className="drill-side-panels" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               <div className="drill-desktop-panels" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                <Level2Panel book={book} level={scenario.hod} />
-                <TimeSalesPanel prints={prints} />
+                <Level2Panel book={sim.book} level={scenario.hod} />
+                <TimeSalesPanel prints={sim.prints} />
               </div>
               <div className="drill-mobile-tabs" style={{ display: "none" }}>
                 <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
@@ -282,7 +307,7 @@ export default function DrillRunner() {
                     Time &amp; Sales
                   </button>
                 </div>
-                {mobileTab === "l2" ? <Level2Panel book={book} level={scenario.hod} /> : <TimeSalesPanel prints={prints} />}
+                {mobileTab === "l2" ? <Level2Panel book={sim.book} level={scenario.hod} /> : <TimeSalesPanel prints={sim.prints} />}
               </div>
             </div>
           </div>
@@ -386,12 +411,12 @@ export default function DrillRunner() {
               style={{ padding: "12px 24px", borderRadius: 10, background: "#42d879", color: "#06110b", fontWeight: 800, textDecoration: "none", fontSize: 14 }}>
               Next Drill →
             </Link>
-            <button onClick={() => { setPhase("intro"); }}
+            <button onClick={() => { simRef.current = null; setPhase("intro"); }}
               style={{ padding: "12px 24px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "#fff", fontWeight: 600, cursor: "pointer", fontSize: 14 }}>
               Replay This Setup
             </button>
             <Link href="/drills"
-              style={{ padding: "12px 24px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "#fff", textDecoration: "none", fontSize: 14 }}>
+              style={{ padding: "12px 24px", borderRadius: 10, background: "transparent", color: "#fff", textDecoration: "none", fontSize: 14 }}>
               All Drills
             </Link>
           </div>
