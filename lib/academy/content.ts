@@ -1,9 +1,9 @@
 /**
- * Trading Academy — content registry (Stage 2) + Candlestick Mastery
- * lesson content (Stage 3).
+ * Trading Academy — content registry (Stage 2) + the Candlestick
+ * Basics seven-lesson beginner path (World 1).
  *
  * The registry lists all twelve worlds from the master spec with
- * honest status: only World 2 is "available"; the rest are "planned"
+ * honest status: only World 1 is "available"; the rest are "planned"
  * and render as planned — there are no empty lesson shells.
  *
  * VALIDATION: at module load, every definition is validated
@@ -33,6 +33,16 @@ import type {
 export const WORLDS: WorldDef[] = [
   {
     number: 1,
+    slug: "candlestick-basics",
+    title: "Candlestick Basics",
+    tagline: "Start with one candle: build it, watch it form, and separate what it shows from what it cannot prove.",
+    topics: ["What a candle shows", "Green vs. red candles", "Open, High, Low, Close", "Build your first candle", "Watch a candle form", "Reading evidence honestly"],
+    status: "available",
+    prerequisites: "",
+    lessonSlug: "what-is-a-candlestick",
+  },
+  {
+    number: 2,
     slug: "market-foundations",
     title: "Stock Market Foundations",
     tagline: "What a stock is, how prices form, and how trading sessions work.",
@@ -42,23 +52,13 @@ export const WORLDS: WorldDef[] = [
     lessonSlug: null,
   },
   {
-    number: 2,
-    slug: "candlestick-mastery",
-    title: "Candlestick Mastery",
-    tagline: "Build candles yourself, read bodies and wicks, and separate what a candle shows from what it cannot prove.",
-    topics: ["Open, High, Low, Close", "Bodies & wicks", "Bullish, bearish, doji", "How a candle forms", "Candles in context"],
-    status: "available",
-    prerequisites: "",
-    lessonSlug: "candlestick-mastery",
-  },
-  {
     number: 3,
     slug: "price-action-structure",
     title: "Price Action and Chart Structure",
     tagline: "Swings, trends, ranges, support and resistance as zones — and what a breakout actually is.",
     topics: ["Swing highs & lows", "Trends & ranges", "Support & resistance zones", "Breakouts, retests, failed moves", "Continuation vs reversal"],
     status: "planned",
-    prerequisites: "World 2 — Candlestick Mastery",
+    prerequisites: "World 1 — Candlestick Basics",
     lessonSlug: null,
   },
   {
@@ -68,7 +68,7 @@ export const WORLDS: WorldDef[] = [
     tagline: "Order types, fills, slippage, and why a stop price is not a guaranteed fill price.",
     topics: ["Market, limit, stop orders", "Buying, selling, shorting", "Fills & partial fills", "Slippage & liquidity", "Stop-loss & take-profit"],
     status: "planned",
-    prerequisites: "World 1 — Stock Market Foundations",
+    prerequisites: "World 2 — Stock Market Foundations",
     lessonSlug: null,
   },
   {
@@ -78,7 +78,7 @@ export const WORLDS: WorldDef[] = [
     tagline: "What volume measures, relative volume, and the limits of volume as evidence.",
     topics: ["Volume bars", "Relative volume (RVOL)", "Volume & price movement", "Volume in breakouts & pullbacks", "Limits of volume evidence"],
     status: "planned",
-    prerequisites: "World 2 — Candlestick Mastery",
+    prerequisites: "World 1 — Candlestick Basics",
     lessonSlug: null,
   },
   {
@@ -118,7 +118,7 @@ export const WORLDS: WorldDef[] = [
     tagline: "HOD breakouts, pullbacks, and retests — entry criteria, invalidation, and when to wait or skip.",
     topics: ["Clean, weak & failed breakouts", "Anticipation vs confirmation", "VWAP & EMA pullbacks", "Retests & reclaims", "Supporting vs contradictory evidence"],
     status: "planned",
-    prerequisites: "Worlds 2, 3 and 5",
+    prerequisites: "Worlds 1, 3 and 5",
     lessonSlug: null,
   },
   {
@@ -138,7 +138,7 @@ export const WORLDS: WorldDef[] = [
     tagline: "Integrate everything: structure, evidence, sizing, a decision — and an honest review of it.",
     topics: ["Full-context scenarios", "Evidence separation", "Position sizing under uncertainty", "Enter / Wait / Skip", "Decision review"],
     status: "planned",
-    prerequisites: "Worlds 2–10",
+    prerequisites: "Worlds 1–10",
     lessonSlug: null,
   },
   {
@@ -278,6 +278,131 @@ export const EVIDENCE_ITEMS: EvidenceItem[] = [
     key: "fact",
     rationale: "That is the definition in use: bearish names the open-to-close relationship, and $9.70 is below $10.00. (It says nothing about the next candle.)",
     misconception: "Hearing 'bearish' as a prediction rather than a description of this candle.",
+  },
+];
+
+/* ------------------------------------------------------------------ */
+/* Beginner checks: Lesson 1 (one question) and Lesson 3 (one per term) */
+/* ------------------------------------------------------------------ */
+
+export const L1_CHECKS: ChoiceQuestion[] = [
+  {
+    id: "l1-candle-shows",
+    concept: "candle-basics",
+    prompt: "What does a candlestick show?",
+    options: [
+      {
+        text: "A summary of how price moved during one period of time.",
+        correct: true,
+        feedback: "Exactly. One candle sums up one period — where price started, how far it travelled, and where it ended.",
+      },
+      {
+        text: "The reason every trader decided to buy or sell.",
+        correct: false,
+        feedback: "Not quite. A candle records price movement. It does not record anyone's reasons.",
+      },
+      {
+        text: "A promise about what the next candle will do.",
+        correct: false,
+        feedback: "Not quite. A candle describes the period that already happened. It makes no promise about the next one.",
+      },
+      {
+        text: "Only the final price, and nothing else.",
+        correct: false,
+        feedback: "Close — the final price is in there, but a candle also keeps the period's first, highest, and lowest prices.",
+      },
+    ],
+  },
+];
+
+export const L3_CHECKS: ChoiceQuestion[] = [
+  {
+    id: "l3-open",
+    concept: "ohlc-open",
+    prompt: "A candle's period began at $10.00. Which statement is accurate?",
+    options: [
+      {
+        text: "The Open is $10.00 — the first price of the period.",
+        correct: true,
+        feedback: "Correct. Open always means the price the period started with.",
+      },
+      {
+        text: "The Open is the highest price of the period.",
+        correct: false,
+        feedback: "Not quite — the highest price is the High. The Open is simply where the period began: $10.00.",
+      },
+      {
+        text: "The Open is wherever the period ended.",
+        correct: false,
+        feedback: "Not quite — where the period ended is the Close. The Open is the first price: $10.00.",
+      },
+    ],
+  },
+  {
+    id: "l3-high",
+    concept: "ohlc-high",
+    prompt: "During one period, price reached $10.20, $10.55, and $10.40. What is the High?",
+    options: [
+      {
+        text: "$10.55 — the highest price reached during the period.",
+        correct: true,
+        feedback: "Correct. The High keeps the single highest price, even if price did not stay there.",
+      },
+      {
+        text: "$10.40 — the last price mentioned.",
+        correct: false,
+        feedback: "Not quite. The last price would matter for the Close. The High is the highest price reached: $10.55.",
+      },
+      {
+        text: "$10.20 — the first price mentioned.",
+        correct: false,
+        feedback: "Not quite. The first price would be the Open. The High is the highest price reached: $10.55.",
+      },
+    ],
+  },
+  {
+    id: "l3-low",
+    concept: "ohlc-low",
+    prompt: "During one period, price dipped to $9.80 before recovering. What does $9.80 become?",
+    options: [
+      {
+        text: "The Low — the lowest price reached during the period.",
+        correct: true,
+        feedback: "Correct. The Low keeps the single lowest price, even if price bounced back right away.",
+      },
+      {
+        text: "The Close — because price recovered afterwards.",
+        correct: false,
+        feedback: "Not quite. The Close is the final price when the period ends. The lowest point reached is the Low: $9.80.",
+      },
+      {
+        text: "Nothing — a price only counts if the period ends there.",
+        correct: false,
+        feedback: "Not quite. A brief dip still counts. The Low records the lowest price reached during the whole period.",
+      },
+    ],
+  },
+  {
+    id: "l3-close",
+    concept: "ohlc-close",
+    prompt: "A period ends with a final price of $10.30. Which statement is accurate?",
+    options: [
+      {
+        text: "The Close is $10.30 — the price the period ended with.",
+        correct: true,
+        feedback: "Correct. When the period ends, its final price becomes the Close.",
+      },
+      {
+        text: "The Close is the average of all prices in the period.",
+        correct: false,
+        feedback: "Not quite. No averaging happens. The Close is simply the last price: $10.30.",
+      },
+      {
+        text: "The Close must equal the Open.",
+        correct: false,
+        feedback: "Not quite. Open and Close are often different — that difference is the candle's body.",
+      },
+    ],
   },
 ];
 
@@ -502,136 +627,435 @@ export const ASSESSMENT_ITEMS: AssessmentItem[] = [
 ];
 
 /* ------------------------------------------------------------------ */
-/* Candlestick Mastery — the flagship lesson (World 2)                  */
+/* Candlestick Basics — the seven-lesson beginner path (World 1)       */
 /* ------------------------------------------------------------------ */
 
-export const CANDLESTICK_MASTERY: LessonDef = {
-  id: "candlestick-mastery",
-  slug: "candlestick-mastery",
-  worldNumber: 2,
-  title: "Candlestick Mastery",
-  tagline: "Can you build a candlestick? Construct candles, watch them form, and learn exactly what a finished candle does — and does not — tell you.",
-  objectives: [
-    "Construct a valid candle from any Open, High, Low, and Close, and explain the constraint that connects them.",
-    "Classify a candle as bullish, bearish, or doji from its open-to-close relationship — and state the doji tolerance being used.",
-    "Describe what bodies and wicks record, and label wick interpretations as interpretations, not facts.",
-    "Explain why a candle's direction is not a prediction of the next candle.",
-    "Sort market statements into Observed Fact, Reasonable Interpretation, Overreach, and Needs More Data.",
-  ],
-  estimatedMinutes: 25,
-  difficulty: "Beginner",
-  prerequisites: "None — this is a starting point.",
-  masteryThreshold: 80,
-  sections: [
-    {
-      id: "objectives",
-      kind: "objectives",
-      title: "What you will be able to do",
-      paragraphs: [
-        "A candlestick compresses everything a market did during one interval — one minute, five minutes, a day — into four numbers: the Open, the High, the Low, and the Close. This lesson teaches you to build candles yourself, because reading a candle is much easier once you have constructed one.",
-        "It also teaches a discipline that runs through the whole Academy: separating what the data shows from what we infer from it, and from what we simply cannot know yet.",
-      ],
-      bullets: [],
-    },
-    {
-      id: "anatomy",
-      kind: "concept",
-      title: "The four numbers",
-      paragraphs: [
-        "Open — the first price of the interval. High — the highest price reached during the interval. Low — the lowest price reached. Close — the final price when the interval ends.",
-        "The thick part of the candle is the body: the span between Open and Close. The thin lines above and below are the wicks (also called shadows): they show how far price traveled beyond the body before the interval ended.",
-        "These four numbers obey one constraint, always: Low ≤ the lower of Open/Close, and the higher of Open/Close ≤ High. A candle that breaks that rule is not a candle — it is a data error. The builder below enforces the rule for you, so watch what it does when you try to break it.",
-      ],
-      bullets: [
-        "Range = High − Low: the full distance price traveled.",
-        "Body = |Close − Open|: the distance between the first and last price.",
-        "Upper wick = High − the higher of Open/Close. Lower wick = the lower of Open/Close − Low.",
-      ],
-    },
-    {
-      id: "formation",
-      kind: "formation-demo",
-      title: "Watch a candle form",
-      paragraphs: [
-        "Before you build your own, watch one form over time. The demonstration below plays a simulated price path (educational data, generated for this lesson — not a real market). The opening price sets the Open; as price moves, the running High and Low update and the body stretches and shrinks; when the interval ends, the last price becomes the Close.",
-        "Before it finishes, make a prediction: will this candle close bullish, bearish, or as a doji? Committing to a prediction before the reveal is how the Academy trains evidence-based thinking.",
-      ],
-      bullets: [],
-    },
-    {
-      id: "builder",
-      kind: "candle-builder",
-      title: "Build a candle",
-      paragraphs: [
-        "Now build one. Move the sliders or type exact values — the candle updates immediately, and the readouts show its range, body, and wicks. Try to create an invalid candle: drag the High below the Close, or the Low above the Open. The builder clamps the values instead, because a real candle cannot exist in that state.",
-        "Notice the classification label. Bullish means only that the Close is above the Open. Bearish means only that the Close is below the Open. A doji is a candle whose body is at most 5% of its range — open and close are nearly the same price. Those labels describe the finished candle; they predict nothing.",
-      ],
-      bullets: [],
-    },
-    {
-      id: "challenges",
-      kind: "challenges",
-      title: "Guided challenges",
-      paragraphs: [
-        `Use the builder to hit each target shape in the ${CANDLE_CHALLENGES.length} challenges below. There is no timer and no penalty for retrying — rebuild as many times as you need. The feedback uses your candle's actual numbers, so read it: it tells you exactly which measurement is off and by how much.`,
-      ],
-      bullets: [],
-    },
-    {
-      id: "evidence",
-      kind: "evidence-board",
-      title: "Evidence Board: fact, interpretation, overreach, or needs more data?",
-      paragraphs: [
-        `Traders constantly turn observations into stories. Some stories are reasonable; some claim far more than the data supports. For each of the ${EVIDENCE_ITEMS.length} statements below, judge it against the evidence shown: is it an Observed Fact, a Reasonable Interpretation, an Overreach, or something that Needs More Data? The answer is revealed only after you commit — and a wrong first answer is useful information, not a failure.`,
-      ],
-      bullets: [],
-    },
-    {
-      id: "explanations",
-      kind: "explanation",
-      title: "Explain it accurately",
-      paragraphs: [
-        `Knowing a shape is not the same as reasoning about it accurately. These ${EXPLANATION_QUESTIONS.length} questions ask which statement about a candle is actually supported. Each option carries its own feedback, so a wrong pick shows you which part of the statement went too far.`,
-      ],
-      bullets: [],
-    },
-    {
-      id: "assessment",
-      kind: "assessment",
-      title: "Mastery check",
-      paragraphs: [
-        `${ASSESSMENT_ITEMS.length} questions across everything in this lesson: classifying candles (including boundary and doji cases), interpreting wicks without inventing intent, and sorting facts from claims. Score 80% or higher to mark this lesson Mastered. Attempts are unlimited, and your best score is kept — but a score only ever reflects the answers you actually gave.`,
-      ],
-      bullets: [],
-    },
-    {
-      id: "journal",
-      kind: "journal",
-      title: "Decision journal",
-      paragraphs: [
-        "Four short reflections, saved privately to your progress (on this device as a guest; to your account when you are signed in and sync is available). Honest answers here are worth more than a perfect score.",
-      ],
-      bullets: [],
-    },
-    {
-      id: "summary",
-      kind: "summary",
-      title: "Key principles",
-      paragraphs: [
-        "A candle is four numbers with one inviolable constraint. Bullish and bearish describe where the close landed relative to the open — nothing more. Wicks record that price traveled somewhere and did not stay there; why it retreated is an interpretation, never a fact a single candle can prove. And no candle, however dramatic, guarantees the next one.",
-      ],
-      bullets: [
-        "Fact: what the numbers say. Interpretation: a story consistent with them. Overreach: certainty the data does not contain.",
-        "When the evidence is incomplete, 'Needs More Data' — and waiting — is a correct, professional answer.",
-      ],
-    },
-  ],
-};
+const FIRST_EVIDENCE = EVIDENCE_ITEMS.slice(0, 6);
+const REMAINING_EVIDENCE = EVIDENCE_ITEMS.slice(6);
+const REMAINING_CHALLENGES = CANDLE_CHALLENGES.slice(1);
 
-export const LESSONS: LessonDef[] = [CANDLESTICK_MASTERY];
+export const CANDLE_BASICS_LESSONS: LessonDef[] = [
+  {
+    id: "candle-basics-1",
+    slug: "what-is-a-candlestick",
+    worldNumber: 1,
+    order: 1,
+    title: "What Is a Candlestick?",
+    tagline: "Let's start with just one candle.",
+    objectives: [
+      "Say, in your own words, what a candlestick shows.",
+      "Point to the body and the wicks on a candle.",
+      "Explain the difference between a one-minute candle and a five-minute candle.",
+    ],
+    estimatedMinutes: 4,
+    difficulty: "Beginner",
+    prerequisites: "None — this is the very first lesson.",
+    masteryThreshold: 80,
+    sections: [
+      {
+        id: "welcome",
+        kind: "objectives",
+        title: "Let's start with just one candle",
+        paragraphs: [
+          "A candlestick is a small picture of how price moved during one period of time.",
+          "If the period is one minute, the candle summarizes that one minute. If the period is five minutes, it summarizes those five minutes. Same picture — a different amount of time inside it.",
+        ],
+        bullets: [],
+      },
+      {
+        id: "meet-the-candle",
+        kind: "tap-reveal",
+        title: "Meet the candle",
+        paragraphs: [
+          "Here is one candle, nice and large. Tap each part to see what it is. There is nothing to memorize yet — just look.",
+        ],
+        bullets: [],
+      },
+      {
+        id: "quick-check",
+        kind: "explanation",
+        title: "One quick check",
+        paragraphs: [
+          "One question, that's all. If you miss it, the feedback will show you why — that's how learning works here.",
+        ],
+        bullets: [],
+        level: "practice",
+        contentIds: ["l1-candle-shows"],
+      },
+    ],
+  },
+  {
+    id: "candle-basics-2",
+    slug: "green-vs-red-candles",
+    worldNumber: 1,
+    order: 2,
+    title: "Green vs. Red Candles",
+    tagline: "Two prices decide the color: where it opened, and where it closed.",
+    objectives: [
+      "Decide whether a candle is bullish or bearish by comparing its close with its open.",
+      "Recognize a doji, where open and close finish equal or nearly equal.",
+      "Explain why a candle's color never predicts the next candle.",
+    ],
+    estimatedMinutes: 5,
+    difficulty: "Beginner",
+    prerequisites: "Lesson 1 — What Is a Candlestick?",
+    masteryThreshold: 80,
+    sections: [
+      {
+        id: "two-prices",
+        kind: "objectives",
+        title: "Start with two prices",
+        paragraphs: [
+          "Every candle has an opening price and a closing price. To understand the color, we compare those two — nothing more.",
+          "Notice where the candle opened. Then look at where it closed. That comparison is the whole rule.",
+        ],
+        bullets: [],
+      },
+      {
+        id: "the-three-rules",
+        kind: "concept",
+        title: "The three rules",
+        paragraphs: [
+          "Green, or bullish: the closing price is higher than the opening price.",
+          "Red, or bearish: the closing price is lower than the opening price.",
+          "If the opening and closing prices are equal or nearly equal, the candle may be classified as a doji. In this Academy, nearly equal means the body — the gap between open and close — is at most 5% of the candle's full range.",
+        ],
+        bullets: [
+          "Bullish and bearish describe this candle only.",
+          "A green candle does not predict a green next candle.",
+          "A red candle does not predict a red next candle.",
+        ],
+      },
+      {
+        id: "direction-practice",
+        kind: "direction-practice",
+        title: "Try it yourself",
+        paragraphs: [
+          "One candle at a time. Compare the close with the open, then choose. We'll start with obvious ones.",
+        ],
+        bullets: [],
+        level: "practice",
+      },
+      {
+        id: "color-is-not-a-forecast",
+        kind: "concept",
+        title: "Explore deeper: color is not a forecast",
+        paragraphs: [
+          "A color summarizes one finished period. The next period gets its own open, its own movement, and its own close — so it has to be read when it forms, not guessed from the candle before it.",
+          "Good traders describe what a candle did. They are careful about claiming what the next one must do.",
+        ],
+        bullets: [],
+        level: "explore",
+      },
+    ],
+  },
+  {
+    id: "candle-basics-3",
+    slug: "meet-ohlc",
+    worldNumber: 1,
+    order: 3,
+    title: "Meet OHLC",
+    tagline: "Four prices make every candle. We'll meet them one at a time.",
+    objectives: [
+      "Name the Open, High, Low, and Close of a candle.",
+      "Point to where each of the four prices sits on the candle.",
+      "Explain each price in one short sentence.",
+    ],
+    estimatedMinutes: 6,
+    difficulty: "Beginner",
+    prerequisites: "Lesson 2 — Green vs. Red Candles",
+    masteryThreshold: 80,
+    sections: [
+      {
+        id: "one-at-a-time",
+        kind: "objectives",
+        title: "Four prices, one at a time",
+        paragraphs: [
+          "OHLC is just four short words: Open, High, Low, Close. They sound technical, but each one is a simple idea.",
+          "We will highlight one price at a time on the same candle. Take each step slowly.",
+        ],
+        bullets: [],
+      },
+      {
+        id: "ohlc-explorer",
+        kind: "ohlc-explorer",
+        title: "Meet Open, High, Low, and Close",
+        paragraphs: [
+          "Follow the highlight. After each price, there is one easy question before we move on.",
+        ],
+        bullets: [],
+        contentIds: ["l3-open", "l3-high", "l3-low", "l3-close"],
+      },
+      {
+        id: "how-they-fit",
+        kind: "concept",
+        title: "Explore deeper: how the four prices fit together",
+        paragraphs: [
+          "The four prices always fit one rule: the Low is never above the lower of Open and Close, and the High is never below the higher of Open and Close.",
+          "In plain words: the High must reach at least as high as both the start and the finish, and the Low must reach at least as low. A candle that breaks that rule isn't a candle — it's a data error.",
+        ],
+        bullets: [],
+        level: "explore",
+      },
+    ],
+  },
+  {
+    id: "candle-basics-4",
+    slug: "build-your-first-candlestick",
+    worldNumber: 1,
+    order: 4,
+    title: "Build Your First Candlestick",
+    tagline: "Your turn. Change one price at a time and watch the candle respond.",
+    objectives: [
+      "Build a valid candle by setting Open, High, Low, and Close.",
+      "Explain why the High and Low sometimes move when you set another price.",
+      "Build a bullish candle on purpose.",
+    ],
+    estimatedMinutes: 8,
+    difficulty: "Beginner",
+    prerequisites: "Lesson 3 — Meet OHLC",
+    masteryThreshold: 80,
+    sections: [
+      {
+        id: "your-turn",
+        kind: "objectives",
+        title: "Your turn to build",
+        paragraphs: [
+          "You know the four prices now. In this lesson you set them yourself.",
+          "Change one price at a time and watch what the candle does. There is no timer, and nothing here can be broken.",
+        ],
+        bullets: [],
+      },
+      {
+        id: "builder",
+        kind: "candle-builder",
+        title: "Build a candle",
+        paragraphs: [
+          "Move the sliders or type exact values — the candle updates right away.",
+          "One rule protects every candle: High can't be lower than the highest of Open and Close, and Low can't be higher than the lowest of Open and Close. If a number can't stay where you put it, the builder moves it to the nearest place that works and tells you why, in plain words.",
+        ],
+        bullets: [],
+      },
+      {
+        id: "first-target",
+        kind: "challenges",
+        title: "Try it yourself: one target",
+        paragraphs: [
+          "Now use a fresh builder for one target shape. The feedback uses your candle's actual numbers, so read it — it tells you exactly what to adjust.",
+        ],
+        bullets: [],
+        level: "practice",
+        contentIds: ["ch-bullish"],
+      },
+      {
+        id: "exact-numbers",
+        kind: "concept",
+        title: "Explore deeper: range, body, and wicks",
+        paragraphs: [
+          "Three measurements describe any candle. The range is High minus Low — the full distance price travelled. The body is the gap between Open and Close. The wicks are what's left: how far price travelled beyond the body, above and below.",
+          "You never need to calculate these by hand — the builder shows them — but knowing what they mean makes every candle easier to read.",
+        ],
+        bullets: [],
+        level: "explore",
+      },
+    ],
+  },
+  {
+    id: "candle-basics-5",
+    slug: "watch-a-candle-form",
+    worldNumber: 1,
+    order: 5,
+    title: "Watch a Candle Form",
+    tagline: "A candle isn't finished until its period ends. Watch one grow.",
+    objectives: [
+      "Describe how the body and wicks change while a candle is still forming.",
+      "Make a prediction before a candle finishes, and compare it with the result calmly.",
+      "Explain why an unfinished candle can still change direction.",
+    ],
+    estimatedMinutes: 5,
+    difficulty: "Beginner",
+    prerequisites: "Lesson 4 — Build Your First Candlestick",
+    masteryThreshold: 80,
+    sections: [
+      {
+        id: "still-forming",
+        kind: "objectives",
+        title: "A candle grows before it settles",
+        paragraphs: [
+          "So far, every candle you saw was finished. This time, watch one while it is still forming.",
+          "The demonstration uses simulated prices made for this lesson — educational data, not a real market.",
+        ],
+        bullets: [],
+      },
+      {
+        id: "formation",
+        kind: "formation-demo",
+        title: "Watch a candle form",
+        paragraphs: [
+          "See the starting price first. Before the candle finishes, make a prediction: will it close bullish, bearish, or as a doji?",
+          "Then play it and compare. A prediction that misses is not a failure — noticing why it missed is the lesson.",
+        ],
+        bullets: [],
+        level: "practice",
+      },
+      {
+        id: "unfinished-can-change",
+        kind: "concept",
+        title: "Explore deeper: an unfinished candle can change",
+        paragraphs: [
+          "While a period is still running, the current price keeps moving — so the body can stretch, shrink, and even flip from green to red. Only the final price, at the period's end, becomes the Close.",
+          "That's why careful traders wait for a candle to finish before describing what it did.",
+        ],
+        bullets: [],
+        level: "explore",
+      },
+    ],
+  },
+  {
+    id: "candle-basics-6",
+    slug: "read-what-the-candle-says",
+    worldNumber: 1,
+    order: 6,
+    title: "Read What the Candle Actually Says",
+    tagline: "Separate what the candle shows from what we guess about it.",
+    objectives: [
+      "Tell an observation apart from an interpretation.",
+      "Spot a conclusion the evidence doesn't support.",
+      "Use Needs More Data when the evidence isn't enough.",
+    ],
+    estimatedMinutes: 10,
+    difficulty: "Beginner",
+    prerequisites: "Lesson 5 — Watch a Candle Form",
+    masteryThreshold: 80,
+    sections: [
+      {
+        id: "three-kinds-of-say",
+        kind: "objectives",
+        title: "Three kinds of saying",
+        paragraphs: [
+          "Here is one candle, read three ways. Observation: the candle closed below its opening price. Reasonable interpretation: price finished the period lower than it started. Unsupported conclusion: sellers definitely controlled every moment, or the next candle must be red.",
+          "A candle summarizes price action. It does not directly reveal every trader's intentions — and honest reading means knowing the difference.",
+        ],
+        bullets: [],
+      },
+      {
+        id: "evidence-start",
+        kind: "evidence-board",
+        title: "Try it yourself: sort the statements",
+        paragraphs: [
+          `For each of the ${FIRST_EVIDENCE.length} statements, judge it against the evidence shown: is it an Observed Fact, a Reasonable Interpretation, an Overreach, or something that Needs More Data? The answer appears only after you commit — and a wrong first answer is useful information, not a failure.`,
+        ],
+        bullets: [],
+        level: "practice",
+        contentIds: FIRST_EVIDENCE.map((i) => i.id),
+      },
+      {
+        id: "evidence-more",
+        kind: "evidence-board",
+        title: "Explore deeper: more statements",
+        paragraphs: [
+          `Ready for more? These ${REMAINING_EVIDENCE.length} statements are trickier — some sound confident but claim more than the candle can prove.`,
+        ],
+        bullets: [],
+        level: "explore",
+        contentIds: REMAINING_EVIDENCE.map((i) => i.id),
+      },
+    ],
+  },
+  {
+    id: "candle-basics-7",
+    slug: "beginner-practice-and-mastery",
+    worldNumber: 1,
+    order: 7,
+    title: "Beginner Practice and Mastery",
+    tagline: "Bring the pieces together — short practice, then the mastery check.",
+    objectives: [
+      "Identify candle direction and candle parts without help.",
+      "Build candle shapes on purpose.",
+      "Interpret a finished candle without claiming more than it shows.",
+      "Score at least 80% on the mastery check to mark this path Mastered.",
+    ],
+    estimatedMinutes: 15,
+    difficulty: "Beginner",
+    prerequisites: "Lessons 1–6 — the rest of Candlestick Basics",
+    masteryThreshold: 80,
+    sections: [
+      {
+        id: "put-it-together",
+        kind: "objectives",
+        title: "Put the pieces together",
+        paragraphs: [
+          "You've met every idea on this path: what a candle shows, green versus red, the four prices, building, forming, and honest reading.",
+          "Now practice each one briefly, then take the mastery check. Every exercise explains itself after a mistake — a red cross alone teaches nothing.",
+        ],
+        bullets: [],
+      },
+      {
+        id: "practice-challenges",
+        kind: "challenges",
+        title: "Try it yourself: short practice",
+        paragraphs: [
+          `Work through the ${REMAINING_CHALLENGES.length} challenges below. There is no timer and no penalty for retrying — rebuild as many times as you need.`,
+        ],
+        bullets: [],
+        level: "practice",
+        contentIds: REMAINING_CHALLENGES.map((c) => c.id),
+      },
+      {
+        id: "explanations",
+        kind: "explanation",
+        title: "Explain it accurately",
+        paragraphs: [
+          `Knowing a shape is not the same as reasoning about it accurately. These ${EXPLANATION_QUESTIONS.length} questions ask which statement about a candle is actually supported. Each option carries its own feedback, so a wrong pick shows you which part of the statement went too far.`,
+        ],
+        bullets: [],
+        level: "practice",
+        contentIds: EXPLANATION_QUESTIONS.map((q) => q.id),
+      },
+      {
+        id: "assessment",
+        kind: "assessment",
+        title: "Mastery check",
+        paragraphs: [
+          `${ASSESSMENT_ITEMS.length} questions across everything on this path: classifying candles (including boundary and doji cases), interpreting wicks without inventing intent, and sorting facts from claims. Score 80% or higher to mark this path Mastered. Attempts are unlimited, and your best score is kept — but a score only ever reflects the answers you actually gave.`,
+          "Scored below 80%? The feedback under each question shows what to review — revisit that lesson above, then retake whenever you're ready.",
+        ],
+        bullets: [],
+        level: "practice",
+      },
+      {
+        id: "journal",
+        kind: "journal",
+        title: "Decision journal",
+        paragraphs: [
+          "Four short reflections, saved privately to your progress (on this device as a guest; to your account when you are signed in and sync is available). Honest answers here are worth more than a perfect score.",
+        ],
+        bullets: [],
+      },
+      {
+        id: "summary",
+        kind: "summary",
+        title: "Key principles",
+        paragraphs: [
+          "A candle is four numbers with one inviolable constraint. Bullish and bearish describe where the close landed relative to the open — nothing more. Wicks record that price travelled somewhere and did not stay there; why it retreated is an interpretation, never a fact a single candle can prove. And no candle, however dramatic, guarantees the next one.",
+        ],
+        bullets: [
+          "Fact: what the numbers say. Interpretation: a story consistent with them. Overreach: certainty the data does not contain.",
+          "When the evidence is incomplete, 'Needs More Data' — and waiting — is a correct, professional answer.",
+        ],
+      },
+    ],
+  },
+];
+
+export const LESSONS: LessonDef[] = [...CANDLE_BASICS_LESSONS];
 
 export function getLessonBySlug(slug: string): LessonDef | null {
   return LESSONS.find((l) => l.slug === slug) ?? null;
+}
+
+export function getLessonsForWorld(worldNumber: number): LessonDef[] {
+  return LESSONS.filter((l) => l.worldNumber === worldNumber).sort((a, b) => a.order - b.order);
 }
 
 export function getWorld(number: number): WorldDef | null {
@@ -642,10 +1066,43 @@ export function getWorld(number: number): WorldDef | null {
 /* Validation — malformed content must fail loudly, never render.      */
 /* ------------------------------------------------------------------ */
 
+/** Every structured choice question, across all lesson banks. */
+export const ALL_CHOICE_QUESTIONS: ChoiceQuestion[] = [
+  ...L1_CHECKS,
+  ...L3_CHECKS,
+  ...EXPLANATION_QUESTIONS,
+];
+
+export function questionsByIds(ids: readonly string[]): ChoiceQuestion[] {
+  const byId = new Map(ALL_CHOICE_QUESTIONS.map((q) => [q.id, q]));
+  return ids.flatMap((id) => {
+    const q = byId.get(id);
+    return q ? [q] : [];
+  });
+}
+
+export function challengesByIds(ids: readonly string[]): ChallengeDef[] {
+  const byId = new Map(CANDLE_CHALLENGES.map((c) => [c.id, c]));
+  return ids.flatMap((id) => {
+    const c = byId.get(id);
+    return c ? [c] : [];
+  });
+}
+
+export function evidenceByIds(ids: readonly string[]): EvidenceItem[] {
+  const byId = new Map(EVIDENCE_ITEMS.map((i) => [i.id, i]));
+  return ids.flatMap((id) => {
+    const item = byId.get(id);
+    return item ? [item] : [];
+  });
+}
+
 const SECTION_KINDS = new Set([
-  "objectives", "concept", "formation-demo", "candle-builder", "challenges",
+  "objectives", "concept", "tap-reveal", "direction-practice", "ohlc-explorer",
+  "formation-demo", "candle-builder", "challenges",
   "evidence-board", "explanation", "assessment", "journal", "summary",
 ]);
+const SECTION_LEVELS = new Set(["learn", "practice", "explore"]);
 const EVIDENCE_KEYS = new Set(["fact", "interpretation", "overreach", "needs-data"]);
 const CHALLENGE_KINDS = new Set([
   "bullish", "bearish", "doji", "long-upper-wick", "long-lower-wick", "small-body-large-range",
@@ -668,6 +1125,7 @@ export function validateWorlds(worlds: readonly WorldDef[]): string[] {
 export function validateLesson(lesson: LessonDef): string[] {
   const errors: string[] = [];
   if (!lesson.id.trim() || !lesson.slug.trim() || !lesson.title.trim()) errors.push("lesson: missing id/slug/title");
+  if (!Number.isInteger(lesson.order) || lesson.order < 1) errors.push(`lesson ${lesson.id}: order must be a positive integer`);
   if (!(lesson.masteryThreshold > 0 && lesson.masteryThreshold <= 100)) errors.push(`lesson ${lesson.id}: masteryThreshold out of (0,100]`);
   if (lesson.objectives.length === 0) errors.push(`lesson ${lesson.id}: no objectives`);
   if (lesson.sections.length === 0) errors.push(`lesson ${lesson.id}: no sections`);
@@ -677,6 +1135,49 @@ export function validateLesson(lesson: LessonDef): string[] {
     sectionIds.add(s.id);
     if (!SECTION_KINDS.has(s.kind)) errors.push(`lesson ${lesson.id}: unknown section kind ${s.kind}`);
     if (!s.title.trim()) errors.push(`lesson ${lesson.id}: section ${s.id} has no title`);
+    if (s.level !== undefined && !SECTION_LEVELS.has(s.level)) errors.push(`lesson ${lesson.id}: section ${s.id} has unknown level ${s.level}`);
+    if (s.contentIds !== undefined && (s.contentIds.length === 0 || s.contentIds.some((id) => !id.trim()))) {
+      errors.push(`lesson ${lesson.id}: section ${s.id} has empty contentIds`);
+    }
+  }
+  return errors;
+}
+
+/** Registry-level lesson integrity: unique ids/slugs, unique order per world. */
+export function validateLessons(lessons: readonly LessonDef[]): string[] {
+  const errors: string[] = [];
+  const ids = new Set<string>();
+  const slugs = new Set<string>();
+  const orders = new Set<string>();
+  for (const l of lessons) {
+    if (ids.has(l.id)) errors.push(`lessons: duplicate id ${l.id}`);
+    ids.add(l.id);
+    if (slugs.has(l.slug)) errors.push(`lessons: duplicate slug ${l.slug}`);
+    slugs.add(l.slug);
+    const orderKey = `${l.worldNumber}:${l.order}`;
+    if (orders.has(orderKey)) errors.push(`lessons: duplicate order ${l.order} in world ${l.worldNumber}`);
+    orders.add(orderKey);
+  }
+  return errors;
+}
+
+/** Section contentIds must point at real bank entries for their kind. */
+export function validateSectionReferences(lessons: readonly LessonDef[]): string[] {
+  const errors: string[] = [];
+  const known: Partial<Record<string, Set<string>>> = {
+    challenges: new Set(CANDLE_CHALLENGES.map((c) => c.id)),
+    "evidence-board": new Set(EVIDENCE_ITEMS.map((i) => i.id)),
+    explanation: new Set(ALL_CHOICE_QUESTIONS.map((q) => q.id)),
+    "ohlc-explorer": new Set(L3_CHECKS.map((q) => q.id)),
+  };
+  for (const l of lessons) {
+    for (const s of l.sections) {
+      const set = known[s.kind];
+      if (!set || !s.contentIds) continue;
+      for (const id of s.contentIds) {
+        if (!set.has(id)) errors.push(`lesson ${l.id}: section ${s.id} references unknown ${s.kind} content id ${id}`);
+      }
+    }
   }
   return errors;
 }
@@ -762,8 +1263,10 @@ export function validateStatedCounts(
     assessment: { noun: "questions", count: expected.assessment },
   };
   for (const s of lesson.sections) {
-    const rule = byKind[s.kind];
-    if (!rule) continue;
+    const base = byKind[s.kind];
+    if (!base) continue;
+    // A section that selects a subset states the subset's count.
+    const rule = s.contentIds ? { noun: base.noun, count: s.contentIds.length } : base;
     for (const p of s.paragraphs) {
       const re = new RegExp(
         `(\\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\\s+${rule.noun}\\b`,
@@ -787,7 +1290,9 @@ export function validateStatedCounts(
 export function validateAcademyContent(): string[] {
   return [
     ...validateWorlds(WORLDS),
+    ...validateLessons(LESSONS),
     ...LESSONS.flatMap(validateLesson),
+    ...validateSectionReferences(LESSONS),
     ...LESSONS.flatMap((l) =>
       validateStatedCounts(l, {
         challenges: CANDLE_CHALLENGES.length,
@@ -799,6 +1304,8 @@ export function validateAcademyContent(): string[] {
     ...validateChallenges(CANDLE_CHALLENGES),
     ...validateEvidenceItems(EVIDENCE_ITEMS),
     ...validateChoiceQuestions(EXPLANATION_QUESTIONS),
+    ...validateChoiceQuestions(L1_CHECKS),
+    ...validateChoiceQuestions(L3_CHECKS),
     ...validateAssessmentItems(ASSESSMENT_ITEMS),
   ];
 }

@@ -27,19 +27,25 @@ import {
   CANDLE_CHALLENGES,
   EVIDENCE_ITEMS,
   EXPLANATION_QUESTIONS,
+  L1_CHECKS,
+  L3_CHECKS,
   LESSONS,
   WORLDS,
+  getLessonsForWorld,
   validateAcademyContent,
   validateAssessmentItems,
   validateChallenges,
   validateChoiceQuestions,
   validateEvidenceItems,
   validateLesson,
+  validateLessons,
+  validateSectionReferences,
   validateStatedCounts,
   validateWorlds,
 } from "./content";
 import { scoreAssessment, scoreChoiceQuestions, scoreEvidenceItems } from "./exercises";
 import {
+  completeLesson,
   emptyAcademyState,
   fromServerStatus,
   mergeAcademyStates,
@@ -50,6 +56,7 @@ import {
   setReflection,
   toServerStatus,
   touchLesson,
+  translateLegacyProgress,
   type AcademyState,
 } from "./progress";
 import type { ChallengeKind, EvidenceCategory } from "./types";
@@ -360,15 +367,64 @@ const approx = (a: number, b: number) => Math.abs(a - b) < 0.011;
 {
   check("registry: shipped content validates clean", validateAcademyContent().length === 0);
   check("worlds: exactly 12, numbered 1..12", WORLDS.length === 12 && WORLDS.every((w, i) => w.number === i + 1));
-  check("worlds: exactly one available (World 2, Candlestick Mastery)",
-    WORLDS.filter((w) => w.status === "available").length === 1 && WORLDS[1].status === "available");
+  check("worlds: exactly one available (World 1, Candlestick Basics)",
+    WORLDS.filter((w) => w.status === "available").length === 1 &&
+    WORLDS[0].status === "available" && WORLDS[0].title === "Candlestick Basics" &&
+    WORLDS[0].lessonSlug === "what-is-a-candlestick");
+  check("worlds: World 2 is Stock Market Foundations, planned",
+    WORLDS[1].title === "Stock Market Foundations" && WORLDS[1].status === "planned" && WORLDS[1].lessonSlug === null);
   check("worlds: planned worlds carry no lesson (no empty shells)",
     WORLDS.filter((w) => w.status === "planned").every((w) => w.lessonSlug === null));
-  check("lessons: flagship present with an 80% threshold",
-    LESSONS.length === 1 && LESSONS[0].masteryThreshold === 80);
-  const kinds = LESSONS[0].sections.map((s) => s.kind);
-  check("flagship sections cover the full learning cycle",
-    ["objectives", "concept", "formation-demo", "candle-builder", "challenges", "evidence-board", "explanation", "assessment", "journal", "summary"].every((k) => kinds.includes(k as never)));
+  check("worlds: no stale pre-swap references remain",
+    !JSON.stringify(WORLDS).includes("Candlestick Mastery") &&
+    WORLDS.every((w) => !w.prerequisites.includes("World 2 — Candlestick") && !w.prerequisites.includes("World 1 — Stock Market")));
+  check("worlds: swapped prerequisite strings updated",
+    WORLDS[2].prerequisites === "World 1 — Candlestick Basics" &&
+    WORLDS[3].prerequisites === "World 2 — Stock Market Foundations" &&
+    WORLDS[4].prerequisites === "World 1 — Candlestick Basics" &&
+    WORLDS[8].prerequisites === "Worlds 1, 3 and 5" &&
+    WORLDS[10].prerequisites === "Worlds 1–10");
+  check("worlds: every world named in a prerequisite exists",
+    WORLDS.every((w) => {
+      const re = /Worlds? (\d+)(?:–(\d+))?/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(w.prerequisites)) !== null) {
+        const from = Number(m[1]);
+        const to = m[2] ? Number(m[2]) : from;
+        for (let n = from; n <= to; n++) if (!WORLDS.some((x) => x.number === n)) return false;
+      }
+      return true;
+    }));
+
+  const basics = getLessonsForWorld(1);
+  check("lessons: World 1 carries exactly 7 lessons, ordered 1..7",
+    basics.length === 7 && basics.every((l, i) => l.order === i + 1 && l.worldNumber === 1));
+  check("lessons: stable ids and slugs for L1–L7",
+    JSON.stringify(basics.map((l) => l.id)) ===
+      JSON.stringify(["candle-basics-1", "candle-basics-2", "candle-basics-3", "candle-basics-4", "candle-basics-5", "candle-basics-6", "candle-basics-7"]) &&
+    JSON.stringify(basics.map((l) => l.slug)) ===
+      JSON.stringify(["what-is-a-candlestick", "green-vs-red-candles", "meet-ohlc", "build-your-first-candlestick", "watch-a-candle-form", "read-what-the-candle-says", "beginner-practice-and-mastery"]));
+  check("lessons: no lessons registered for planned worlds", getLessonsForWorld(2).length === 0 && LESSONS.length === 7);
+  check("lessons: only Lesson 7 carries the assessment and journal",
+    basics.filter((l) => l.sections.some((s) => s.kind === "assessment")).map((l) => l.id).join() === "candle-basics-7" &&
+    basics.filter((l) => l.sections.some((s) => s.kind === "journal")).map((l) => l.id).join() === "candle-basics-7");
+  check("lessons: Lesson 7 keeps the 80% mastery threshold", basics[6].masteryThreshold === 80);
+  const kinds = basics.flatMap((l) => l.sections.map((s) => s.kind));
+  check("path sections cover the full learning cycle",
+    ["objectives", "concept", "tap-reveal", "direction-practice", "ohlc-explorer", "formation-demo", "candle-builder", "challenges", "evidence-board", "explanation", "assessment", "journal", "summary"].every((k) => kinds.includes(k as never)));
+  check("banks unchanged: assessment ids (11, same order)",
+    JSON.stringify(ASSESSMENT_ITEMS.map((i) => i.id)) ===
+    JSON.stringify(["as-classify-bullish", "as-classify-bearish", "as-classify-doji", "as-classify-boundary", "as-classify-flat", "as-wick-choice", "as-categorize-fact", "as-categorize-overreach", "as-categorize-needs-data", "as-direction-prediction", "as-path-choice"]));
+  check("banks unchanged: evidence ids (12, same order)",
+    JSON.stringify(EVIDENCE_ITEMS.map((i) => i.id)) ===
+    JSON.stringify(["ev-open-close", "ev-consistent-rise", "ev-buyers-control", "ev-will-continue", "ev-high-was", "ev-rejection-interpretation", "ev-sellers-control", "ev-doji-reversal", "ev-volume-fact", "ev-volume-institutions", "ev-support-question", "ev-bearish-meaning"]));
+  check("beginner banks: L1 has 1 check, L3 has 4 (one per term), all valid",
+    L1_CHECKS.length === 1 && L3_CHECKS.length === 4 &&
+    validateChoiceQuestions(L1_CHECKS).length === 0 && validateChoiceQuestions(L3_CHECKS).length === 0);
+  check("validator: duplicate lesson order in a world rejected",
+    validateLessons([...basics, { ...basics[0], id: "candle-basics-x", slug: "extra" }]).length >= 1);
+  check("validator: unknown section content reference rejected",
+    validateSectionReferences([{ ...basics[0], sections: [{ id: "x", kind: "challenges", title: "X", paragraphs: [], bullets: [], contentIds: ["nope"] }] }]).length >= 1);
 
   // validator rejects malformed definitions
   const badLesson = { ...LESSONS[0], masteryThreshold: 140, sections: [LESSONS[0].sections[0], LESSONS[0].sections[0]] };
@@ -390,17 +446,19 @@ const approx = (a: number, b: number) => Math.abs(a - b) < 0.011;
   check("content counts: 6 challenges / 12 evidence / 3 explanations / 11 assessment items",
     CANDLE_CHALLENGES.length === 6 && EVIDENCE_ITEMS.length === 12 &&
     EXPLANATION_QUESTIONS.length === 3 && ASSESSMENT_ITEMS.length === 11);
+  const lesson7 = LESSONS.find((l) => l.id === "candle-basics-7")!;
   const sectionPara = (kind: string) =>
-    LESSONS[0].sections.find((s) => s.kind === kind)?.paragraphs.join(" ") ?? "";
+    lesson7.sections.find((s) => s.kind === kind)?.paragraphs.join(" ") ?? "";
   check("copy derives: assessment intro states the real item count (not a hardcoded 'Ten')",
     sectionPara("assessment").includes(`${ASSESSMENT_ITEMS.length} questions`));
-  check("copy derives: challenges / evidence / explanation intros state real counts",
-    sectionPara("challenges").includes(`${CANDLE_CHALLENGES.length} challenges`) &&
-    sectionPara("evidence-board").includes(`${EVIDENCE_ITEMS.length} statements`) &&
+  const lesson6 = LESSONS.find((l) => l.id === "candle-basics-6")!;
+  check("copy derives: subset intros state their real subset counts",
+    sectionPara("challenges").includes("5 challenges") &&
+    lesson6.sections.filter((s) => s.kind === "evidence-board").every((s) => s.paragraphs.join(" ").includes("6 statements")) &&
     sectionPara("explanation").includes(`${EXPLANATION_QUESTIONS.length} questions`));
   const doctoredLesson = {
-    ...LESSONS[0],
-    sections: LESSONS[0].sections.map((s) =>
+    ...lesson7,
+    sections: lesson7.sections.map((s) =>
       s.kind === "assessment" ? { ...s, paragraphs: ["Ten questions, honestly."] } : s
     ),
   };
@@ -411,6 +469,92 @@ const approx = (a: number, b: number) => Math.abs(a - b) < 0.011;
       explanations: EXPLANATION_QUESTIONS.length,
       assessment: ASSESSMENT_ITEMS.length,
     }).length >= 1);
+}
+
+/* ================= completion vs mastery semantics ================= */
+{
+  let c = touchLesson(emptyAcademyState(), "candle-basics-1", null, 1000);
+  c = completeLesson(c, "candle-basics-1", 2000);
+  check("completion: completeLesson marks completed, never mastered",
+    c.lessons["candle-basics-1"].status === "completed" &&
+    c.lessons["candle-basics-1"].attempts === 0 && c.lessons["candle-basics-1"].bestScore === null);
+  c = completeLesson(c, "candle-basics-1", 3000);
+  check("completion: repeated completion is stable (still completed, not mastered)",
+    c.lessons["candle-basics-1"].status === "completed");
+  let mastered = recordAttempt(emptyAcademyState(), "candle-basics-7", 95, 80, true, 1000);
+  mastered = completeLesson(mastered, "candle-basics-7", 2000);
+  check("completion: completeLesson never downgrades a mastered record",
+    mastered.lessons["candle-basics-7"].status === "mastered" && mastered.lessons["candle-basics-7"].bestScore === 95);
+  check("mastery: only an assessment attempt at/above threshold masters (recordAttempt on L7)",
+    recordAttempt(emptyAcademyState(), "candle-basics-7", 79, 80, true, 1).lessons["candle-basics-7"].status !== "mastered" &&
+    recordAttempt(emptyAcademyState(), "candle-basics-7", 80, 80, true, 1).lessons["candle-basics-7"].status === "mastered");
+}
+
+/* ================= legacy progress compatibility ================= */
+{
+  const LEGACY = "candlestick-mastery";
+  // absent: no legacy record -> state returned unchanged (same reference)
+  const plain = emptyAcademyState();
+  check("compat: absent legacy record leaves state untouched", translateLegacyProgress(plain) === plain);
+
+  // mastered legacy -> L7 inherits score record; L1–L6 completed; reflections move
+  let legacyMastered = recordAttempt(emptyAcademyState(), LEGACY, 92, 80, true, 5000);
+  legacyMastered = setReflection(legacyMastered, LEGACY, "uncertain", "legacy note");
+  const tm = translateLegacyProgress(legacyMastered);
+  check("compat: legacy key removed after translation", !(LEGACY in tm.lessons) && !(LEGACY in tm.reflections));
+  check("compat: mastered legacy -> Lesson 7 mastered with score + attempts",
+    tm.lessons["candle-basics-7"].status === "mastered" &&
+    tm.lessons["candle-basics-7"].bestScore === 92 && tm.lessons["candle-basics-7"].attempts === 1);
+  check("compat: mastered legacy -> Lessons 1–6 completed",
+    ["candle-basics-1", "candle-basics-2", "candle-basics-3", "candle-basics-4", "candle-basics-5", "candle-basics-6"]
+      .every((id) => tm.lessons[id]?.status === "completed"));
+  check("compat: legacy reflections move to Lesson 7", tm.reflections["candle-basics-7"]?.["uncertain"] === "legacy note");
+
+  // completed (below-threshold) legacy -> same mapping, status completed
+  const legacyCompleted = recordAttempt(emptyAcademyState(), LEGACY, 55, 80, true, 5000);
+  const tc = translateLegacyProgress(legacyCompleted);
+  check("compat: completed legacy -> Lesson 7 completed with its best score",
+    tc.lessons["candle-basics-7"].status === "completed" && tc.lessons["candle-basics-7"].bestScore === 55);
+
+  // in-progress legacy -> only Lesson 1 resumes; no score/attempts transfer
+  const legacyStarted = touchLesson(emptyAcademyState(), LEGACY, "builder", 1000);
+  const ti = translateLegacyProgress(legacyStarted);
+  check("compat: in-progress legacy -> Lesson 1 in-progress with resume position",
+    ti.lessons["candle-basics-1"]?.status === "in-progress" && ti.lessons["candle-basics-1"]?.lastPosition === "builder");
+  check("compat: in-progress legacy -> no Lesson 7 record, no transferred scores",
+    !("candle-basics-7" in ti.lessons) && ti.lessons["candle-basics-1"]?.attempts === 0 && ti.lessons["candle-basics-1"]?.bestScore === null);
+
+  // conflict: existing new records merge by the better-state rules
+  let conflict = recordAttempt(emptyAcademyState(), LEGACY, 92, 80, true, 5000);
+  conflict = recordAttempt(conflict, LEGACY, 92, 80, true, 6000); // legacy attempts = 2
+  conflict = recordAttempt(conflict, "candle-basics-7", 70, 80, true, 7000); // new L7 completed, best 70, 1 attempt
+  const tx = translateLegacyProgress(conflict);
+  check("compat conflict: better status + max score + max attempts win on Lesson 7",
+    tx.lessons["candle-basics-7"].status === "mastered" &&
+    tx.lessons["candle-basics-7"].bestScore === 92 && tx.lessons["candle-basics-7"].attempts === 2);
+  let conflict2 = recordAttempt(emptyAcademyState(), LEGACY, 55, 80, true, 5000); // legacy completed
+  conflict2 = recordAttempt(conflict2, "candle-basics-7", 95, 80, true, 6000); // new L7 mastered
+  const tx2 = translateLegacyProgress(conflict2);
+  check("compat conflict: an existing mastered Lesson 7 is never downgraded by legacy",
+    tx2.lessons["candle-basics-7"].status === "mastered" && tx2.lessons["candle-basics-7"].bestScore === 95);
+
+  // translation also fires on the load path (parse) and on merges (sync)
+  const stored = JSON.stringify({
+    version: 1,
+    lessons: { [LEGACY]: { status: "mastered", bestScore: 88, attempts: 3, lastPosition: "assessment", updatedAt: 42 } },
+    reflections: {},
+    misconceptions: {},
+  });
+  const parsedLegacy = parseAcademyState(stored);
+  check("compat: stored legacy record translates on load",
+    !("candlestick-mastery" in parsedLegacy.lessons) && parsedLegacy.lessons["candle-basics-7"]?.bestScore === 88);
+  const guestSide = touchLesson(emptyAcademyState(), LEGACY, null, 1000);
+  const serverSide = recordAttempt(emptyAcademyState(), "candle-basics-7", 85, 80, true, 2000);
+  const mergedLegacy = mergeForSync(guestSide, serverSide);
+  check("compat: merge path translates legacy records too",
+    !("candlestick-mastery" in mergedLegacy.lessons) &&
+    mergedLegacy.lessons["candle-basics-1"]?.status === "in-progress" &&
+    mergedLegacy.lessons["candle-basics-7"]?.status === "mastered");
 }
 
 console.log(`\n=== ACADEMY RESULT: ${pass} passed, ${fail} failed ===`);

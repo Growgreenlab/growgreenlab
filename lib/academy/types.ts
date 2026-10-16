@@ -154,6 +154,9 @@ export interface AssessmentItem {
 export type SectionKind =
   | "objectives"
   | "concept"
+  | "tap-reveal"
+  | "direction-practice"
+  | "ohlc-explorer"
   | "formation-demo"
   | "candle-builder"
   | "challenges"
@@ -163,12 +166,24 @@ export type SectionKind =
   | "journal"
   | "summary";
 
+/** Progressive-disclosure level for a lesson section. */
+export type LessonLevel = "learn" | "practice" | "explore";
+
 export interface LessonSection {
   id: string;
   kind: SectionKind;
   title: string;
   paragraphs: string[];
   bullets: string[];
+  /** Disclosure level; omitted sections are part of the Learn path. */
+  level?: LessonLevel;
+  /**
+   * Content-bank ids selected by this section, interpreted by kind:
+   * challenge ids for "challenges", evidence ids for "evidence-board",
+   * and choice-question ids for "explanation" / "ohlc-explorer".
+   * Omitted means the section uses its kind's full default bank.
+   */
+  contentIds?: string[];
 }
 
 export interface LessonDef {
@@ -176,6 +191,8 @@ export interface LessonDef {
   id: string;
   slug: string;
   worldNumber: number;
+  /** 1-based order within the world. */
+  order: number;
   title: string;
   tagline: string;
   objectives: string[];

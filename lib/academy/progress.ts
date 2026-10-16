@@ -25,9 +25,10 @@
  * downgrade a lesson.
  *
  * Status semantics: a lesson is "completed" when its activities are
- * done (an assessment attempt submitted), and "mastered" only when
- * an attempt scores at or above the lesson's threshold (default 80).
- * There is deliberately no mark-complete path.
+ * done (completeLesson, or an assessment attempt submitted), and
+ * "mastered" only when an attempt scores at or above the lesson's
+ * threshold (default 80). There is deliberately no mark-mastered
+ * path: completion and mastery are separate records.
  */
 import type { JournalPrompt } from "./types";
 
@@ -138,6 +139,91 @@ export function recordAttempt(
   return withLesson(state, next);
 }
 
+/**
+ * Mark a lesson's learning activities complete. This is deliberately
+ * separate from assessment recording: completion can never become
+ * mastery here, and an existing mastered record is left untouched.
+ */
+export function completeLesson(state: AcademyState, lessonId: string, now: number): AcademyState {
+  const cur = state.lessons[lessonId] ?? DEFAULT_LESSON_PROGRESS(lessonId);
+  if (statusRank(cur.status) >= statusRank("completed")) return state;
+  return withLesson(state, { ...cur, status: "completed", updatedAt: now });
+}
+
+/** Pre-redesign flagship id and the stable ids it maps onto. */
+export const LEGACY_LESSON_ID = "candlestick-mastery";
+export const CANDLE_BASICS_LESSON_IDS = [
+  "candle-basics-1",
+  "candle-basics-2",
+  "candle-basics-3",
+  "candle-basics-4",
+  "candle-basics-5",
+  "candle-basics-6",
+  "candle-basics-7",
+] as const;
+
+/**
+ * Translate progress recorded against the pre-redesign single-lesson
+ * id onto the seven-lesson path. A completed/mastered legacy record
+ * is strong evidence the learner covered Lessons 1–6 and sat the same
+ * assessment now living in Lesson 7, so Lesson 7 inherits its score
+ * record and Lessons 1–6 are completed. An in-progress legacy record
+ * only resumes the path at Lesson 1 — its assessment numbers are not
+ * transferred to a lesson that has no assessment. Pure; a state with
+ * no legacy record is returned unchanged.
+ */
+export function translateLegacyProgress(state: AcademyState): AcademyState {
+  const legacy = state.lessons[LEGACY_LESSON_ID];
+  const legacyReflections = state.reflections[LEGACY_LESSON_ID];
+  if (!legacy && !legacyReflections) return state;
+
+  const lessons: Record<string, LessonProgress> = { ...state.lessons };
+  delete lessons[LEGACY_LESSON_ID];
+  const reflections: Record<string, Record<string, string>> = { ...state.reflections };
+  delete reflections[LEGACY_LESSON_ID];
+
+  if (legacyReflections) {
+    // Existing Lesson 7 reflections win a same-prompt conflict.
+    reflections["candle-basics-7"] = {
+      ...legacyReflections,
+      ...(reflections["candle-basics-7"] ?? {}),
+    };
+  }
+
+  if (legacy && (legacy.status === "completed" || legacy.status === "mastered")) {
+    const target = lessons["candle-basics-7"];
+    const legacyAsTarget: LessonProgress = { ...legacy, lessonId: "candle-basics-7" };
+    lessons["candle-basics-7"] = target ? mergeLesson(target, legacyAsTarget) : legacyAsTarget;
+    for (const id of CANDLE_BASICS_LESSON_IDS.slice(0, 6)) {
+      const cur = lessons[id];
+      if (!cur) {
+        lessons[id] = { ...DEFAULT_LESSON_PROGRESS(id), status: "completed", updatedAt: legacy.updatedAt };
+      } else if (statusRank(cur.status) < statusRank("completed")) {
+        lessons[id] = { ...cur, status: "completed", updatedAt: Math.max(cur.updatedAt, legacy.updatedAt) };
+      }
+    }
+  } else if (legacy && legacy.status === "in-progress") {
+    const cur = lessons["candle-basics-1"];
+    if (!cur) {
+      lessons["candle-basics-1"] = {
+        ...DEFAULT_LESSON_PROGRESS("candle-basics-1"),
+        status: "in-progress",
+        lastPosition: legacy.lastPosition,
+        updatedAt: legacy.updatedAt,
+      };
+    } else if (cur.status === "not-started") {
+      lessons["candle-basics-1"] = {
+        ...cur,
+        status: "in-progress",
+        lastPosition: cur.lastPosition ?? legacy.lastPosition,
+        updatedAt: Math.max(cur.updatedAt, legacy.updatedAt),
+      };
+    }
+  }
+
+  return { ...state, lessons, reflections };
+}
+
 /** Count a missed concept (Evidence Board / explanation first answers). */
 export function recordMisconception(state: AcademyState, concept: string): AcademyState {
   return {
@@ -204,7 +290,9 @@ export function mergeAcademyStates(a: AcademyState, b: AcademyState): AcademySta
   for (const [concept, n] of Object.entries(b.misconceptions)) {
     misconceptions[concept] = Math.max(misconceptions[concept] ?? 0, n);
   }
-  return { version: ACADEMY_STATE_VERSION, lessons, reflections, misconceptions };
+  // Legacy single-lesson records translate onto the seven-lesson path
+  // after every merge, whichever side they arrived from.
+  return translateLegacyProgress({ version: ACADEMY_STATE_VERSION, lessons, reflections, misconceptions });
 }
 
 /** Merge for sync: server state is `b`, so server reflections win ties. */
@@ -270,7 +358,7 @@ export function parseAcademyState(raw: string | null): AcademyState {
         if (isNum(n) && n > 0) state.misconceptions[concept] = Math.floor(n);
       }
     }
-    return state;
+    return translateLegacyProgress(state);
   } catch {
     return emptyAcademyState();
   }
