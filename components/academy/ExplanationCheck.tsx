@@ -93,7 +93,8 @@ export default function ExplanationCheck({
         .ggl-ex-num { color: var(--ggl-muted); font-size: 12px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; margin: 0 0 8px; }
         .ggl-ex-prompt { color: var(--ggl-text); font-size: 16px; font-weight: 600; line-height: 1.55; margin: 0 0 14px; }
         .ggl-ex-options { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
-        .ggl-ex-opt { display: flex; gap: 10px; align-items: flex-start; border: 1px solid var(--ggl-border); border-radius: 10px; padding: 11px 13px; color: var(--ggl-text2); font-size: 14.5px; line-height: 1.55; cursor: pointer; }
+        .ggl-ex-opt { display: flex; gap: 10px; align-items: flex-start; border: 1px solid var(--ggl-border); border-radius: 10px; padding: 11px 13px; min-height: 44px; color: var(--ggl-text2); font-size: 14.5px; line-height: 1.55; cursor: pointer; }
+        .ggl-ex-card .ggl-btn { min-height: 44px; }
         .ggl-ex-opt-on { border-color: var(--ggl-green); color: var(--ggl-text); }
         .ggl-ex-opt input { accent-color: var(--ggl-green); width: 18px; height: 18px; margin-top: 2px; flex: none; }
         .ggl-ex-feedback { border-top: 1px solid var(--ggl-border); padding-top: 12px; color: var(--ggl-text2); font-size: 14.5px; line-height: 1.6; }

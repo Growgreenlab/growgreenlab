@@ -91,6 +91,7 @@ function ChallengeCard({
         .ggl-ch-done { color: var(--ggl-green); font-size: 13px; }
         .ggl-ch-instruction { color: var(--ggl-text2); font-size: 14.5px; line-height: 1.55; margin: 0 0 14px; }
         .ggl-ch-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+        .ggl-ch-actions .ggl-btn { min-height: 44px; }
         .ggl-ch-feedback { border-radius: 10px; padding: 12px 14px; font-size: 14.5px; line-height: 1.6; margin: 12px 0 0; color: var(--ggl-text2); }
         .ggl-ch-pass { border: 1px solid rgba(66,216,121,0.55); }
         .ggl-ch-miss { border: 1px solid rgba(240,180,41,0.55); }

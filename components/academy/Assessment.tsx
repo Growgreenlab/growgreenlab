@@ -130,7 +130,8 @@ export default function Assessment({
         .ggl-as-candle { margin-bottom: 10px; }
         .ggl-as-ohlc { text-align: center; color: var(--ggl-text2); font-size: 13.5px; margin: 4px 0 0; }
         .ggl-as-options { display: flex; flex-direction: column; gap: 8px; }
-        .ggl-as-opt { display: flex; gap: 10px; align-items: flex-start; border: 1px solid var(--ggl-border); border-radius: 10px; padding: 11px 13px; color: var(--ggl-text2); font-size: 14.5px; line-height: 1.55; cursor: pointer; }
+        .ggl-as-opt { display: flex; gap: 10px; align-items: flex-start; border: 1px solid var(--ggl-border); border-radius: 10px; padding: 11px 13px; min-height: 44px; color: var(--ggl-text2); font-size: 14.5px; line-height: 1.55; cursor: pointer; }
+        .ggl-as .ggl-btn { min-height: 44px; }
         .ggl-as-opt-on { border-color: var(--ggl-green); color: var(--ggl-text); }
         .ggl-as-opt input { accent-color: var(--ggl-green); width: 18px; height: 18px; margin-top: 2px; flex: none; }
         .ggl-as-correct-tag { margin-left: auto; color: var(--ggl-green); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; flex: none; }

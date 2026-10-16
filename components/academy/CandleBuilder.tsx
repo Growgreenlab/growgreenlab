@@ -220,9 +220,10 @@ export default function CandleBuilder({
         .ggl-cb-row { display: grid; grid-template-columns: 118px 1fr auto 92px; gap: 10px; align-items: center; }
         .ggl-cb-label { font-weight: 700; color: var(--ggl-text); font-size: 14.5px; display: flex; flex-direction: column; }
         .ggl-cb-hint { font-weight: 400; color: var(--ggl-muted); font-size: 12px; }
-        .ggl-cb-slider { width: 100%; accent-color: var(--ggl-green); min-height: 32px; }
+        .ggl-cb-slider { width: 100%; accent-color: var(--ggl-green); min-height: 44px; }
         .ggl-cb-dollar { color: var(--ggl-muted); }
-        .ggl-cb-num { background: var(--ggl-bg2); border: 1px solid var(--ggl-border); color: var(--ggl-text); border-radius: 8px; padding: 9px 10px; font-size: 15px; width: 100%; }
+        .ggl-cb-num { background: var(--ggl-bg2); border: 1px solid var(--ggl-border); color: var(--ggl-text); border-radius: 8px; padding: 10px 12px; font-size: 16px; min-height: 44px; width: 100%; }
+        .ggl-cb .ggl-btn { min-height: 44px; }
         .ggl-cb-notice { border: 1px solid rgba(240,180,41,0.55); border-radius: 10px; padding: 10px 12px; color: var(--ggl-text2); font-size: 14px; line-height: 1.55; margin: 0; }
         .ggl-cb-readouts { background: var(--ggl-bg2); border: 1px solid var(--ggl-border); border-radius: 10px; padding: 12px 14px; color: var(--ggl-text2); font-size: 14.5px; line-height: 1.55; }
         .ggl-cb-readouts p { margin: 0 0 6px; }
@@ -231,7 +232,7 @@ export default function CandleBuilder({
         .ggl-cb input:focus-visible, .ggl-cb button:focus-visible { outline: 2px solid var(--ggl-green); outline-offset: 2px; }
         @media (max-width: 720px) {
           .ggl-cb { grid-template-columns: 1fr; }
-          .ggl-cb-row { grid-template-columns: 92px 1fr auto 84px; }
+          .ggl-cb-row { grid-template-columns: 92px 1fr auto 96px; }
         }
       `}</style>
     </div>

@@ -146,7 +146,8 @@ export default function FormationDemo({ onActivity }: { onActivity?: () => void 
         .ggl-fd-note { color: var(--ggl-muted); font-size: 12.5px; margin: 6px 0 14px; }
         .ggl-fd-predict { border: 1px solid var(--ggl-border); border-radius: 10px; padding: 12px 14px; margin: 0 0 12px; display: flex; flex-direction: column; gap: 7px; }
         .ggl-fd-predict legend { color: var(--ggl-text); font-weight: 700; font-size: 14px; padding: 0 4px; }
-        .ggl-fd-radio { color: var(--ggl-text2); font-size: 14.5px; display: flex; gap: 8px; align-items: center; min-height: 28px; }
+        .ggl-fd-radio { color: var(--ggl-text2); font-size: 14.5px; display: flex; gap: 8px; align-items: center; min-height: 44px; }
+        .ggl-fd-controls .ggl-btn { min-height: 44px; }
         .ggl-fd-radio input { accent-color: var(--ggl-green); width: 18px; height: 18px; }
         .ggl-fd-verdict { background: var(--ggl-bg2); border: 1px solid var(--ggl-border); border-left: 3px solid var(--ggl-green); border-radius: 10px; padding: 12px 14px; color: var(--ggl-text2); font-size: 14.5px; line-height: 1.6; margin: 0; }
         .ggl-fd-controls { display: flex; gap: 10px; flex-wrap: wrap; margin: 16px 0; }

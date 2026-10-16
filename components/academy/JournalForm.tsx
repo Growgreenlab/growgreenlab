@@ -64,6 +64,7 @@ export default function JournalForm({
         .ggl-jf-row label { display: block; color: var(--ggl-text); font-weight: 600; font-size: 14.5px; margin-bottom: 6px; }
         .ggl-jf-row textarea { width: 100%; box-sizing: border-box; background: var(--ggl-bg2); border: 1px solid var(--ggl-border); color: var(--ggl-text); border-radius: 10px; padding: 11px 13px; font-size: 14.5px; line-height: 1.55; font-family: inherit; resize: vertical; }
         .ggl-jf-actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+        .ggl-jf-actions .ggl-btn { min-height: 44px; }
         .ggl-jf-status { color: var(--ggl-muted); font-size: 13.5px; }
         .ggl-jf textarea:focus-visible, .ggl-jf button:focus-visible { outline: 2px solid var(--ggl-green); outline-offset: 2px; }
       `}</style>

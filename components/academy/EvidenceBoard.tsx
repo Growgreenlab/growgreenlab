@@ -130,7 +130,8 @@ export default function EvidenceBoard({
         .ggl-eb-context span { color: var(--ggl-muted); font-weight: 700; }
         .ggl-eb-statement { color: var(--ggl-text); font-size: 16.5px; font-weight: 600; line-height: 1.5; margin: 0 0 14px; }
         .ggl-eb-options { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
-        .ggl-eb-opt { background: transparent; border: 1px solid var(--ggl-border); color: var(--ggl-text2); border-radius: 999px; padding: 9px 14px; font-size: 13.5px; font-weight: 600; cursor: pointer; min-height: 40px; }
+        .ggl-eb-opt { background: transparent; border: 1px solid var(--ggl-border); color: var(--ggl-text2); border-radius: 999px; padding: 9px 14px; font-size: 13.5px; font-weight: 600; cursor: pointer; min-height: 44px; }
+        .ggl-eb-card .ggl-btn { min-height: 44px; }
         .ggl-eb-opt-on { border-color: var(--ggl-green); color: var(--ggl-green); background: rgba(66,216,121,0.08); }
         .ggl-eb-opt:disabled { opacity: 0.65; cursor: default; }
         .ggl-eb-feedback { border-top: 1px solid var(--ggl-border); padding-top: 12px; color: var(--ggl-text2); font-size: 14.5px; line-height: 1.6; }
