@@ -35,6 +35,7 @@ import {
   validateChoiceQuestions,
   validateEvidenceItems,
   validateLesson,
+  validateStatedCounts,
   validateWorlds,
 } from "./content";
 import { scoreAssessment, scoreChoiceQuestions, scoreEvidenceItems } from "./exercises";
@@ -384,6 +385,32 @@ const approx = (a: number, b: number) => Math.abs(a - b) < 0.011;
   check("validator: assessment correctIndex out of range rejected", validateAssessmentItems(badAssessment).length >= 1);
   const badChallenges = CANDLE_CHALLENGES.map((c) => (c.kind === "small-body-large-range" ? { ...c, rangeOptions: [] } : c));
   check("validator: small-body challenge without rangeOptions rejected", validateChallenges(badChallenges).length >= 1);
+
+  // copy/count integrity — stated counts must equal the content arrays
+  check("content counts: 6 challenges / 12 evidence / 3 explanations / 11 assessment items",
+    CANDLE_CHALLENGES.length === 6 && EVIDENCE_ITEMS.length === 12 &&
+    EXPLANATION_QUESTIONS.length === 3 && ASSESSMENT_ITEMS.length === 11);
+  const sectionPara = (kind: string) =>
+    LESSONS[0].sections.find((s) => s.kind === kind)?.paragraphs.join(" ") ?? "";
+  check("copy derives: assessment intro states the real item count (not a hardcoded 'Ten')",
+    sectionPara("assessment").includes(`${ASSESSMENT_ITEMS.length} questions`));
+  check("copy derives: challenges / evidence / explanation intros state real counts",
+    sectionPara("challenges").includes(`${CANDLE_CHALLENGES.length} challenges`) &&
+    sectionPara("evidence-board").includes(`${EVIDENCE_ITEMS.length} statements`) &&
+    sectionPara("explanation").includes(`${EXPLANATION_QUESTIONS.length} questions`));
+  const doctoredLesson = {
+    ...LESSONS[0],
+    sections: LESSONS[0].sections.map((s) =>
+      s.kind === "assessment" ? { ...s, paragraphs: ["Ten questions, honestly."] } : s
+    ),
+  };
+  check("validator: a stated count that disagrees with the content is rejected",
+    validateStatedCounts(doctoredLesson, {
+      challenges: CANDLE_CHALLENGES.length,
+      evidence: EVIDENCE_ITEMS.length,
+      explanations: EXPLANATION_QUESTIONS.length,
+      assessment: ASSESSMENT_ITEMS.length,
+    }).length >= 1);
 }
 
 console.log(`\n=== ACADEMY RESULT: ${pass} passed, ${fail} failed ===`);

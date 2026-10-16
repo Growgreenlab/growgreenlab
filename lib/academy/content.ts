@@ -154,143 +154,6 @@ export const WORLDS: WorldDef[] = [
 ];
 
 /* ------------------------------------------------------------------ */
-/* Candlestick Mastery — the flagship lesson (World 2)                  */
-/* ------------------------------------------------------------------ */
-
-export const CANDLESTICK_MASTERY: LessonDef = {
-  id: "candlestick-mastery",
-  slug: "candlestick-mastery",
-  worldNumber: 2,
-  title: "Candlestick Mastery",
-  tagline: "Can you build a candlestick? Construct candles, watch them form, and learn exactly what a finished candle does — and does not — tell you.",
-  objectives: [
-    "Construct a valid candle from any Open, High, Low, and Close, and explain the constraint that connects them.",
-    "Classify a candle as bullish, bearish, or doji from its open-to-close relationship — and state the doji tolerance being used.",
-    "Describe what bodies and wicks record, and label wick interpretations as interpretations, not facts.",
-    "Explain why a candle's direction is not a prediction of the next candle.",
-    "Sort market statements into Observed Fact, Reasonable Interpretation, Overreach, and Needs More Data.",
-  ],
-  estimatedMinutes: 25,
-  difficulty: "Beginner",
-  prerequisites: "None — this is a starting point.",
-  masteryThreshold: 80,
-  sections: [
-    {
-      id: "objectives",
-      kind: "objectives",
-      title: "What you will be able to do",
-      paragraphs: [
-        "A candlestick compresses everything a market did during one interval — one minute, five minutes, a day — into four numbers: the Open, the High, the Low, and the Close. This lesson teaches you to build candles yourself, because reading a candle is much easier once you have constructed one.",
-        "It also teaches a discipline that runs through the whole Academy: separating what the data shows from what we infer from it, and from what we simply cannot know yet.",
-      ],
-      bullets: [],
-    },
-    {
-      id: "anatomy",
-      kind: "concept",
-      title: "The four numbers",
-      paragraphs: [
-        "Open — the first price of the interval. High — the highest price reached during the interval. Low — the lowest price reached. Close — the final price when the interval ends.",
-        "The thick part of the candle is the body: the span between Open and Close. The thin lines above and below are the wicks (also called shadows): they show how far price traveled beyond the body before the interval ended.",
-        "These four numbers obey one constraint, always: Low ≤ the lower of Open/Close, and the higher of Open/Close ≤ High. A candle that breaks that rule is not a candle — it is a data error. The builder below enforces the rule for you, so watch what it does when you try to break it.",
-      ],
-      bullets: [
-        "Range = High − Low: the full distance price traveled.",
-        "Body = |Close − Open|: the distance between the first and last price.",
-        "Upper wick = High − the higher of Open/Close. Lower wick = the lower of Open/Close − Low.",
-      ],
-    },
-    {
-      id: "formation",
-      kind: "formation-demo",
-      title: "Watch a candle form",
-      paragraphs: [
-        "Before you build your own, watch one form over time. The demonstration below plays a simulated price path (educational data, generated for this lesson — not a real market). The opening price sets the Open; as price moves, the running High and Low update and the body stretches and shrinks; when the interval ends, the last price becomes the Close.",
-        "Before it finishes, make a prediction: will this candle close bullish, bearish, or as a doji? Committing to a prediction before the reveal is how the Academy trains evidence-based thinking.",
-      ],
-      bullets: [],
-    },
-    {
-      id: "builder",
-      kind: "candle-builder",
-      title: "Build a candle",
-      paragraphs: [
-        "Now build one. Move the sliders or type exact values — the candle updates immediately, and the readouts show its range, body, and wicks. Try to create an invalid candle: drag the High below the Close, or the Low above the Open. The builder clamps the values instead, because a real candle cannot exist in that state.",
-        "Notice the classification label. Bullish means only that the Close is above the Open. Bearish means only that the Close is below the Open. A doji is a candle whose body is at most 5% of its range — open and close are nearly the same price. Those labels describe the finished candle; they predict nothing.",
-      ],
-      bullets: [],
-    },
-    {
-      id: "challenges",
-      kind: "challenges",
-      title: "Guided challenges",
-      paragraphs: [
-        "Use the builder to hit each target shape. There is no timer and no penalty for retrying — rebuild as many times as you need. The feedback uses your candle's actual numbers, so read it: it tells you exactly which measurement is off and by how much.",
-      ],
-      bullets: [],
-    },
-    {
-      id: "evidence",
-      kind: "evidence-board",
-      title: "Evidence Board: fact, interpretation, overreach, or needs more data?",
-      paragraphs: [
-        "Traders constantly turn observations into stories. Some stories are reasonable; some claim far more than the data supports. For each statement below, judge it against the evidence shown: is it an Observed Fact, a Reasonable Interpretation, an Overreach, or something that Needs More Data? The answer is revealed only after you commit — and a wrong first answer is useful information, not a failure.",
-      ],
-      bullets: [],
-    },
-    {
-      id: "explanations",
-      kind: "explanation",
-      title: "Explain it accurately",
-      paragraphs: [
-        "Knowing a shape is not the same as reasoning about it accurately. These questions ask which statement about a candle is actually supported. Each option carries its own feedback, so a wrong pick shows you which part of the statement went too far.",
-      ],
-      bullets: [],
-    },
-    {
-      id: "assessment",
-      kind: "assessment",
-      title: "Mastery check",
-      paragraphs: [
-        "Ten questions across everything in this lesson: classifying candles (including boundary and doji cases), interpreting wicks without inventing intent, and sorting facts from claims. Score 80% or higher to mark this lesson Mastered. Attempts are unlimited, and your best score is kept — but a score only ever reflects the answers you actually gave.",
-      ],
-      bullets: [],
-    },
-    {
-      id: "journal",
-      kind: "journal",
-      title: "Decision journal",
-      paragraphs: [
-        "Four short reflections, saved privately to your progress (on this device as a guest; to your account when you are signed in and sync is available). Honest answers here are worth more than a perfect score.",
-      ],
-      bullets: [],
-    },
-    {
-      id: "summary",
-      kind: "summary",
-      title: "Key principles",
-      paragraphs: [
-        "A candle is four numbers with one inviolable constraint. Bullish and bearish describe where the close landed relative to the open — nothing more. Wicks record that price traveled somewhere and did not stay there; why it retreated is an interpretation, never a fact a single candle can prove. And no candle, however dramatic, guarantees the next one.",
-      ],
-      bullets: [
-        "Fact: what the numbers say. Interpretation: a story consistent with them. Overreach: certainty the data does not contain.",
-        "When the evidence is incomplete, 'Needs More Data' — and waiting — is a correct, professional answer.",
-      ],
-    },
-  ],
-};
-
-export const LESSONS: LessonDef[] = [CANDLESTICK_MASTERY];
-
-export function getLessonBySlug(slug: string): LessonDef | null {
-  return LESSONS.find((l) => l.slug === slug) ?? null;
-}
-
-export function getWorld(number: number): WorldDef | null {
-  return WORLDS.find((w) => w.number === number) ?? null;
-}
-
-/* ------------------------------------------------------------------ */
 /* Guided challenges                                                   */
 /* ------------------------------------------------------------------ */
 
@@ -639,6 +502,143 @@ export const ASSESSMENT_ITEMS: AssessmentItem[] = [
 ];
 
 /* ------------------------------------------------------------------ */
+/* Candlestick Mastery — the flagship lesson (World 2)                  */
+/* ------------------------------------------------------------------ */
+
+export const CANDLESTICK_MASTERY: LessonDef = {
+  id: "candlestick-mastery",
+  slug: "candlestick-mastery",
+  worldNumber: 2,
+  title: "Candlestick Mastery",
+  tagline: "Can you build a candlestick? Construct candles, watch them form, and learn exactly what a finished candle does — and does not — tell you.",
+  objectives: [
+    "Construct a valid candle from any Open, High, Low, and Close, and explain the constraint that connects them.",
+    "Classify a candle as bullish, bearish, or doji from its open-to-close relationship — and state the doji tolerance being used.",
+    "Describe what bodies and wicks record, and label wick interpretations as interpretations, not facts.",
+    "Explain why a candle's direction is not a prediction of the next candle.",
+    "Sort market statements into Observed Fact, Reasonable Interpretation, Overreach, and Needs More Data.",
+  ],
+  estimatedMinutes: 25,
+  difficulty: "Beginner",
+  prerequisites: "None — this is a starting point.",
+  masteryThreshold: 80,
+  sections: [
+    {
+      id: "objectives",
+      kind: "objectives",
+      title: "What you will be able to do",
+      paragraphs: [
+        "A candlestick compresses everything a market did during one interval — one minute, five minutes, a day — into four numbers: the Open, the High, the Low, and the Close. This lesson teaches you to build candles yourself, because reading a candle is much easier once you have constructed one.",
+        "It also teaches a discipline that runs through the whole Academy: separating what the data shows from what we infer from it, and from what we simply cannot know yet.",
+      ],
+      bullets: [],
+    },
+    {
+      id: "anatomy",
+      kind: "concept",
+      title: "The four numbers",
+      paragraphs: [
+        "Open — the first price of the interval. High — the highest price reached during the interval. Low — the lowest price reached. Close — the final price when the interval ends.",
+        "The thick part of the candle is the body: the span between Open and Close. The thin lines above and below are the wicks (also called shadows): they show how far price traveled beyond the body before the interval ended.",
+        "These four numbers obey one constraint, always: Low ≤ the lower of Open/Close, and the higher of Open/Close ≤ High. A candle that breaks that rule is not a candle — it is a data error. The builder below enforces the rule for you, so watch what it does when you try to break it.",
+      ],
+      bullets: [
+        "Range = High − Low: the full distance price traveled.",
+        "Body = |Close − Open|: the distance between the first and last price.",
+        "Upper wick = High − the higher of Open/Close. Lower wick = the lower of Open/Close − Low.",
+      ],
+    },
+    {
+      id: "formation",
+      kind: "formation-demo",
+      title: "Watch a candle form",
+      paragraphs: [
+        "Before you build your own, watch one form over time. The demonstration below plays a simulated price path (educational data, generated for this lesson — not a real market). The opening price sets the Open; as price moves, the running High and Low update and the body stretches and shrinks; when the interval ends, the last price becomes the Close.",
+        "Before it finishes, make a prediction: will this candle close bullish, bearish, or as a doji? Committing to a prediction before the reveal is how the Academy trains evidence-based thinking.",
+      ],
+      bullets: [],
+    },
+    {
+      id: "builder",
+      kind: "candle-builder",
+      title: "Build a candle",
+      paragraphs: [
+        "Now build one. Move the sliders or type exact values — the candle updates immediately, and the readouts show its range, body, and wicks. Try to create an invalid candle: drag the High below the Close, or the Low above the Open. The builder clamps the values instead, because a real candle cannot exist in that state.",
+        "Notice the classification label. Bullish means only that the Close is above the Open. Bearish means only that the Close is below the Open. A doji is a candle whose body is at most 5% of its range — open and close are nearly the same price. Those labels describe the finished candle; they predict nothing.",
+      ],
+      bullets: [],
+    },
+    {
+      id: "challenges",
+      kind: "challenges",
+      title: "Guided challenges",
+      paragraphs: [
+        `Use the builder to hit each target shape in the ${CANDLE_CHALLENGES.length} challenges below. There is no timer and no penalty for retrying — rebuild as many times as you need. The feedback uses your candle's actual numbers, so read it: it tells you exactly which measurement is off and by how much.`,
+      ],
+      bullets: [],
+    },
+    {
+      id: "evidence",
+      kind: "evidence-board",
+      title: "Evidence Board: fact, interpretation, overreach, or needs more data?",
+      paragraphs: [
+        `Traders constantly turn observations into stories. Some stories are reasonable; some claim far more than the data supports. For each of the ${EVIDENCE_ITEMS.length} statements below, judge it against the evidence shown: is it an Observed Fact, a Reasonable Interpretation, an Overreach, or something that Needs More Data? The answer is revealed only after you commit — and a wrong first answer is useful information, not a failure.`,
+      ],
+      bullets: [],
+    },
+    {
+      id: "explanations",
+      kind: "explanation",
+      title: "Explain it accurately",
+      paragraphs: [
+        `Knowing a shape is not the same as reasoning about it accurately. These ${EXPLANATION_QUESTIONS.length} questions ask which statement about a candle is actually supported. Each option carries its own feedback, so a wrong pick shows you which part of the statement went too far.`,
+      ],
+      bullets: [],
+    },
+    {
+      id: "assessment",
+      kind: "assessment",
+      title: "Mastery check",
+      paragraphs: [
+        `${ASSESSMENT_ITEMS.length} questions across everything in this lesson: classifying candles (including boundary and doji cases), interpreting wicks without inventing intent, and sorting facts from claims. Score 80% or higher to mark this lesson Mastered. Attempts are unlimited, and your best score is kept — but a score only ever reflects the answers you actually gave.`,
+      ],
+      bullets: [],
+    },
+    {
+      id: "journal",
+      kind: "journal",
+      title: "Decision journal",
+      paragraphs: [
+        "Four short reflections, saved privately to your progress (on this device as a guest; to your account when you are signed in and sync is available). Honest answers here are worth more than a perfect score.",
+      ],
+      bullets: [],
+    },
+    {
+      id: "summary",
+      kind: "summary",
+      title: "Key principles",
+      paragraphs: [
+        "A candle is four numbers with one inviolable constraint. Bullish and bearish describe where the close landed relative to the open — nothing more. Wicks record that price traveled somewhere and did not stay there; why it retreated is an interpretation, never a fact a single candle can prove. And no candle, however dramatic, guarantees the next one.",
+      ],
+      bullets: [
+        "Fact: what the numbers say. Interpretation: a story consistent with them. Overreach: certainty the data does not contain.",
+        "When the evidence is incomplete, 'Needs More Data' — and waiting — is a correct, professional answer.",
+      ],
+    },
+  ],
+};
+
+export const LESSONS: LessonDef[] = [CANDLESTICK_MASTERY];
+
+export function getLessonBySlug(slug: string): LessonDef | null {
+  return LESSONS.find((l) => l.slug === slug) ?? null;
+}
+
+export function getWorld(number: number): WorldDef | null {
+  return WORLDS.find((w) => w.number === number) ?? null;
+}
+
+/* ------------------------------------------------------------------ */
 /* Validation — malformed content must fail loudly, never render.      */
 /* ------------------------------------------------------------------ */
 
@@ -736,11 +736,66 @@ export function validateAssessmentItems(items: readonly AssessmentItem[]): strin
   return errors;
 }
 
+const COUNT_WORD_VALUES: Record<string, number> = {
+  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6,
+  seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
+};
+
+/**
+ * Copy/count integrity: where a section's copy STATES how many
+ * exercises it contains ("11 questions…", "the 6 challenges below"),
+ * the stated number must equal the real content array. The flagship
+ * copy derives these numbers from the arrays at definition time;
+ * this check keeps any future hand-edit honest. A section that
+ * states no count is not flagged — its component renders counts
+ * from the data it is given.
+ */
+export function validateStatedCounts(
+  lesson: LessonDef,
+  expected: { challenges: number; evidence: number; explanations: number; assessment: number }
+): string[] {
+  const errors: string[] = [];
+  const byKind: Partial<Record<string, { noun: string; count: number }>> = {
+    challenges: { noun: "challenges", count: expected.challenges },
+    "evidence-board": { noun: "statements", count: expected.evidence },
+    explanation: { noun: "questions", count: expected.explanations },
+    assessment: { noun: "questions", count: expected.assessment },
+  };
+  for (const s of lesson.sections) {
+    const rule = byKind[s.kind];
+    if (!rule) continue;
+    for (const p of s.paragraphs) {
+      const re = new RegExp(
+        `(\\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\\s+${rule.noun}\\b`,
+        "gi"
+      );
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(p)) !== null) {
+        const stated = /^\d+$/.test(m[1]) ? Number(m[1]) : COUNT_WORD_VALUES[m[1].toLowerCase()];
+        if (stated !== rule.count) {
+          errors.push(
+            `lesson ${lesson.id}: section ${s.id} copy states ${stated} ${rule.noun} but the content defines ${rule.count}`
+          );
+        }
+      }
+    }
+  }
+  return errors;
+}
+
 /** All content problems in the shipped registry (must be empty). */
 export function validateAcademyContent(): string[] {
   return [
     ...validateWorlds(WORLDS),
     ...LESSONS.flatMap(validateLesson),
+    ...LESSONS.flatMap((l) =>
+      validateStatedCounts(l, {
+        challenges: CANDLE_CHALLENGES.length,
+        evidence: EVIDENCE_ITEMS.length,
+        explanations: EXPLANATION_QUESTIONS.length,
+        assessment: ASSESSMENT_ITEMS.length,
+      })
+    ),
     ...validateChallenges(CANDLE_CHALLENGES),
     ...validateEvidenceItems(EVIDENCE_ITEMS),
     ...validateChoiceQuestions(EXPLANATION_QUESTIONS),

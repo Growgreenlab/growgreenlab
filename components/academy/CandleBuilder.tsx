@@ -9,6 +9,20 @@
  * the Close instead of creating an impossible candle. Readouts
  * (range, body, wicks, classification) update immediately and come
  * from the same pinned math as the tests.
+ *
+ * NUMERIC INPUTS EDIT A DRAFT, NOT THE CANDLE: each field keeps a
+ * local text draft while it is focused, so typing a full value
+ * ("10.50") is never validated — and mangled — mid-keystroke. The
+ * draft commits through the same clamping path on blur and on
+ * Enter; Escape reverts the draft to the actual value; when the
+ * field is not focused it displays the actual value. Text that is
+ * not a number restores the previous value and says so.
+ *
+ * CLAMPING IS ANNOUNCED, NEVER SILENT: whenever a committed value
+ * (typed or slid) is moved by the OHLC invariants, a short notice
+ * near the controls names the field, the entered value, the applied
+ * value, and the rule in plain words. It clears on the next
+ * successful unclamped change.
  */
 import { useState } from "react";
 import {
@@ -16,12 +30,16 @@ import {
   classifyCandle,
   classLabel,
   setCandleField,
+  PRICE_CEILING,
+  PRICE_FLOOR,
   type Candle,
   type CandleInput,
 } from "../../lib/academy/candleMath";
 import CandleSvg from "./CandleSvg";
 
-const FIELDS: { key: keyof CandleInput; label: string; hint: string }[] = [
+type FieldKey = keyof CandleInput;
+
+const FIELDS: { key: FieldKey; label: string; hint: string }[] = [
   { key: "open", label: "Open", hint: "First price of the interval" },
   { key: "high", label: "High", hint: "Highest price reached" },
   { key: "low", label: "Low", hint: "Lowest price reached" },
@@ -30,6 +48,24 @@ const FIELDS: { key: keyof CandleInput; label: string; hint: string }[] = [
 
 const SLIDER_MIN = 0;
 const SLIDER_MAX = 20;
+
+const money = (n: number) => `$${n.toFixed(2)}`;
+const cents = (n: number) => Math.round(n * 100) / 100;
+const labelOf = (field: FieldKey) => FIELDS.find((f) => f.key === field)?.label ?? field;
+
+/** The plain-words rule that forced a committed value to move. */
+function clampReason(field: FieldKey, entered: number, applied: number, next: Candle): string {
+  if (field === "high" && applied > entered) {
+    return `the High can't sit below the higher of Open and Close (${money(Math.max(next.open, next.close))})`;
+  }
+  if (field === "low" && applied < entered) {
+    return `the Low can't sit above the lower of Open and Close (${money(Math.min(next.open, next.close))})`;
+  }
+  if (entered < PRICE_FLOOR || entered > PRICE_CEILING) {
+    return `prices in this builder stay between ${money(PRICE_FLOOR)} and ${money(PRICE_CEILING)}`;
+  }
+  return "the candle rule — Low ≤ Open/Close ≤ High — has to hold";
+}
 
 export default function CandleBuilder({
   initial,
@@ -41,19 +77,77 @@ export default function CandleBuilder({
   onActivity?: () => void;
 }) {
   const [candle, setCandle] = useState<Candle>(initial);
+  // Per-field numeric drafts: an entry exists only while that field
+  // is being edited. Absent entry = the input shows the actual value.
+  const [drafts, setDrafts] = useState<Partial<Record<FieldKey, string>>>({});
+  const [notice, setNotice] = useState<string | null>(null);
   const g = candleGeometry(candle);
   const cls = classifyCandle(candle);
 
-  const set = (field: keyof CandleInput, value: number) => {
-    if (!Number.isFinite(value)) return; // non-numeric input: keep the last valid candle
+  /**
+   * The single commit path for sliders and typed values alike.
+   * Announces the clamp when the invariant moved the entered value;
+   * clears any earlier notice on a clean, unclamped change.
+   */
+  const applyValue = (field: FieldKey, value: number): Candle => {
     const next = setCandleField(candle, field, value);
+    if (next[field] !== cents(value)) {
+      setNotice(
+        `${labelOf(field)}: you entered ${money(value)}, but ${clampReason(field, value, next[field], next)} — so it was set to ${money(next[field])}.`
+      );
+    } else {
+      setNotice(null);
+    }
     setCandle(next);
     onCandleChange?.(next);
     onActivity?.();
+    return next;
   };
+
+  const onSlider = (field: FieldKey, value: number) => {
+    if (!Number.isFinite(value)) return;
+    const next = applyValue(field, value);
+    // Keep a mid-edit draft of this same field in sync with the slide.
+    setDrafts((d) => (d[field] === undefined ? d : { ...d, [field]: String(next[field]) }));
+  };
+
+  const startDraft = (field: FieldKey) =>
+    setDrafts((d) => (d[field] === undefined ? { ...d, [field]: String(candle[field]) } : d));
+
+  const endDraft = (field: FieldKey) =>
+    setDrafts((d) => {
+      if (d[field] === undefined) return d;
+      const next = { ...d };
+      delete next[field];
+      return next;
+    });
+
+  /** Commit a field's draft (blur / Enter). Invalid text restores. */
+  const commitDraft = (field: FieldKey) => {
+    const raw = drafts[field];
+    if (raw === undefined) return;
+    endDraft(field);
+    const trimmed = raw.trim();
+    const value = Number(trimmed);
+    if (trimmed === "" || !Number.isFinite(value)) {
+      setNotice(
+        trimmed === ""
+          ? `${labelOf(field)} was left blank, so it was restored to ${money(candle[field])}.`
+          : `${labelOf(field)} entry "${trimmed}" wasn't a number, so it was restored to ${money(candle[field])}.`
+      );
+      return;
+    }
+    applyValue(field, value);
+  };
+
+  /** Escape: revert the draft to the actual value, commit nothing. */
+  const cancelDraft = (field: FieldKey) =>
+    setDrafts((d) => (d[field] === undefined ? d : { ...d, [field]: String(candle[field]) }));
 
   const reset = () => {
     setCandle(initial);
+    setDrafts({});
+    setNotice(null);
     onCandleChange?.(initial);
   };
 
@@ -75,7 +169,7 @@ export default function CandleBuilder({
               max={SLIDER_MAX}
               step={0.01}
               value={Math.min(SLIDER_MAX, Math.max(SLIDER_MIN, candle[f.key]))}
-              onChange={(e) => set(f.key, Number(e.target.value))}
+              onChange={(e) => onSlider(f.key, Number(e.target.value))}
               aria-label={`${f.label} slider`}
               className="ggl-cb-slider"
             />
@@ -85,13 +179,26 @@ export default function CandleBuilder({
               type="number"
               min={0}
               step={0.01}
-              value={candle[f.key]}
-              onChange={(e) => set(f.key, Number(e.target.value))}
+              value={drafts[f.key] ?? candle[f.key]}
+              onFocus={() => startDraft(f.key)}
+              onChange={(e) => setDrafts((d) => ({ ...d, [f.key]: e.target.value }))}
+              onBlur={() => commitDraft(f.key)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") commitDraft(f.key);
+                else if (e.key === "Escape") cancelDraft(f.key);
+              }}
               className="ggl-cb-num"
               inputMode="decimal"
             />
           </div>
         ))}
+        <div aria-live="polite">
+          {notice && (
+            <p className="ggl-cb-notice" role="status">
+              {notice}
+            </p>
+          )}
+        </div>
         <div className="ggl-cb-readouts" aria-live="polite">
           <p>
             <strong>{classLabel(cls)}</strong> — close {cls === "bullish" ? "above" : cls === "bearish" ? "below" : "≈"} open.
@@ -116,6 +223,7 @@ export default function CandleBuilder({
         .ggl-cb-slider { width: 100%; accent-color: var(--ggl-green); min-height: 32px; }
         .ggl-cb-dollar { color: var(--ggl-muted); }
         .ggl-cb-num { background: var(--ggl-bg2); border: 1px solid var(--ggl-border); color: var(--ggl-text); border-radius: 8px; padding: 9px 10px; font-size: 15px; width: 100%; }
+        .ggl-cb-notice { border: 1px solid rgba(240,180,41,0.55); border-radius: 10px; padding: 10px 12px; color: var(--ggl-text2); font-size: 14px; line-height: 1.55; margin: 0; }
         .ggl-cb-readouts { background: var(--ggl-bg2); border: 1px solid var(--ggl-border); border-radius: 10px; padding: 12px 14px; color: var(--ggl-text2); font-size: 14.5px; line-height: 1.55; }
         .ggl-cb-readouts p { margin: 0 0 6px; }
         .ggl-cb-readouts strong { color: var(--ggl-text); }
