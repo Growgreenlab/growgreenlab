@@ -22,7 +22,19 @@ export function candleColor(c: Candle): string {
   return cls === "bullish" ? BULL : cls === "bearish" ? BEAR : DOJI;
 }
 
-export function describeCandle(c: Candle): string {
+/**
+ * The candle's accessible description. With `revealClassification`
+ * false the label describes the candle structurally only (the four
+ * prices, which are also printed on the graphic) and must NOT name
+ * the classification — contexts where the learner classifies BEFORE
+ * answering (direction practice, the mastery assessment) use it so
+ * the aria-label can never hand over the answer.
+ */
+export function candleAriaLabel(c: Candle, opts: { revealClassification: boolean }): string {
+  const prices = `open $${c.open.toFixed(2)}, high $${c.high.toFixed(2)}, low $${c.low.toFixed(2)}, close $${c.close.toFixed(2)}`;
+  if (!opts.revealClassification) {
+    return `Candlestick: ${prices}.`;
+  }
   const cls = classLabel(classifyCandle(c));
   const rel =
     cls === "Bullish"
@@ -30,7 +42,11 @@ export function describeCandle(c: Candle): string {
       : cls === "Bearish"
         ? "the close is below the open"
         : "the open and close are nearly the same price";
-  return `Candlestick: open $${c.open.toFixed(2)}, high $${c.high.toFixed(2)}, low $${c.low.toFixed(2)}, close $${c.close.toFixed(2)}. Classified as ${cls.toLowerCase()} because ${rel}.`;
+  return `Candlestick: ${prices}. Classified as ${cls.toLowerCase()} because ${rel}.`;
+}
+
+export function describeCandle(c: Candle): string {
+  return candleAriaLabel(c, { revealClassification: true });
 }
 
 export type CandleHighlight =
@@ -48,6 +64,7 @@ export default function CandleSvg({
   height = 260,
   showValues = true,
   highlight = null,
+  revealClassification = true,
 }: {
   candle: Candle;
   height?: number;
@@ -58,6 +75,13 @@ export default function CandleSvg({
    * candle exactly as before.
    */
   highlight?: CandleHighlight;
+  /**
+   * When false, the aria-label describes the candle structurally
+   * without naming its classification — for pre-answer contexts
+   * (direction practice, assessment items). Default true: teaching
+   * contexts keep the full description.
+   */
+  revealClassification?: boolean;
 }) {
   const g = candleGeometry(candle);
   const cls = classifyCandle(candle);
@@ -112,7 +136,7 @@ export default function CandleSvg({
         width="100%"
         height={H}
         role="img"
-        aria-label={describeCandle(candle)}
+        aria-label={candleAriaLabel(candle, { revealClassification })}
         style={{ display: "block", maxWidth: 300, margin: "0 auto" }}
       >
         {/* wick (two segments so a lesson can highlight one of them) */}

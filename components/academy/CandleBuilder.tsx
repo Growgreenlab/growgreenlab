@@ -50,7 +50,20 @@ const SLIDER_MIN = 0;
 const SLIDER_MAX = 20;
 
 const money = (n: number) => `$${n.toFixed(2)}`;
-const cents = (n: number) => Math.round(n * 100) / 100;
+
+/**
+ * Pure: snap any incoming control value to exact cents. Range inputs
+ * can hand back raw float32 artifacts (10.4 arriving as
+ * 10.399999618530272); nothing reaches candle state unrounded.
+ */
+export const roundToCents = (n: number): number => Math.round(n * 100) / 100;
+
+/**
+ * Pure: the only string form a builder price is ever displayed or
+ * seeded into a draft in — cents-rounded, two decimals — so an input
+ * can never show a raw unrounded float.
+ */
+export const formatBuilderValue = (n: number): string => roundToCents(n).toFixed(2);
 const labelOf = (field: FieldKey) => FIELDS.find((f) => f.key === field)?.label ?? field;
 
 /** The plain-words rule that forced a committed value to move. */
@@ -91,7 +104,7 @@ export default function CandleBuilder({
    */
   const applyValue = (field: FieldKey, value: number): Candle => {
     const next = setCandleField(candle, field, value);
-    if (next[field] !== cents(value)) {
+    if (next[field] !== roundToCents(value)) {
       setNotice(
         `${labelOf(field)}: you entered ${money(value)}, but ${clampReason(field, value, next[field], next)} — so it was set to ${money(next[field])}.`
       );
@@ -106,13 +119,13 @@ export default function CandleBuilder({
 
   const onSlider = (field: FieldKey, value: number) => {
     if (!Number.isFinite(value)) return;
-    const next = applyValue(field, value);
+    const next = applyValue(field, roundToCents(value));
     // Keep a mid-edit draft of this same field in sync with the slide.
-    setDrafts((d) => (d[field] === undefined ? d : { ...d, [field]: String(next[field]) }));
+    setDrafts((d) => (d[field] === undefined ? d : { ...d, [field]: formatBuilderValue(next[field]) }));
   };
 
   const startDraft = (field: FieldKey) =>
-    setDrafts((d) => (d[field] === undefined ? { ...d, [field]: String(candle[field]) } : d));
+    setDrafts((d) => (d[field] === undefined ? { ...d, [field]: formatBuilderValue(candle[field]) } : d));
 
   const endDraft = (field: FieldKey) =>
     setDrafts((d) => {
@@ -142,7 +155,7 @@ export default function CandleBuilder({
 
   /** Escape: revert the draft to the actual value, commit nothing. */
   const cancelDraft = (field: FieldKey) =>
-    setDrafts((d) => (d[field] === undefined ? d : { ...d, [field]: String(candle[field]) }));
+    setDrafts((d) => (d[field] === undefined ? d : { ...d, [field]: formatBuilderValue(candle[field]) }));
 
   const reset = () => {
     setCandle(initial);
@@ -179,7 +192,7 @@ export default function CandleBuilder({
               type="number"
               min={0}
               step={0.01}
-              value={drafts[f.key] ?? candle[f.key]}
+              value={drafts[f.key] ?? formatBuilderValue(candle[f.key])}
               onFocus={() => startDraft(f.key)}
               onChange={(e) => setDrafts((d) => ({ ...d, [f.key]: e.target.value }))}
               onBlur={() => commitDraft(f.key)}

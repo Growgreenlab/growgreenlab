@@ -178,6 +178,24 @@ export default function LessonPage() {
     activity(steps[clamped].main.id);
   };
 
+  const evidenceItemsFor = (s: LessonSection) =>
+    s.contentIds ? evidenceByIds(s.contentIds) : EVIDENCE_ITEMS;
+
+  /**
+   * Statement numbering continues across a lesson's boards: the
+   * offset for a board is the item count of every evidence-board
+   * section before it in the lesson (Lesson 6's explore set follows
+   * its first board, so it starts at 7, not 1).
+   */
+  const evidenceOffsetFor = (section: LessonSection): number => {
+    let offset = 0;
+    for (const s of lesson.sections) {
+      if (s.id === section.id) break;
+      if (s.kind === "evidence-board") offset += evidenceItemsFor(s).length;
+    }
+    return offset;
+  };
+
   const renderInteractive = (section: LessonSection) => {
     switch (section.kind) {
       case "tap-reveal":
@@ -208,7 +226,8 @@ export default function LessonPage() {
       case "evidence-board":
         return (
           <EvidenceBoard
-            items={section.contentIds ? evidenceByIds(section.contentIds) : EVIDENCE_ITEMS}
+            items={evidenceItemsFor(section)}
+            numberOffset={evidenceOffsetFor(section)}
             onConceptResult={conceptResult}
             onActivity={() => activity(section.id)}
           />

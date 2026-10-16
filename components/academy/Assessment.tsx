@@ -67,7 +67,7 @@ export default function Assessment({
             <p className="ggl-as-prompt">{item.prompt}</p>
             {item.candle && (
               <div className="ggl-as-candle">
-                <CandleSvg candle={item.candle} height={210} showValues={false} />
+                <CandleSvg candle={item.candle} height={210} showValues={false} revealClassification={false} />
                 <p className="ggl-as-ohlc">
                   Open ${item.candle.open.toFixed(2)} · High ${item.candle.high.toFixed(2)} · Low $
                   {item.candle.low.toFixed(2)} · Close ${item.candle.close.toFixed(2)}

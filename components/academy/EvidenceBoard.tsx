@@ -30,11 +30,18 @@ export default function EvidenceBoard({
   items,
   onConceptResult,
   onActivity,
+  numberOffset = 0,
 }: {
   items: EvidenceItem[];
   /** Called once per item, on its FIRST submission: (concept, correct). */
   onConceptResult?: (concept: string, correct: boolean) => void;
   onActivity?: () => void;
+  /**
+   * Statements are numbered from numberOffset + 1, so a lesson with
+   * a second board (the explore-deeper set) continues the count
+   * instead of restarting at 1. Default 0.
+   */
+  numberOffset?: number;
 }) {
   const [states, setStates] = useState<Record<string, ItemState>>({});
   const firstTry = useRef({ correct: 0, total: 0 });
@@ -72,12 +79,12 @@ export default function EvidenceBoard({
         const correct = st.submitted && st.chosen === item.key;
         return (
           <article key={item.id} className="ggl-eb-card">
-            <p className="ggl-eb-num">Statement {n + 1}</p>
+            <p className="ggl-eb-num">Statement {n + 1 + numberOffset}</p>
             <p className="ggl-eb-context">
               <span>Evidence shown:</span> {item.context}
             </p>
             <p className="ggl-eb-statement">“{item.statement}”</p>
-            <div className="ggl-eb-options" role="group" aria-label={`Classify statement ${n + 1}`}>
+            <div className="ggl-eb-options" role="group" aria-label={`Classify statement ${n + 1 + numberOffset}`}>
               {EVIDENCE_CATEGORIES.map((cat) => (
                 <button
                   key={cat.id}

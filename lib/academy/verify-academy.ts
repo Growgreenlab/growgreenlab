@@ -60,6 +60,8 @@ import {
   type AcademyState,
 } from "./progress";
 import type { ChallengeKind, EvidenceCategory } from "./types";
+import { candleAriaLabel } from "../../components/academy/CandleSvg";
+import { formatBuilderValue, roundToCents } from "../../components/academy/CandleBuilder";
 
 let pass = 0,
   fail = 0;
@@ -555,6 +557,32 @@ const approx = (a: number, b: number) => Math.abs(a - b) < 0.011;
     !("candlestick-mastery" in mergedLegacy.lessons) &&
     mergedLegacy.lessons["candle-basics-1"]?.status === "in-progress" &&
     mergedLegacy.lessons["candle-basics-7"]?.status === "mastered");
+}
+
+/* ================= QA regressions: aria leak & builder floats ================= */
+{
+  const bull = makeCandle({ open: 10, high: 10.6, low: 9.85, close: 10.4 });
+  const bear = makeCandle({ open: 10.4, high: 10.5, low: 9.8, close: 10 });
+  const doji = makeCandle({ open: 8, high: 8.3, low: 7.7, close: 8.01 });
+
+  check("aria label (reveal): names the classification",
+    candleAriaLabel(bull, { revealClassification: true }).includes("Classified as bullish"));
+
+  for (const [name, c] of [["bullish", bull], ["bearish", bear], ["doji", doji]] as const) {
+    const hidden = candleAriaLabel(c, { revealClassification: false }).toLowerCase();
+    check(`aria label (hidden, ${name} candle): no classification leaks`,
+      !hidden.includes("bullish") && !hidden.includes("bearish") && !hidden.includes("doji") && !hidden.includes("classified as"));
+  }
+  const hiddenBull = candleAriaLabel(bull, { revealClassification: false });
+  check("aria label (hidden): still describes all four prices",
+    hiddenBull.includes("$10.00") && hiddenBull.includes("$10.60") && hiddenBull.includes("$9.85") && hiddenBull.includes("$10.40"));
+
+  check("builder: slider float32 artifact rounds to exact cents",
+    roundToCents(10.399999618530272) === 10.4);
+  check("builder: display format never shows a raw float",
+    formatBuilderValue(10.199999809265137) === "10.20");
+  check("builder: display format keeps clean values at 2dp",
+    formatBuilderValue(10.4) === "10.40");
 }
 
 console.log(`\n=== ACADEMY RESULT: ${pass} passed, ${fail} failed ===`);

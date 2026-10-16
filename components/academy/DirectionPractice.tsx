@@ -152,7 +152,7 @@ export default function DirectionPractice({
       <p style={{ textAlign: "center", color: "var(--ggl-text2)", margin: "0 0 8px" }} aria-live="polite">
         Candle {idx + 1} of {sequence.length}
       </p>
-      <CandleSvg key={idx} candle={candle} height={300} showValues={false} />
+      <CandleSvg key={idx} candle={candle} height={300} showValues={false} revealClassification={false} />
       <p style={{ textAlign: "center", margin: "10px 0 4px" }}>
         Open <strong>${candle.open.toFixed(2)}</strong> · Close <strong>${candle.close.toFixed(2)}</strong>
       </p>
