@@ -3,43 +3,70 @@
 /**
  * /academy — the Trading Academy learning map.
  *
- * Twelve worlds from the master spec with honest status: World 2
- * (Candlestick Mastery) is available; Worlds 1 and 3–12 are Planned —
- * rendered as non-clickable planned cards, never empty shells. The
- * available world's card carries live progress from the Academy
- * progress store and a recommended next action driven by it.
+ * Twelve worlds from the master spec with honest status: World 1
+ * (Candlestick Basics) is available as a seven-lesson beginner path;
+ * Worlds 2–12 are Planned — rendered as non-clickable planned cards,
+ * never empty shells. The World 1 card lists every lesson with its
+ * own live progress status and a recommended next action driven by
+ * the first incomplete lesson.
  */
 import Link from "next/link";
-import { WORLDS } from "../../lib/academy/content";
+import { WORLDS, getLessonsForWorld } from "../../lib/academy/content";
 import type { LessonProgress } from "../../lib/academy/progress";
+import type { LessonDef } from "../../lib/academy/types";
 import { useAcademyProgress } from "../../components/academy/useAcademyProgress";
 
-function recommendedAction(p: LessonProgress | undefined): { label: string; hint: string } {
-  if (!p || p.status === "not-started") {
-    return { label: "Start Candlestick Mastery", hint: "The flagship lesson: build candles, watch them form, and pass the mastery check." };
-  }
-  if (p.status === "in-progress") {
+function lessonStatusLabel(p: LessonProgress | undefined): string {
+  if (!p || p.status === "not-started") return "Not started";
+  if (p.status === "in-progress") return "In progress";
+  if (p.status === "completed") return "Completed";
+  return "Mastered ✓";
+}
+
+function recommendedAction(
+  lessons: LessonDef[],
+  byId: Record<string, LessonProgress>
+): { label: string; hint: string; slug: string } {
+  const mastery = lessons[lessons.length - 1];
+  const masteryProgress = byId[mastery.id];
+  if (masteryProgress?.status === "mastered") {
     return {
-      label: "Continue Candlestick Mastery",
-      hint: p.lastPosition ? `Pick up where you left off (section: ${p.lastPosition}).` : "Pick up where you left off.",
+      label: "Candlestick Basics — Mastered ✓",
+      hint: `Best mastery score ${masteryProgress.bestScore ?? 0}% across ${masteryProgress.attempts} attempt${masteryProgress.attempts === 1 ? "" : "s"}. Revisit any lesson whenever you like.`,
+      slug: mastery.slug,
     };
   }
-  if (p.status === "completed") {
+  const next = lessons.find((l) => {
+    const s = byId[l.id]?.status ?? "not-started";
+    return s !== "completed" && s !== "mastered";
+  }) ?? mastery;
+  const p = byId[next.id];
+  const isMastery = next.id === mastery.id;
+  if (isMastery && p?.status === "completed") {
     return {
-      label: "Review Candlestick Mastery",
-      hint: `Activities complete${p.bestScore !== null ? ` — best mastery score ${p.bestScore}%` : ""}. Retake the mastery check any time to reach Mastered (80%+).`,
+      label: "Retake the mastery check",
+      hint: `Lesson 7's activities are complete — best score ${p.bestScore ?? 0}% so far. Score 80% or higher to mark the path Mastered.`,
+      slug: next.slug,
+    };
+  }
+  if (p?.status === "in-progress") {
+    return {
+      label: `Continue Lesson ${next.order}: ${next.title}`,
+      hint: "Pick up where you left off.",
+      slug: next.slug,
     };
   }
   return {
-    label: "Candlestick Mastery — Mastered ✓",
-    hint: `Best mastery score ${p.bestScore ?? 0}% across ${p.attempts} attempt${p.attempts === 1 ? "" : "s"}. Revisit any section whenever you like.`,
+    label: `Start Lesson ${next.order}: ${next.title}`,
+    hint: isMastery
+      ? "The final lesson: short practice, then the mastery check."
+      : "One small idea at a time, with practice as you go.",
+    slug: next.slug,
   };
 }
 
 export default function AcademyMapPage() {
   const { state, ready, synced } = useAcademyProgress();
-  const flagship = state.lessons["candlestick-mastery"];
-  const action = recommendedAction(flagship);
 
   return (
     <div className="ggl-academy">
@@ -48,7 +75,7 @@ export default function AcademyMapPage() {
       <p className="ggl-academy-lede">
         Structured, interactive lessons that teach you how to think about market data: what it shows,
         what you can reasonably infer, and what remains unknown. No memorized patterns, no guaranteed
-        outcomes — evidence first.
+        outcomes — evidence first. New to charts? Start with World 1, Lesson 1 — it assumes nothing.
       </p>
 
       <div className="ggl-academy-banner" role="note">
@@ -67,7 +94,14 @@ export default function AcademyMapPage() {
 
       <div className="ggl-academy-worlds">
         {WORLDS.map((w) => {
-          if (w.status === "available" && w.lessonSlug) {
+          if (w.status === "available") {
+            const lessons = getLessonsForWorld(w.number);
+            const action = recommendedAction(lessons, state.lessons);
+            const doneCount = lessons.filter((l) => {
+              const s = state.lessons[l.id]?.status;
+              return s === "completed" || s === "mastered";
+            }).length;
+            const masteryProgress = state.lessons[lessons[lessons.length - 1].id];
             return (
               <section key={w.slug} className="ggl-academy-world ggl-academy-world-live" aria-label={`World ${w.number}: ${w.title}`}>
                 <div className="ggl-academy-world-top">
@@ -76,21 +110,34 @@ export default function AcademyMapPage() {
                 </div>
                 <h2>{w.title}</h2>
                 <p className="ggl-academy-world-tag">{w.tagline}</p>
-                <ul className="ggl-academy-topics">
-                  {w.topics.map((t) => (
-                    <li key={t}>{t}</li>
-                  ))}
-                </ul>
-                {flagship && flagship.status !== "not-started" && (
+                <ol className="ggl-academy-lessons">
+                  {lessons.map((l) => {
+                    const lp = state.lessons[l.id];
+                    return (
+                      <li key={l.id}>
+                        <Link className="ggl-academy-lesson-row" href={`/academy/${l.slug}`}>
+                          <span className="ggl-academy-lesson-title">
+                            <span className="ggl-academy-lesson-num">{l.order}.</span> {l.title}
+                          </span>
+                          <span className="ggl-academy-lesson-status">{lessonStatusLabel(lp)}</span>
+                        </Link>
+                      </li>
+                    );
+                  })}
+                </ol>
+                {doneCount > 0 && (
                   <p className="ggl-academy-world-progress">
-                    Your status: <strong>{flagship.status === "mastered" ? "Mastered ✓" : flagship.status === "completed" ? "Completed" : "In progress"}</strong>
-                    {flagship.bestScore !== null ? ` · best score ${flagship.bestScore}%` : ""}
-                    {flagship.attempts > 0 ? ` · ${flagship.attempts} attempt${flagship.attempts === 1 ? "" : "s"}` : ""}
+                    Your progress: <strong>{doneCount} of {lessons.length} lessons completed</strong>
+                    {masteryProgress?.status === "mastered"
+                      ? " · Path Mastered ✓"
+                      : masteryProgress && masteryProgress.bestScore !== null
+                        ? ` · best mastery score ${masteryProgress.bestScore}%`
+                        : ""}
                   </p>
                 )}
                 <p className="ggl-academy-next">
                   <span className="ggl-academy-next-label">Recommended next action</span>
-                  <Link className="ggl-btn ggl-btn-primary" href={`/academy/${w.lessonSlug}`}>
+                  <Link className="ggl-btn ggl-btn-primary" href={`/academy/${action.slug}`}>
                     {action.label}
                   </Link>
                   <span className="ggl-academy-next-hint">{action.hint}</span>
@@ -142,6 +189,12 @@ export default function AcademyMapPage() {
         .ggl-academy-world h2 { margin: 0; font-size: 20px; color: var(--ggl-text); }
         .ggl-academy-world-tag { margin: 0; color: var(--ggl-text2); font-size: 14.5px; line-height: 1.55; }
         .ggl-academy-topics { margin: 0; padding-left: 18px; color: var(--ggl-muted); font-size: 13.5px; line-height: 1.7; }
+        .ggl-academy-lessons { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; }
+        .ggl-academy-lesson-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; min-height: 44px; padding: 6px 8px; border-radius: 8px; color: var(--ggl-text); text-decoration: none; border-bottom: 1px solid var(--ggl-border); }
+        .ggl-academy-lesson-row:hover { background: rgba(66,216,121,0.06); }
+        .ggl-academy-lesson-num { color: var(--ggl-muted); font-weight: 700; }
+        .ggl-academy-lesson-title { font-size: 14.5px; }
+        .ggl-academy-lesson-status { color: var(--ggl-green); font-size: 12.5px; font-weight: 700; white-space: nowrap; }
         .ggl-academy-prereq, .ggl-academy-planned-note { margin: 0; color: var(--ggl-muted); font-size: 13px; }
         .ggl-academy-world-progress { margin: 0; color: var(--ggl-text2); font-size: 14px; }
         .ggl-academy-next { margin: auto 0 0; display: flex; flex-direction: column; gap: 8px; }

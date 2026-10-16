@@ -33,18 +33,44 @@ export function describeCandle(c: Candle): string {
   return `Candlestick: open $${c.open.toFixed(2)}, high $${c.high.toFixed(2)}, low $${c.low.toFixed(2)}, close $${c.close.toFixed(2)}. Classified as ${cls.toLowerCase()} because ${rel}.`;
 }
 
+export type CandleHighlight =
+  | "open"
+  | "high"
+  | "low"
+  | "close"
+  | "body"
+  | "upper-wick"
+  | "lower-wick"
+  | null;
+
 export default function CandleSvg({
   candle,
   height = 260,
   showValues = true,
+  highlight = null,
 }: {
   candle: Candle;
   height?: number;
   showValues?: boolean;
+  /**
+   * Presentational only: emphasize one element and dim the rest
+   * (Meet OHLC / tap-to-reveal lessons). Default null renders the
+   * candle exactly as before.
+   */
+  highlight?: CandleHighlight;
 }) {
   const g = candleGeometry(candle);
   const cls = classifyCandle(candle);
   const color = candleColor(candle);
+
+  const bodyOpacity =
+    highlight === "high" || highlight === "low" || highlight === "upper-wick" || highlight === "lower-wick"
+      ? 0.3
+      : 1;
+  const labelStyle = (el: "open" | "high" | "low" | "close") =>
+    highlight === el
+      ? { fontWeight: 800 as const, fill: "var(--ggl-text)" }
+      : { fontWeight: 400 as const, fill: "var(--ggl-text2)" };
 
   const W = 220;
   const H = height;
@@ -63,11 +89,21 @@ export default function CandleSvg({
   const bodyBottomY = y(g.bodyBottom);
   const bodyH = Math.max(2, bodyBottomY - bodyTopY);
 
-  const label = (text: string, ly: number, anchor: "start" | "end", x: number) => (
-    <text x={x} y={ly + 4} fontSize={12} fill="var(--ggl-text2)" textAnchor={anchor} fontFamily="inherit">
-      {text}
-    </text>
-  );
+  const label = (text: string, ly: number, anchor: "start" | "end", x: number) => {
+    const el = text.startsWith("H")
+      ? "high"
+      : text.startsWith("L")
+        ? "low"
+        : text.startsWith("O")
+          ? "open"
+          : "close";
+    const st = labelStyle(el);
+    return (
+      <text x={x} y={ly + 4} fontSize={12} fill={st.fill} fontWeight={st.fontWeight} textAnchor={anchor} fontFamily="inherit">
+        {text}
+      </text>
+    );
+  };
 
   return (
     <figure style={{ margin: 0 }}>
@@ -79,8 +115,9 @@ export default function CandleSvg({
         aria-label={describeCandle(candle)}
         style={{ display: "block", maxWidth: 300, margin: "0 auto" }}
       >
-        {/* wick */}
-        <line x1={cx} x2={cx} y1={y(candle.high)} y2={y(candle.low)} stroke={color} strokeWidth={3} />
+        {/* wick (two segments so a lesson can highlight one of them) */}
+        <line x1={cx} x2={cx} y1={y(candle.high)} y2={bodyTopY} stroke={color} strokeWidth={3} opacity={highlight === null || highlight === "upper-wick" || highlight === "high" ? 1 : 0.22} />
+        <line x1={cx} x2={cx} y1={bodyBottomY} y2={y(candle.low)} stroke={color} strokeWidth={3} opacity={highlight === null || highlight === "lower-wick" || highlight === "low" ? 1 : 0.22} />
         {/* body */}
         <rect
           x={cx - bodyW / 2}
@@ -90,7 +127,21 @@ export default function CandleSvg({
           fill={color}
           stroke={color}
           rx={2}
+          opacity={bodyOpacity}
         />
+        {/* open / close markers, shown only when a lesson highlights them */}
+        {highlight === "open" && (
+          <g aria-hidden="true">
+            <line x1={cx - bodyW / 2 - 30} x2={cx + bodyW / 2 + 30} y1={y(candle.open)} y2={y(candle.open)} stroke="#f0b429" strokeWidth={2} strokeDasharray="5 4" />
+            <circle cx={cx - bodyW / 2} cy={y(candle.open)} r={5} fill="#f0b429" />
+          </g>
+        )}
+        {highlight === "close" && (
+          <g aria-hidden="true">
+            <line x1={cx - bodyW / 2 - 30} x2={cx + bodyW / 2 + 30} y1={y(candle.close)} y2={y(candle.close)} stroke="#f0b429" strokeWidth={2} strokeDasharray="5 4" />
+            <circle cx={cx + bodyW / 2} cy={y(candle.close)} r={5} fill="#f0b429" />
+          </g>
+        )}
         {/* price labels */}
         {label(`H $${candle.high.toFixed(2)}`, y(candle.high), "start", cx + bodyW / 2 + 10)}
         {label(`L $${candle.low.toFixed(2)}`, y(candle.low), "start", cx + bodyW / 2 + 10)}
