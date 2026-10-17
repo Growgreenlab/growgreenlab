@@ -928,6 +928,24 @@ body.ws-active .footer { display: none; }
   .ggl-btn-lg { padding: 12px 20px; font-size: 14px; }
 }
 
+/* Narrow phones (≤480px): keep the header uncrowded with ≥44px tap
+   targets, and give the drills landing CTA a full-width target.
+   Scoped to this media query only — wider layouts are unaffected. */
+@media (max-width: 480px) {
+  .ggl-nav-inner { padding: 10px 12px; gap: 10px; }
+  .ggl-brand { min-width: 0; }
+  .ggl-brand-logo { height: 26px; max-width: 140px; object-fit: contain; }
+  .ggl-nav-actions { gap: 8px; min-width: 0; }
+  .ggl-nav-actions .ggl-btn { min-height: 44px; }
+  .ggl-menu-btn { width: 44px; height: 44px; min-width: 44px; min-height: 44px; flex-shrink: 0; }
+  .ggl-user-badge { max-width: 110px; min-width: 0; }
+  .ggl-mobile-menu .ggl-btn { min-height: 44px; }
+  .ggl-drill-cta {
+    display: block; width: 100%; min-height: 48px;
+    box-sizing: border-box; text-align: center;
+  }
+}
+
 /* ============================================================
    MOBILE TRADING WORKSPACE — chart-first layout
    Chart dominates (~52% of viewport), controls compact below.
@@ -1472,3 +1490,98 @@ body.ws-active .footer { display: none; }
   .ggl-rhero-copy, .ggl-rhero-visual { animation: none; }
   .ggl-rail-item, .ggl-stagebar-item, .ggl-textlink { transition: none; }
 }
+
+/* ===== Breakout Drill panels ===== */
+.drill-panel {
+  background: #0d1117;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 10px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 200px;
+  max-height: 420px;
+}
+.drill-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  border-bottom: 1px solid rgba(255,255,255,0.07);
+  color: #e6edf3;
+}
+.sim-badge {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.8px;
+  color: #f0b429;
+  background: rgba(240,180,41,0.12);
+  border: 1px solid rgba(240,180,41,0.35);
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+.drill-panel-empty {
+  padding: 24px 12px;
+  text-align: center;
+  color: #6e7681;
+  font-size: 13px;
+}
+/* Level 2 */
+.l2-spread {
+  padding: 6px 12px;
+  font-size: 11px;
+  color: #8b949e;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+.l2-spread strong { color: #e6edf3; }
+.l2-rows { overflow-y: auto; padding: 4px 0; }
+.l2-row {
+  position: relative;
+  display: flex;
+  justify-content: space-between;
+  padding: 3px 12px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.l2-row.ask .l2-price { color: #f6465d; }
+.l2-row.bid .l2-price { color: #2ebd85; }
+.l2-row .l2-size { color: #8b949e; }
+.l2-row.at-level { background: rgba(240,180,41,0.08); }
+.l2-bar {
+  position: absolute;
+  top: 0; bottom: 0;
+  opacity: 0.14;
+  pointer-events: none;
+}
+.l2-row.ask .l2-bar { right: 0; background: #f6465d; }
+.l2-row.bid .l2-bar { left: 0; background: #2ebd85; }
+.l2-divider { border-top: 1px solid rgba(255,255,255,0.1); margin: 2px 0; }
+/* Time & Sales */
+.ts-rows { overflow-y: auto; padding: 4px 0; }
+.ts-row {
+  display: grid;
+  grid-template-columns: 64px 1fr 64px;
+  padding: 3px 12px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.ts-row .ts-time { color: #6e7681; }
+.ts-row.buy .ts-price { color: #2ebd85; }
+.ts-row.sell .ts-price { color: #f6465d; }
+.ts-row .ts-size { color: #8b949e; text-align: right; }
+
+/* L2 readability improvements */
+.l2-row.at-level {
+  background: rgba(240,180,41,0.14);
+  border-left: 2px solid #f0b429;
+}
+.l2-row.at-level .l2-price { font-weight: 800; }
+.l2-spread {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.l2-spread strong { font-size: 13px; }

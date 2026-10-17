@@ -7,6 +7,7 @@ import { createClient, isSupabaseConfigured } from "../lib/supabaseClient";
 const NAV_LINKS: { label: string; href: string; external?: boolean }[] = [
   { label: "Simulator", href: "/replay" },
   { label: "Trade Journal", href: "/journal" },
+  { label: "Breakout Drills", href: "/drills" },
   { label: "Edge Analyzer", href: "/journal?tab=analytics" },
   { label: "Community", href: "/community" },
 ];

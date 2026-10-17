@@ -41,6 +41,17 @@ interface BracketLevels {
   activeTP: number | null;
 }
 
+/**
+ * A labeled horizontal reference level on the chart (e.g. HOD).
+ * Extensible: future strategies can pass Premarket High, Opening Range
+ * High, Consolidation Resistance, etc. as additional entries.
+ */
+export interface ChartReferenceLevel {
+  price: number;
+  label: string;
+  color: string;
+}
+
 interface Props {
   candles: Candle[];
   revealedCount: number;
@@ -48,6 +59,10 @@ interface Props {
   countdown: string | null;
   lastPrice: number;
   brackets: BracketLevels;
+  /** Optional reference levels (HOD etc.). Omit = no lines (replay page). */
+  referenceLevels?: ChartReferenceLevel[];
+  /** If true, fit the time scale to content on initial data load (drills). */
+  fitOnLoad?: boolean;
   onPlannedDrag: (sl: number | null, tp: number | null) => void;
   onActiveDrag: (sl: number | null, tp: number | null) => void;
   drawings: Drawing[];
@@ -56,7 +71,7 @@ interface Props {
   onDrawingToolChange: (tool: DrawingTool) => void;
 }
 
-export default function LwcChart({ candles, revealedCount, sessionKey, countdown, lastPrice, brackets, onPlannedDrag, onActiveDrag, drawings, onDrawingsChange, drawingTool, onDrawingToolChange }: Props) {
+export default function LwcChart({ candles, revealedCount, sessionKey, countdown, lastPrice, brackets, referenceLevels, fitOnLoad, onPlannedDrag, onActiveDrag, drawings, onDrawingsChange, drawingTool, onDrawingToolChange }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const elRef = useRef<HTMLDivElement>(null);
   const countdownRef = useRef<HTMLDivElement>(null);
@@ -306,6 +321,36 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     if (dragging !== "activeTP") syncLine(activeTPRef, brackets.activeTP, "#2ebd85", "TP", false);
   }, [brackets.plannedSL, brackets.plannedTP, brackets.activeSL, brackets.activeTP]);
 
+  // Reference levels (HOD etc.): labeled horizontal lines, synced like brackets.
+  // Uses a ref array keyed by index; levels are static per session.
+  const refLevelsRef = useRef<IPriceLine[]>([]);
+  useEffect(() => {
+    const cs = candleSeriesRef.current;
+    if (!cs) return;
+    const levels = referenceLevels ?? [];
+    // Remove stale lines beyond the current count
+    while (refLevelsRef.current.length > levels.length) {
+      const line = refLevelsRef.current.pop();
+      if (line) cs.removePriceLine(line);
+    }
+    levels.forEach((lv, i) => {
+      const label = `${lv.label} ${formatPrice(lv.price)}`;
+      const existing = refLevelsRef.current[i];
+      if (existing) {
+        existing.applyOptions({ price: lv.price, title: label, color: lv.color });
+      } else {
+        refLevelsRef.current[i] = cs.createPriceLine({
+          price: lv.price,
+          color: lv.color,
+          lineWidth: 2,
+          lineStyle: 2, // dashed
+          axisLabelVisible: true,
+          title: label,
+        });
+      }
+    });
+  }, [referenceLevels, sessionKey]);
+
   // Push data: setData() only on dataset changes; update() per tick.
   useEffect(() => {
     const cs = candleSeriesRef.current;
@@ -343,6 +388,11 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
         }
         cs.setData(bars);
         vs.setData(vols);
+        // For drills: fit the viewport to the revealed data so history
+        // fills the chart instead of clustering on the right.
+        if (fitOnLoad && chartRef.current) {
+          chartRef.current.timeScale().fitContent();
+        }
         pushedRef.current = plan.state;
       } else if (plan) {
         // Incremental: re-push from plan.from (the possibly-just-finalized
