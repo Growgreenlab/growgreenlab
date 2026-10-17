@@ -18,10 +18,28 @@ import {
   type IChartApi,
   type ISeriesApi,
   type IPriceLine,
+  type ISeriesPrimitive,
+  type IPrimitivePaneView,
+  type IPrimitivePaneRenderer,
+  type SeriesAttachedParameter,
+  type MouseEventParams,
   type UTCTimestamp,
 } from "lightweight-charts";
+import type { CanvasRenderingTarget2D } from "fancy-canvas";
 import type { Candle } from "../lib/types";
-import { planBarPush, type BarPushState } from "../lib/chartPush";
+import { planBarPush, type BarPushState, type BarPushPlan } from "../lib/chartPush";
+import {
+  CANDLE_SCALE_MARGINS,
+  VOLUME_SCALE_MARGINS,
+  readableWindow,
+  paddedPriceRange,
+  expandPriceRange,
+  priceRangesClose,
+  visibleFinalizedExtremes,
+  type PriceRange,
+  type LogicalRange,
+} from "../lib/chartFit";
+import { resolveHighlightBar, type HighlightDisplayBar } from "../lib/dailyReplay";
 import { diag } from "../lib/diag";
 import { normalizePrice, formatPrice } from "../lib/price";
 import type { Drawing, DrawingTool, DrawingType, DrawingInteractionState } from "../lib/drawings";
@@ -33,6 +51,178 @@ const UP = "#2ebd85";
 const DOWN = "#f6465d";
 const UP_VOL = "rgba(46,189,133,0.45)";
 const DOWN_VOL = "rgba(246,70,93,0.45)";
+
+/* ---------- Single-candle highlight (optional; Daily Replay) ----------
+ * A series primitive marking exactly one candle two ways:
+ *  1. a faint translucent emerald band behind that candle's time slot
+ *     (pane background, z-order bottom) as time-slot context;
+ *  2. a GLOW outline hugging the displayed candle itself (foreground,
+ *     z-order top): a bright emerald rounded-rect stroke, expanded
+ *     ~2px past the bar's [high..low] extent and its body-slot width,
+ *     drawn with a canvas shadow in the same emerald so the candle
+ *     visibly glows. The stroke only touches the candle's border
+ *     region — body and wick stay fully visible.
+ * The outlined bar is the DISPLAYED bar containing the target time
+ * (lib/dailyReplay's resolveHighlightBar): on a 1-minute view that is
+ * the target candle itself; on an aggregated timeframe it is the
+ * visible aggregated candle the target minute falls inside.
+ * All geometry is recomputed from TIMES and PRICES via the chart's
+ * time scale and the series' price scale on every draw — no pixel
+ * state — so both marks stay glued to their candle across pan/zoom,
+ * and neither touches axes or scales. The primitive exists only while
+ * a parent passes a highlight target — every other parent is
+ * completely unaffected. */
+const HIGHLIGHT_FILL = "rgba(46,189,133,0.07)";
+const HIGHLIGHT_GLOW = "#2ebd85"; // the chart's UP emerald
+const HIGHLIGHT_GLOW_BLUR = 14;
+const HIGHLIGHT_GLOW_WIDTH = 2;
+const HIGHLIGHT_EXPAND_PX = 2;
+
+function roundedRectPath(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number,
+) {
+  const rr = Math.max(0, Math.min(r, w / 2, h / 2));
+  ctx.moveTo(x + rr, y);
+  ctx.lineTo(x + w - rr, y);
+  ctx.arcTo(x + w, y, x + w, y + rr, rr);
+  ctx.lineTo(x + w, y + h - rr);
+  ctx.arcTo(x + w, y + h, x + w - rr, y + h, rr);
+  ctx.lineTo(x + rr, y + h);
+  ctx.arcTo(x, y + h, x, y + h - rr, rr);
+  ctx.lineTo(x, y + rr);
+  ctx.arcTo(x, y, x + rr, y, rr);
+  ctx.closePath();
+}
+
+class CandleHighlightPrimitive implements ISeriesPrimitive {
+  private chart: IChartApi | null = null;
+  private series: ISeriesApi<"Candlestick"> | null = null;
+  private requestUpdate: (() => void) | null = null;
+  private timeSec: number | null = null;
+  private spanSec = 60;
+  private bars: HighlightDisplayBar[] = [];
+  private readonly views: IPrimitivePaneView[];
+
+  constructor() {
+    const bandRenderer: IPrimitivePaneRenderer = {
+      draw: () => {
+        /* painted in the background pass instead */
+      },
+      drawBackground: (target) => this.paintBand(target),
+    };
+    const glowRenderer: IPrimitivePaneRenderer = {
+      draw: (target) => this.paintGlow(target),
+    };
+    this.views = [
+      { zOrder: () => "bottom", renderer: () => bandRenderer },
+      { zOrder: () => "top", renderer: () => glowRenderer },
+    ];
+  }
+
+  attached(param: SeriesAttachedParameter) {
+    this.chart = param.chart;
+    this.series = param.series as ISeriesApi<"Candlestick">;
+    this.requestUpdate = param.requestUpdate;
+  }
+
+  detached() {
+    this.chart = null;
+    this.series = null;
+    this.requestUpdate = null;
+  }
+
+  paneViews() {
+    return this.views;
+  }
+
+  setTarget(timeSec: number | null, spanSec: number) {
+    this.timeSec = timeSec;
+    this.spanSec = spanSec > 0 ? spanSec : 60;
+    this.requestUpdate?.();
+  }
+
+  /** The bars currently on the series (post-aggregation), for
+   *  resolving which displayed candle the glow outline hugs. */
+  setBars(bars: HighlightDisplayBar[]) {
+    this.bars = bars;
+    this.requestUpdate?.();
+  }
+
+  private paintBand(target: CanvasRenderingTarget2D) {
+    const chart = this.chart;
+    const t0 = this.timeSec;
+    if (!chart || t0 == null) return;
+    const ts = chart.timeScale();
+    target.useMediaCoordinateSpace(({ context, mediaSize }) => {
+      const x1: number | null = ts.timeToCoordinate(t0 as UTCTimestamp);
+      if (x1 == null) return; // band's candle is off-screen
+      let x2: number | null = ts.timeToCoordinate((t0 + this.spanSec) as UTCTimestamp);
+      if (x2 == null) {
+        // Band end is past the last bar (highlighting the final
+        // candle): estimate one bar's width from the visible logical
+        // range so the band still spans exactly one slot.
+        const range = ts.getVisibleLogicalRange();
+        if (!range || range.to <= range.from) return;
+        x2 = x1 + mediaSize.width / (range.to - range.from);
+      }
+      if (x2 == null || x2 <= x1) return;
+      context.fillStyle = HIGHLIGHT_FILL;
+      context.fillRect(x1, 0, x2 - x1, mediaSize.height);
+    });
+  }
+
+  private paintGlow(target: CanvasRenderingTarget2D) {
+    const chart = this.chart;
+    const series = this.series;
+    const t0 = this.timeSec;
+    if (!chart || !series || t0 == null) return;
+    const bar = resolveHighlightBar(this.bars, t0);
+    if (!bar) return; // no displayed bar contains the target time
+    const ts = chart.timeScale();
+    target.useMediaCoordinateSpace(({ context, mediaSize }) => {
+      const xCenter: number | null = ts.timeToCoordinate(bar.barTime as UTCTimestamp);
+      if (xCenter == null) return; // the bar is off-screen
+      let xNext: number | null = ts.timeToCoordinate((bar.barTime + bar.spanSec) as UTCTimestamp);
+      if (xNext == null) {
+        // Bar end is past the last bar: estimate one bar's spacing
+        // from the visible logical range, as the band does.
+        const range = ts.getVisibleLogicalRange();
+        if (!range || range.to <= range.from) return;
+        xNext = xCenter + mediaSize.width / (range.to - range.from);
+      }
+      const spacing = xNext - xCenter;
+      if (!(spacing > 0)) return;
+      const yHigh = series.priceToCoordinate(bar.high);
+      const yLow = series.priceToCoordinate(bar.low);
+      if (yHigh == null || yLow == null) return;
+      // Horizontal expansion past the body slot: ~2px, capped at 40%
+      // of the bar spacing per side so narrow mobile slots keep the
+      // outline from swallowing neighboring candles.
+      const expandX = Math.min(HIGHLIGHT_EXPAND_PX, spacing * 0.4);
+      const left = xCenter - spacing / 2 - expandX;
+      const width = spacing + expandX * 2;
+      const top = Math.min(yHigh, yLow) - HIGHLIGHT_EXPAND_PX;
+      const height = Math.abs(yLow - yHigh) + HIGHLIGHT_EXPAND_PX * 2;
+      context.save();
+      context.beginPath();
+      roundedRectPath(context, left, top, width, height, 4);
+      context.strokeStyle = HIGHLIGHT_GLOW;
+      context.lineWidth = HIGHLIGHT_GLOW_WIDTH;
+      context.shadowColor = HIGHLIGHT_GLOW;
+      context.shadowBlur = HIGHLIGHT_GLOW_BLUR;
+      // Two passes: the second stroke deepens the shadow glow so the
+      // outline stays unmistakable at phone widths.
+      context.stroke();
+      context.stroke();
+      context.restore();
+    });
+  }
+}
 
 interface BracketLevels {
   plannedSL: number | null;
@@ -63,6 +253,71 @@ interface Props {
   referenceLevels?: ChartReferenceLevel[];
   /** If true, fit the time scale to content on initial data load (drills). */
   fitOnLoad?: boolean;
+  /** Optional (Daily Replay preview): index of the candle the initial
+   *  fit must keep visible — the selected starting candle. Passing it
+   *  opts into the narrow-screen readable window (lib/chartFit): when
+   *  a full fit would squeeze bars below readable spacing on a phone,
+   *  the initial view opens on a window containing this index
+   *  (session start when the index is the opening candle) instead of
+   *  the whole session at sub-pixel spacing. Omit = fitContent
+   *  exactly as before (drills, every existing parent). Read at
+   *  full-load time only; later selection changes never re-window. */
+  fitAnchorIndex?: number;
+  /** Optional (Daily Replay): render a "Fit all" pill, bottom-left
+   *  above the time axis, that fits the whole (revealed) dataset on
+   *  tap — the way back from the readable window or any zoom.
+   *  Omit = no control (drills, standard Trade Lab). */
+  showFitAll?: boolean;
+  /** Optional (Daily Replay active/done only): viewport stability
+   *  during tick-by-tick playback. Library autoscale re-derives the
+   *  price range from the visible bars on every tick — including the
+   *  forming candle's evolving extremes — and the price axis width is
+   *  recomputed from live label text; together they made finalized
+   *  candles jump vertically and slide horizontally mid-candle on
+   *  phones (the chart "shake"). With this on:
+   *   - candle-scale autoscale is OFF; the price window is managed
+   *     (lib/chartFit): recomputed once per candle from the visible
+   *     finalized extremes with the usual margins, and within a
+   *     candle it may only WIDEN — monotonically, only when price
+   *     genuinely exits it — so price never clips and never jitters;
+   *   - the volume overlay scale's axis is hidden AND its series'
+   *     last-value tag is switched off (the tag renders on the axis
+   *     even with the scale hidden, and its text grows from "0" to
+   *     e.g. "18.47K" as the forming candle's volume accumulates —
+   *     the axis widened to fit it mid-candle; the volume bars
+   *     still render in their strip);
+   *   - the price axis gets a minimum width just above its measured
+   *     width at the first managed push, so residual label-width
+   *     variance can't resize the plot and re-derive the visible
+   *     time range mid-candle;
+   *   - a manual axis drag takes ownership of the range: the manager
+   *     then only widens on genuine exits until the next full load
+   *     or Fit-all tap;
+   *   - when the user zooms/pans the TIME scale, the window refits
+   *     ONCE when the gesture settles (pointer-up / wheel-idle),
+   *     recomputed from the newly visible extremes — otherwise a
+   *     pinch into a quiet stretch left the wide pre-zoom window
+   *     standing (candles squashed in a thin band) until the next
+   *     candle boundary, or indefinitely while paused. Playback
+   *     itself never triggers a refit: within-candle changes remain
+   *     widen-only.
+   *  Omit/false = library autoscale exactly as before (drills,
+   *  standard Trade Lab, the Daily Replay preview). */
+  stableScale?: boolean;
+  /** Optional: notified with the clicked candle's time (seconds) on chart
+   *  click. Used by Daily Replay's full-day preview to pick the starting
+   *  candle. Omit = no behavior (all existing parents). */
+  onCandleClick?: (timeSec: number) => void;
+  /** Optional: epoch-seconds timestamp of ONE candle to mark (Daily
+   *  Replay's selected/locked starting candle): a faint emerald band
+   *  behind its time slot plus a glowing emerald outline hugging the
+   *  displayed candle containing that time. Omit or null = no
+   *  highlight (all existing parents). Purely presentational — never
+   *  affects data or scales. */
+  highlightTimeSec?: number | null;
+  /** Highlight band width in seconds (one candle interval, from
+   *  lib/dailyReplay's highlightBandFor). Defaults to 60. */
+  highlightSpanSec?: number;
   onPlannedDrag: (sl: number | null, tp: number | null) => void;
   onActiveDrag: (sl: number | null, tp: number | null) => void;
   drawings: Drawing[];
@@ -71,7 +326,7 @@ interface Props {
   onDrawingToolChange: (tool: DrawingTool) => void;
 }
 
-export default function LwcChart({ candles, revealedCount, sessionKey, countdown, lastPrice, brackets, referenceLevels, fitOnLoad, onPlannedDrag, onActiveDrag, drawings, onDrawingsChange, drawingTool, onDrawingToolChange }: Props) {
+export default function LwcChart({ candles, revealedCount, sessionKey, countdown, lastPrice, brackets, referenceLevels, fitOnLoad, fitAnchorIndex, showFitAll, stableScale, onCandleClick, highlightTimeSec, highlightSpanSec, onPlannedDrag, onActiveDrag, drawings, onDrawingsChange, drawingTool, onDrawingToolChange }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const elRef = useRef<HTMLDivElement>(null);
   const countdownRef = useRef<HTMLDivElement>(null);
@@ -90,6 +345,35 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
   // Latest brackets for use in pointer handlers (avoids stale closures).
   const bracketsRef = useRef(brackets);
   bracketsRef.current = brackets;
+  // Latest candle-click callback (read inside the chart-creation effect,
+  // which runs once — a ref keeps inline parent closures safe).
+  const onCandleClickRef = useRef(onCandleClick);
+  onCandleClickRef.current = onCandleClick;
+  // Latest fit anchor (read inside the data-push effect at full-load
+  // time only — a ref keeps later selection changes from re-windowing).
+  const fitAnchorIndexRef = useRef(fitAnchorIndex);
+  fitAnchorIndexRef.current = fitAnchorIndex;
+  // Stable-scale (Daily Replay) state: read through refs inside the
+  // data-push effect (which re-runs on every parent bump) so the
+  // manager never depends on effect ordering or stale closures.
+  const stableScaleRef = useRef(stableScale);
+  stableScaleRef.current = stableScale;
+  const revealedCountRef = useRef(revealedCount);
+  revealedCountRef.current = revealedCount;
+  // The last price window the manager itself set (null = not managing
+  // yet / just reset). Compared against the live range on each candle
+  // boundary: a mismatch means the user dragged the axis and owns the
+  // range until the next full load or Fit-all tap.
+  const scaleWinRef = useRef<{ lastSet: PriceRange | null }>({ lastSet: null });
+  // Whether the price-axis minimum-width floor has been applied for
+  // this stable-scale activation (applied at the first managed push,
+  // when the axis has real labels to measure — at activation time the
+  // scale may still report width 0).
+  const axisFloorRef = useRef(false);
+  // Whether stable-scale mode has ever been entered on this mount —
+  // keeps the activation effect a literal no-op for parents that
+  // never opt in (drills, standard Trade Lab, DR preview).
+  const stableActiveRef = useRef(false);
   // Drawing state.
   const [selectedDrawingId, setSelectedDrawingId] = useState<string | null>(null);
   const drawingsRef = useRef(drawings);
@@ -104,6 +388,122 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
   // Candles ref for time-snapping in drawingCoords (avoids stale closures).
   const candlesRef = useRef(candles);
   candlesRef.current = candles;
+
+  /* ---- Stable-scale window management (Daily Replay only) ----
+   * applyStableWindow is THE managed-window recompute, shared by the
+   * candle-boundary path in the data-push effect and the gesture-settle
+   * refit below: when the manager owns the range it refits FRESH from
+   * the currently VISIBLE finalized extremes (lib/chartFit
+   * visibleFinalizedExtremes) folded with the forming bar's printed
+   * extremes, padded by paddedPriceRange — so the window (and its
+   * padding) always derives from what is on screen, never from the
+   * whole session. When the user has dragged the price axis (the live
+   * range no longer matches what the manager last set) it limits
+   * itself to anti-clip widening, exactly like the boundary path.
+   * Reads only refs, so it is safe from effects and event handlers. */
+  const applyStableWindow = () => {
+    const chart = chartRef.current;
+    const cs = candleSeriesRef.current;
+    if (!chart || !cs || !stableScaleRef.current) return;
+    const arr = candlesRef.current;
+    const n = Math.max(0, Math.min(revealedCountRef.current, arr.length));
+    if (n === 0) return;
+    try {
+      const ps = cs.priceScale();
+      const forming = arr[n - 1];
+      const vlr = chart.timeScale().getVisibleLogicalRange();
+      const ext = visibleFinalizedExtremes(
+        arr,
+        n,
+        vlr?.from ?? null,
+        vlr?.to ?? null,
+      );
+      const cur = ps.getVisibleRange();
+      const owned =
+        scaleWinRef.current.lastSet === null ||
+        (cur !== null && priceRangesClose(cur, scaleWinRef.current.lastSet));
+      if (owned) {
+        const win = paddedPriceRange(
+          ext ? Math.min(ext.lo, forming.l) : forming.l,
+          ext ? Math.max(ext.hi, forming.h) : forming.h,
+        );
+        ps.setVisibleRange(win);
+        scaleWinRef.current.lastSet = win;
+      } else if (cur) {
+        const win = expandPriceRange(cur, forming.l, forming.h);
+        if (!priceRangesClose(win, cur)) {
+          ps.setVisibleRange(win);
+          scaleWinRef.current.lastSet = win;
+        }
+      }
+    } catch {
+      /* scale management must never break the data path */
+    }
+  };
+
+  /* Settle refit (stable-scale only): the boundary recompute keeps the
+   * window fitted to the visible bars as candles roll, but it cannot
+   * see a USER zooming/panning the TIME scale mid-candle — and before
+   * the managed scale existed, library autoscale refit the instant the
+   * visible set changed, so candles always filled the pane after a
+   * zoom. Without a reaction, a pinch into a quiet stretch leaves the
+   * wide pre-zoom window standing (candles squashed in a thin band)
+   * until the next candle boundary — or indefinitely while paused.
+   * So: snapshot the visible logical range when a pointer gesture
+   * starts on the chart wrapper; when the last pointer lifts (+250ms
+   * settle), refit ONCE via applyStableWindow — but only if the time
+   * range actually changed, which keeps plain clicks, drawing drags,
+   * and price-axis drags (none of which move the time range) from
+   * ever triggering it. Wheel zoom needs no snapshot: the library
+   * applies it before the event bubbles here, so a burst is simply
+   * debounced (300ms idle) into one refit — safe even when the burst
+   * changed nothing, because applyStableWindow's ownership guard
+   * makes it a no-op or an anti-clip widening in that case.
+   * Programmatic range changes (Fit-all, the initial fit, the
+   * library's boundary follow-shift) produce no pointer/wheel
+   * events, so they can't trigger a refit either, and the refit
+   * itself only writes the PRICE scale, so there is no feedback
+   * loop. Playback never calls this: within-candle window changes
+   * remain limited to genuine-exit widening, as shipped. */
+  const gesturePtrsRef = useRef<Set<number>>(new Set());
+  const gestureSnapRef = useRef<LogicalRange | null>(null);
+  const settleTimerRef = useRef<number | null>(null);
+  const wheelTimerRef = useRef<number | null>(null);
+  const snapVisibleRange = (): LogicalRange | null => {
+    const ts = chartRef.current?.timeScale();
+    if (!ts) return null;
+    const r = ts.getVisibleLogicalRange();
+    return r ? { from: r.from, to: r.to } : null;
+  };
+  const timeRangeChanged = (
+    a: LogicalRange | null,
+    b: LogicalRange | null,
+  ): boolean =>
+    a !== null &&
+    b !== null &&
+    (Math.abs(a.from - b.from) > 1e-3 || Math.abs(a.to - b.to) > 1e-3);
+  const clearSettleTimers = () => {
+    if (settleTimerRef.current !== null) {
+      window.clearTimeout(settleTimerRef.current);
+      settleTimerRef.current = null;
+    }
+    if (wheelTimerRef.current !== null) {
+      window.clearTimeout(wheelTimerRef.current);
+      wheelTimerRef.current = null;
+    }
+  };
+  // Wheel zoom (stable-scale only): debounce the burst; 300ms after
+  // the last tick the gesture has settled and the window refits once.
+  const onStableWheel = () => {
+    if (!stableScaleRef.current) return;
+    if (wheelTimerRef.current !== null) {
+      window.clearTimeout(wheelTimerRef.current);
+    }
+    wheelTimerRef.current = window.setTimeout(() => {
+      wheelTimerRef.current = null;
+      if (stableScaleRef.current) applyStableWindow();
+    }, 300);
+  };
   // AUTHORITATIVE INTERACTION STATE MACHINE (Phase 2).
   // Only one state is active at any moment. All drawing interactions
   // must check and update this state — no scattered independent flags.
@@ -200,7 +600,14 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
         vertLines: { color: "rgba(255,255,255,0.04)" },
         horzLines: { color: "rgba(255,255,255,0.04)" },
       },
-      rightPriceScale: { borderColor: "rgba(255,255,255,0.08)" },
+      rightPriceScale: {
+        borderColor: "rgba(255,255,255,0.08)",
+        // Readability: the library default margins (0.2/0.2) squeeze the
+        // session's price range into the middle 60% of the pane. These
+        // margins (lib/chartFit) give it 78%, boundary-aligned with the
+        // volume strip below. Mapping stays linear and exact.
+        scaleMargins: CANDLE_SCALE_MARGINS,
+      },
       timeScale: {
         borderColor: "rgba(255,255,255,0.08)",
         timeVisible: true,
@@ -257,11 +664,20 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       priceScaleId: "",
       priceFormat: { type: "volume" },
     });
-    chart.priceScale("").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+    chart.priceScale("").applyOptions({ scaleMargins: VOLUME_SCALE_MARGINS });
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
     volumeSeriesRef.current = volumeSeries;
     pushedRef.current = null;
+
+    // Optional candle-click notifications (Daily Replay preview). The
+    // handler reads the callback through a ref; when no parent passes
+    // one this is a no-op.
+    const handleChartClick = (param: MouseEventParams) => {
+      const cb = onCandleClickRef.current;
+      if (cb && typeof param.time === "number") cb(param.time);
+    };
+    chart.subscribeClick(handleChartClick);
 
     const ro = new ResizeObserver(() => {
       chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
@@ -271,12 +687,53 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     setChartSize({ w: el.clientWidth, h: el.clientHeight });
     return () => {
       ro.disconnect();
+      clearSettleTimers();
+      chart.unsubscribeClick(handleChartClick);
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
       volumeSeriesRef.current = null;
     };
   }, []);
+
+  // Stable-scale activation (Daily Replay only; see the prop docs).
+  // Runs after creation (declaration order) and whenever the parent
+  // toggles the mode: entering takes the candle scale off autoscale,
+  // hides the volume scale's axis labels, and floors the price axis
+  // width just above its current width; leaving restores the library
+  // defaults exactly, so a shared mount never leaks the mode into a
+  // standard session or the drills.
+  useEffect(() => {
+    const chart = chartRef.current;
+    const cs = candleSeriesRef.current;
+    const vs = volumeSeriesRef.current;
+    if (!chart || !cs) return;
+    // Parents that never opt in must see literally zero calls: the
+    // restore branch runs only if this mount was previously active.
+    if (!stableScale && !stableActiveRef.current) return;
+    if (stableScale) {
+      stableActiveRef.current = true;
+      cs.priceScale().setAutoScale(false);
+      chart.priceScale("").applyOptions({ visible: false });
+      // The volume series' last-value tag renders on the shared axis
+      // even with its scale hidden, and its text grows from "0" to
+      // e.g. "18.47K" as the forming candle's volume accumulates —
+      // the axis widened to fit it mid-candle, resizing the plot and
+      // sliding every candle (measured). Kill the tag in this mode;
+      // the volume bars themselves still render.
+      if (vs) vs.applyOptions({ lastValueVisible: false });
+      scaleWinRef.current.lastSet = null;
+      axisFloorRef.current = false;
+    } else {
+      stableActiveRef.current = false;
+      cs.priceScale().setAutoScale(true);
+      chart.priceScale("").applyOptions({ visible: true });
+      if (vs) vs.applyOptions({ lastValueVisible: true });
+      cs.priceScale().applyOptions({ minimumWidth: 0 });
+      scaleWinRef.current.lastSet = null;
+      axisFloorRef.current = false;
+    }
+  }, [stableScale]);
 
   // Sync bracket price lines (planned = dashed gray, active = solid red/green).
   // Depends on individual values, not the brackets object identity, so the
@@ -372,12 +829,14 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       color: c.c >= c.o ? UP_VOL : DOWN_VOL,
     });
 
+    let plan: BarPushPlan = null;
+    const prevPushed = pushedRef.current;
     try {
       // Push planning lives in lib/chartPush (pure + unit-tested). The key
       // property: when the array grows, the previously-last bar is re-pushed
       // FIRST — it was the forming candle and may have finalized mid-batch,
       // so without this its partial forming OHLCV would stay on the chart.
-      const plan = planBarPush(pushedRef.current, sessionKey, n);
+      plan = planBarPush(pushedRef.current, sessionKey, n);
       if (plan?.mode === "full") {
         // New session, reset, or dataset shrank: full replace.
         const bars = [];
@@ -391,7 +850,27 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
         // For drills: fit the viewport to the revealed data so history
         // fills the chart instead of clustering on the right.
         if (fitOnLoad && chartRef.current) {
-          chartRef.current.timeScale().fitContent();
+          const ts = chartRef.current.timeScale();
+          ts.fitContent();
+          // Opt-in readable window (Daily Replay preview passes
+          // fitAnchorIndex): on a narrow screen, a full-session fit
+          // squeezes bars to sub-pixel spacing and hairline candles,
+          // so open instead on a readable window that contains the
+          // selected candle — the session start when the selection
+          // is the opening candle. The rest of the day is one pan
+          // away, and the "Fit all" pill restores the full view.
+          // Parents that don't pass an anchor (drills) and desktop
+          // widths keep the plain full fit above, untouched.
+          const anchor = fitAnchorIndexRef.current;
+          if (anchor != null) {
+            const win = readableWindow({
+              plotWidthPx: ts.width(),
+              barCount: n,
+              containerWidthPx: wrapRef.current?.clientWidth ?? 0,
+              anchorIndex: anchor,
+            });
+            if (win) ts.setVisibleLogicalRange(win);
+          }
         }
         pushedRef.current = plan.state;
       } else if (plan) {
@@ -422,6 +901,52 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       diag.errors.push(e instanceof Error ? e.message : String(e));
     }
 
+    // Stable-scale management (Daily Replay only; see the prop docs).
+    // Runs after the push, on the same effect cycle, so the window is
+    // set before the browser paints the new bar: full loads and candle
+    // boundaries recompute the window from the VISIBLE FINALIZED
+    // extremes (plus the forming bar's already-printed extremes);
+    // intra-candle updates only widen it on a genuine exit. A live
+    // range that no longer matches what the manager last set means
+    // the user dragged the axis — they own it, and the manager limits
+    // itself to anti-clip widening until the next recompute trigger.
+    if (stableScaleRef.current && chartRef.current && plan) {
+      try {
+        const ps = cs.priceScale();
+        // Floor the axis width once, now that real labels exist:
+        // any residual label-width variance then can't resize the
+        // plot (and re-derive the visible time range) mid-candle.
+        if (!axisFloorRef.current) {
+          const w = ps.width();
+          if (w > 0) {
+            ps.applyOptions({ minimumWidth: w + 2 });
+            axisFloorRef.current = true;
+          }
+        }
+        const forming = candles[n - 1];
+        const appended = plan.mode === "updates" && plan.state.n > (prevPushed?.n ?? 0);
+        if (plan.mode === "full" || appended) {
+          // Candle boundary (or full load): fresh refit from the
+          // visible finalized extremes — shared with the gesture-settle
+          // refit (applyStableWindow reads the same refs/props this
+          // effect just pushed: candlesRef/revealedCountRef are already
+          // current for this render).
+          applyStableWindow();
+        } else {
+          const cur = ps.getVisibleRange();
+          if (cur) {
+            const win = expandPriceRange(cur, forming.l, forming.h);
+            if (!priceRangesClose(win, cur)) {
+              ps.setVisibleRange(win);
+              scaleWinRef.current.lastSet = win;
+            }
+          }
+        }
+      } catch {
+        /* scale management must never break the data path */
+      }
+    }
+
     // Position the countdown pill under the last-price tag.
     const pill = countdownRef.current;
     if (pill) {
@@ -438,6 +963,40 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       }
     }
   }, [candles, revealedCount, sessionKey, countdown, lastPrice]);
+
+  // Single-candle highlight primitive (Daily Replay only): attach
+  // lazily on first target, retarget in place while one is set, and
+  // detach when the target clears — parents that never pass a target
+  // never create it. The displayed bars are re-fed whenever the data
+  // changes so the glow outline hugs the bar currently on screen
+  // (including while the highlighted candle is still forming).
+  const highlightRef = useRef<CandleHighlightPrimitive | null>(null);
+  useEffect(() => {
+    const cs = candleSeriesRef.current;
+    if (!cs) return;
+    if (highlightTimeSec == null) {
+      if (highlightRef.current) {
+        cs.detachPrimitive(highlightRef.current);
+        highlightRef.current = null;
+      }
+      return;
+    }
+    if (!highlightRef.current) {
+      highlightRef.current = new CandleHighlightPrimitive();
+      cs.attachPrimitive(highlightRef.current);
+    }
+    const n = Math.max(0, Math.min(revealedCount, candles.length));
+    const bars: HighlightDisplayBar[] = [];
+    for (let i = 0; i < n; i++) {
+      bars.push({
+        timeSec: Math.floor(candles[i].t / 1000),
+        high: candles[i].h,
+        low: candles[i].l,
+      });
+    }
+    highlightRef.current.setTarget(highlightTimeSec, highlightSpanSec ?? 60);
+    highlightRef.current.setBars(bars);
+  }, [highlightTimeSec, highlightSpanSec, candles, revealedCount]);
 
   // Bracket line dragging: hit-test on pointerdown, drag the price line,
   // commit on pointerup. Disables chart pan/zoom while a line is dragged.
@@ -563,6 +1122,15 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     const chart = chartRef.current;
     const el = elRef.current;
     if (!chart || !el) return;
+    // Settle-refit tracking (stable-scale only; see the manager block):
+    // snapshot the time range when the FIRST pointer of a gesture
+    // lands, before any drawing logic below can return early.
+    if (stableScaleRef.current) {
+      if (gesturePtrsRef.current.size === 0) {
+        gestureSnapRef.current = snapVisibleRange();
+      }
+      gesturePtrsRef.current.add(e.pointerId);
+    }
     const dc = drawingCoords();
     if (!dc) return;
     const rect = dc.rect;
@@ -823,6 +1391,25 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
   };
 
   const onPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    // Settle-refit tracking (stable-scale only): when the LAST pointer
+    // of a gesture lifts, refit once if the time range actually moved.
+    if (
+      stableScaleRef.current &&
+      gesturePtrsRef.current.delete(e.pointerId) &&
+      gesturePtrsRef.current.size === 0
+    ) {
+      const snap = gestureSnapRef.current;
+      gestureSnapRef.current = null;
+      if (settleTimerRef.current !== null) {
+        window.clearTimeout(settleTimerRef.current);
+      }
+      settleTimerRef.current = window.setTimeout(() => {
+        settleTimerRef.current = null;
+        if (stableScaleRef.current && timeRangeChanged(snap, snapVisibleRange())) {
+          applyStableWindow();
+        }
+      }, 250);
+    }
     // End drawing drag — push to history for undo.
     if (drawingDragRef.current) {
       drawingDragRef.current = null;
@@ -899,6 +1486,7 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
+      onWheel={onStableWheel}
       onPointerLeave={() => {
         // Pointer left the chart: drop hover feedback. An active drag
         // holds pointer capture and keeps its grabbing cursor until
@@ -967,6 +1555,63 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
           }}
         >
           🗑 Delete
+        </button>
+      )}
+      {/* "Fit all" pill (opt-in, Daily Replay): bottom-left above the
+          time axis — clear of the drawing toolbar (top-left), the
+          countdown pill (right), and the attribution logo (axis row).
+          Returns from the readable window / any zoom to the full
+          (revealed) session. stopPropagation mirrors the floating
+          delete button so the tap never reaches chart pointer logic. */}
+      {showFitAll && (
+        <button
+          onPointerDown={(e) => e.stopPropagation()}
+          onPointerUp={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            chartRef.current?.timeScale().fitContent();
+            // Stable-scale (Daily Replay): the time fit changes which
+            // bars are visible, so recompute the managed price window
+            // from ALL revealed extremes immediately — otherwise the
+            // per-candle window could clip the full-session range the
+            // user just asked to see. This also re-takes ownership
+            // from any manual axis drag.
+            if (stableScaleRef.current) {
+              const cs2 = candleSeriesRef.current;
+              const arr = candlesRef.current;
+              const n2 = Math.max(0, Math.min(revealedCountRef.current, arr.length));
+              if (cs2 && n2 > 0) {
+                let lo = Infinity;
+                let hi = -Infinity;
+                for (let i = 0; i < n2; i++) {
+                  if (arr[i].l < lo) lo = arr[i].l;
+                  if (arr[i].h > hi) hi = arr[i].h;
+                }
+                if (Number.isFinite(lo) && Number.isFinite(hi)) {
+                  const win = paddedPriceRange(lo, hi);
+                  cs2.priceScale().setVisibleRange(win);
+                  scaleWinRef.current.lastSet = win;
+                }
+              }
+            }
+          }}
+          title="Fit the whole session"
+          style={{
+            position: "absolute",
+            left: 8,
+            bottom: 30,
+            zIndex: 6,
+            background: "rgba(15,23,42,0.92)",
+            border: "1px solid rgba(255,255,255,0.14)",
+            borderRadius: 6,
+            padding: "4px 10px",
+            fontSize: 11,
+            color: "#e2e8f0",
+            cursor: "pointer",
+            whiteSpace: "nowrap",
+          }}
+        >
+          ⤢ Fit all
         </button>
       )}
       <div

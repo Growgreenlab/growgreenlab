@@ -10,8 +10,41 @@ import ReplayControls from "../../components/ReplayControls";
 import TradingPanel from "../../components/TradingPanel";
 import RiskCalculator from "../../components/RiskCalculator";
 import { ReplayEngine, formatMoney, formatSigned, countdownText, countdownTextFor, TICKS_PER_CANDLE, SECONDS_PER_CANDLE } from "../../lib/engine";
-import type { Candle, SessionMeta } from "../../lib/types";
-import { TIMEFRAMES, aggregateCandles, higherTimeframeProgress, timeframeMinutes, type TimeframeId } from "../../lib/marketData";
+import type { Candle, Fill, SessionMeta } from "../../lib/types";
+import { TIMEFRAMES, aggregateCandles, higherTimeframeProgress, timeframeMinutes, formatEtTime, type TimeframeId } from "../../lib/marketData";
+import {
+  SealedCandleFeed,
+  buildDrEngine,
+  DAILY_REPLAY_STARTING_BALANCE,
+  DAILY_REPLAY_STATE_KEY,
+  encodeDrResumeHint,
+  decodeDrResumeHint,
+  validateDataset,
+  highlightBandFor,
+  drDatasetKey,
+  premarketWarningGate,
+  premarketOverlayVisible,
+  type SealedTransport,
+} from "../../lib/dailyReplay";
+import {
+  DrEventRecorder,
+  describeDrEvent,
+  formatDrClock,
+  type DrEvent,
+  type DrEventType,
+  type DrBracketMethod,
+  type DrBracketScope,
+} from "../../lib/dailyReplayEvents";
+import {
+  reconstructDrAttempt,
+  shouldOfferDrResume,
+} from "../../lib/dailyReplayResume";
+import {
+  DrOrderTracker,
+  newDrOrderId,
+  type DrOrderRow,
+  type DrOrderUpdateOp,
+} from "../../lib/dailyReplayOrders";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
 import { diag } from "../../lib/diag";
 import { DEFAULT_HOTKEYS, isTypingTarget } from "../../lib/hotkeys";
@@ -46,6 +79,92 @@ import {
 
 const START_CASH = 100_000;
 const BALANCE_KEY = "ggl-account-balance";
+
+/* ---------------- Daily Replay (server-sealed) ---------------- */
+
+interface DrInfo {
+  attemptId: string;
+  datasetId: string;
+  ticker: string;
+  tradeDate: string;
+  startIndex: number;
+  total: number;
+}
+
+const DR_EMPTY_BRACKETS = {
+  plannedSL: null,
+  plannedTP: null,
+  activeSL: null,
+  activeTP: null,
+};
+
+/**
+ * Supabase transport for SealedCandleFeed — thin mapping over the dr_*
+ * RPCs from supabase/migrations/daily-replay-v1.sql. All sealing rules
+ * (ownership, position clamping) are enforced inside those functions.
+ */
+function createDrTransport(
+  supabase: ReturnType<typeof createClient>
+): SealedTransport {
+  return {
+    async createAttempt(datasetId, startIndex) {
+      const { data, error } = await supabase.rpc("dr_create_attempt", {
+        p_dataset_id: datasetId,
+        p_start_index: startIndex,
+      });
+      if (error) throw error;
+      const d = data as { attempt_id: string; position: number; candles: Candle[] };
+      return { attemptId: d.attempt_id, position: d.position, candles: d.candles };
+    },
+    async advance(attemptId, steps) {
+      const { data, error } = await supabase.rpc("dr_advance_attempt", {
+        p_attempt_id: attemptId,
+        p_steps: steps,
+      });
+      if (error) throw error;
+      const d = data as { position: number; candles: Candle[]; finished: boolean };
+      return { position: d.position, candles: d.candles, finished: d.finished };
+    },
+    async getRevealed(attemptId) {
+      const { data, error } = await supabase.rpc("dr_get_revealed", {
+        p_attempt_id: attemptId,
+      });
+      if (error) throw error;
+      const d = data as { position: number; candles: Candle[] };
+      return { position: d.position, candles: d.candles };
+    },
+  };
+}
+
+/** True when the Daily Replay migration has not been applied yet. */
+function isDrStorageMissing(e: unknown): boolean {
+  if (!e || typeof e !== "object") return false;
+  const err = e as { code?: string; message?: string };
+  if (
+    err.code === "PGRST202" ||
+    err.code === "PGRST205" ||
+    err.code === "42P01" ||
+    err.code === "42883"
+  ) {
+    return true;
+  }
+  const msg = (err.message ?? "").toLowerCase();
+  return (
+    msg.includes("could not find the function") ||
+    msg.includes("daily_replay_datasets") ||
+    msg.includes("daily_replay_attempts") ||
+    msg.includes("daily_replay_events") ||
+    msg.includes("daily_replay_orders") ||
+    msg.includes("dr_create_attempt") ||
+    msg.includes("dr_upload_candles") ||
+    msg.includes("dr_advance_attempt") ||
+    msg.includes("dr_place_order") ||
+    msg.includes("dr_update_order")
+  );
+}
+
+const DR_STORAGE_MISSING_MSG =
+  "Daily Replay storage is not enabled on this deployment yet.";
 
 function ReplayPageInner() {
   const searchParams = useSearchParams();
@@ -205,6 +324,80 @@ function ReplayPageInner() {
 
   useEffect(() => stopTimer, [stopTimer]);
 
+  /* ---------------- Daily Replay state ----------------
+   * Phases: off → preview (full day visible, unsealed by design) →
+   * active (engine built ONLY over the SealedCandleFeed's array) → done.
+   * The DR balance lives solely inside the DR engine's cash — the Trade
+   * Lab persistent balance (profiles.account_balance / BALANCE_KEY) is
+   * never read or written by any Daily Replay path. */
+  const [drPhase, setDrPhase] = useState<"off" | "preview" | "active" | "done">("off");
+  const drPhaseRef = useRef(drPhase);
+  drPhaseRef.current = drPhase;
+  const [drPreview, setDrPreview] = useState<{
+    candles: Candle[];
+    meta: SessionMeta;
+    warnings: string[];
+    selected: number;
+    /** From validateDataset stats at load time: whether this dataset
+     *  has any pre-09:30 ET candles. Drives the load-time premarket
+     *  warning gate in the preview (see premarketWarningGate). */
+    premarketAvailable: boolean;
+  } | null>(null);
+  /** Dataset key for which the preview's premarket warning was
+   *  dismissed. Keyed (not boolean) so a new dataset always
+   *  re-evaluates; also reset on every new preview load. */
+  const [drPremarketDismissedKey, setDrPremarketDismissedKey] =
+    useState<string | null>(null);
+  const [drConfirm, setDrConfirm] = useState(false);
+  const [drBusy, setDrBusy] = useState(false);
+  const [drBuffering, setDrBuffering] = useState(false);
+  const [drError, setDrError] = useState<string | null>(null);
+  const [drInfo, setDrInfo] = useState<DrInfo | null>(null);
+  const drInfoRef = useRef<DrInfo | null>(null);
+  drInfoRef.current = drInfo;
+  const [drFinal, setDrFinal] = useState<{ realized: number; equity: number } | null>(null);
+  const [drSaveMsg, setDrSaveMsg] = useState<string | null>(null);
+  const drFeedRef = useRef<SealedCandleFeed | null>(null);
+  const drAdvancingRef = useRef(false);
+  const drCompletedRef = useRef(false);
+  const drOnErrorRef = useRef<(e: unknown) => void>(() => {});
+  /* Decision Timeline (DR-scoped): the recorder is fed from the same
+   * call sites where actions happen; fills are observed centrally. */
+  const [drEvents, setDrEvents] = useState<DrEvent[]>([]);
+  const drRecorderRef = useRef<DrEventRecorder | null>(null);
+  const drFlushedRef = useRef(0);
+  const drEventsMissingRef = useRef(false);
+  const drSeenFillsRef = useRef(0);
+  const drPlayStartedRef = useRef(false);
+  /* Persistent working orders (daily_replay_orders, v2): the tracker
+   * maps engine order ids to server rows for the on-screen attempt;
+   * store ops for one order are serialized on a per-order promise
+   * chain so a fill update can never overtake its placement insert.
+   * drOrdersMissingRef latches when the v2 migration is not applied —
+   * order persistence then stays off (device-only), never crashing,
+   * exactly how the events layer degrades pre-migration. */
+  const drOrderTrackerRef = useRef<DrOrderTracker | null>(null);
+  const drOrdersMissingRef = useRef(false);
+  const drOrderChainsRef = useRef(new Map<string, Promise<void>>());
+  /* Refresh-resume: an in-progress attempt found on load, verified
+   * against the attempts table (the localStorage hint alone proves
+   * nothing — the server row decides, and anything non-active clears
+   * the hint). */
+  const [drResume, setDrResume] = useState<{
+    attemptId: string;
+    ticker: string;
+    tradeDate: string;
+    startIndex: number;
+    position: number;
+    total: number;
+    startingBalance: number;
+  } | null>(null);
+  const [drResuming, setDrResuming] = useState(false);
+  /** Set when a resumed attempt's earlier trade history could not be
+   *  restored (events unreadable or empty): the timeline panel says
+   *  so plainly instead of inventing fills. */
+  const [drHistoryNote, setDrHistoryNote] = useState<string | null>(null);
+
   // Trading-workspace mode: hide the site footer so the workspace owns the screen.
   useEffect(() => {
     document.body.classList.add("ws-active");
@@ -238,6 +431,30 @@ function ReplayPageInner() {
       // Fell behind by more than a second (hidden tab / sleep / pause in
       // devtools): resume from the live edge instead of bursting.
       if (now - nextTick > 1000) nextTick = now;
+      // Daily Replay: the engine may only form candles the sealed feed
+      // already holds. At the held end (engine.atEnd with more candles
+      // still sealed server-side), release exactly the next candle —
+      // strict release-on-consume via the feed's ensure() gate, never
+      // a batch — instead of ticking, and pause ticking while that
+      // request is in flight.
+      if (drPhaseRef.current === "active") {
+        const feed = drFeedRef.current;
+        if (feed && eng.atEnd && !feed.finished) {
+          if (!drAdvancingRef.current) {
+            drAdvancingRef.current = true;
+            setDrBuffering(true);
+            feed
+              .ensure(eng.index + 1)
+              .then(() => bump())
+              .catch((e) => drOnErrorRef.current(e))
+              .finally(() => {
+                drAdvancingRef.current = false;
+                setDrBuffering(false);
+              });
+          }
+          return;
+        }
+      }
       let ran = 0;
       let finished = false;
       const qtyBefore = eng.positionQty;
@@ -265,11 +482,25 @@ function ReplayPageInner() {
       }
       if (ran > 0) bump();
       if (finished) {
-        done = true;
-        if (timerRef.current) clearInterval(timerRef.current);
-        timerRef.current = null;
-        setPlaying(false);
-        setEnded(true);
+        // Daily Replay: finalizing the last HELD candle is a
+        // buffering state, not the end (see the ended-effect below).
+        // The engine's atEnd fires in this same tick, before any
+        // interval pass could observe it and release the next candle
+        // — so stopping here would halt playback after every candle.
+        // Keep the timer alive instead: the next pass takes the
+        // Daily Replay branch above, releases exactly one candle via
+        // ensure(), and ticking resumes. A finished feed (or any
+        // standard session) still ends playback exactly as before.
+        const feedNow = drFeedRef.current;
+        const drBuffering =
+          drPhaseRef.current === "active" && feedNow !== null && !feedNow.finished;
+        if (!drBuffering) {
+          done = true;
+          if (timerRef.current) clearInterval(timerRef.current);
+          timerRef.current = null;
+          setPlaying(false);
+          setEnded(true);
+        }
       }
     }, 50);
     timerRef.current = id;
@@ -294,6 +525,492 @@ function ReplayPageInner() {
     setDataOpen(false);
     bump();
   }, [bump, stopTimer]);
+
+  /* ---------------- Daily Replay handlers ---------------- */
+
+  const handleDrAdvanceError = useCallback(
+    (e: unknown) => {
+      stopTimer();
+      setDrError(
+        isDrStorageMissing(e)
+          ? DR_STORAGE_MISSING_MSG
+          : `Daily Replay paused: ${e instanceof Error ? e.message : "server request failed."}`
+      );
+    },
+    [stopTimer]
+  );
+  drOnErrorRef.current = handleDrAdvanceError;
+
+  // Step B: a validated Real Market Data load lands in the full-day
+  // preview. Any running session is torn down exactly like a fresh load.
+  const handleDrPreview = useCallback(
+    (cs: Candle[], m: SessionMeta, warnings: string[]) => {
+      stopTimer();
+      setEnded(false);
+      setSaveMsg(null);
+      engineRef.current = null;
+      savedSessionIdRef.current = null;
+      lastSavedPnlRef.current = 0;
+      setCandles(null);
+      setMeta(null);
+      setDrError(null);
+      setDrFinal(null);
+      setDrSaveMsg(null);
+      // Premarket availability is determined NOW, at load time (the
+      // panel already validated this exact dataset with the same
+      // arguments — the recomputation is deterministic and cheap), so
+      // the preview can warn before any candle is selected or locked.
+      const v = validateDataset(cs, {
+        ticker: m.ticker,
+        tradeDate: m.tradeDate,
+        timeframeMinutes: 1,
+      });
+      setDrPreview({
+        candles: cs,
+        meta: m,
+        warnings,
+        selected: Math.min(Math.max(m.startIndex, 0), cs.length - 1),
+        premarketAvailable: v.stats.premarketAvailable,
+      });
+      setDrPremarketDismissedKey(null);
+      setDrConfirm(false);
+      setDrPhase("preview");
+      bump();
+    },
+    [bump, stopTimer]
+  );
+
+  const exitDrPreview = useCallback(() => {
+    setDrPreview(null);
+    setDrConfirm(false);
+    setDrError(null);
+    setDrPhase("off");
+    bump();
+  }, [bump]);
+
+  // Preview escape hatch: the pre-existing unsealed Trade Lab replay,
+  // unchanged (the full array the user just inspected, their start time).
+  const startStandardFromPreview = useCallback(() => {
+    const pv = drPreview;
+    if (!pv) return;
+    setDrPreview(null);
+    setDrPhase("off");
+    handleLoad(pv.candles, pv.meta);
+  }, [drPreview, handleLoad]);
+
+  // Step C: lock the starting candle. Uploads the dataset server-side,
+  // creates the sealed attempt, then DISCARDS the preview array — the
+  // active engine is built only from the feed's server-released prefix.
+  const confirmDrLock = useCallback(async () => {
+    const pv = drPreview;
+    if (!pv) return;
+    setDrBusy(true);
+    setDrError(null);
+    try {
+      if (!isSupabaseConfigured()) {
+        setDrError(DR_STORAGE_MISSING_MSG);
+        return;
+      }
+      const supabase = createClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) {
+        setDrError(
+          "Daily Replay keeps candles sealed on the server, stored per account — please sign in to lock a starting candle, or start a standard replay instead."
+        );
+        return;
+      }
+      const premarketUnavailable = pv.meta.premarketUnavailable;
+      // 1) Register the dataset (owner RLS applies).
+      const { data: ds, error: dsErr } = await supabase
+        .from("daily_replay_datasets")
+        .insert({
+          user_id: user.id,
+          ticker: pv.meta.ticker,
+          trade_date: pv.meta.tradeDate,
+          timeframe: 1,
+          source: "twelvedata",
+          candle_count: pv.candles.length,
+        })
+        .select("id")
+        .single();
+      if (dsErr || !ds) throw dsErr ?? new Error("Could not register the dataset.");
+      // 2) Upload the candles through the definer RPC (the candles
+      //    table itself accepts no direct writes at all).
+      const { error: upErr } = await supabase.rpc("dr_upload_candles", {
+        p_dataset_id: ds.id,
+        p_candles: pv.candles,
+      });
+      if (upErr) throw upErr;
+      // 3) Create the sealed attempt; the feed ingests ONLY the
+      //    server-released prefix [0..start].
+      const feed = new SealedCandleFeed(createDrTransport(supabase));
+      feed.setTotal(pv.candles.length);
+      await feed.create(ds.id, pv.selected);
+      const info: DrInfo = {
+        attemptId: feed.attemptId!,
+        datasetId: ds.id,
+        ticker: pv.meta.ticker,
+        tradeDate: pv.meta.tradeDate,
+        startIndex: pv.selected,
+        total: pv.candles.length,
+      };
+      // Decision Timeline starts here: attempt_created is event #1.
+      const startCandle = feed.candles[pv.selected];
+      const recorder = new DrEventRecorder();
+      drRecorderRef.current = recorder;
+      drFlushedRef.current = 0;
+      drEventsMissingRef.current = false;
+      drSeenFillsRef.current = 0;
+      drPlayStartedRef.current = false;
+      // Fresh persistent-order tracking for this attempt.
+      drOrderTrackerRef.current = new DrOrderTracker();
+      drOrdersMissingRef.current = false;
+      drOrderChainsRef.current = new Map();
+      recorder.setListener(() => {
+        setDrEvents(recorder.all);
+        if (recorder.length - drFlushedRef.current >= 10) {
+          void flushDrEvents();
+        }
+      });
+      recorder.record(
+        "attempt_created",
+        {
+          ticker: info.ticker,
+          tradeDate: info.tradeDate,
+          startIndex: info.startIndex,
+          startEtTime: startCandle ? formatEtTime(startCandle.t) : "",
+          startingBalance: DAILY_REPLAY_STARTING_BALANCE,
+        },
+        {
+          marketIdx: info.startIndex,
+          marketTs: startCandle ? startCandle.t : null,
+        }
+      );
+      // 4) Drop every page-held reference to the full preview array.
+      //    From here on, the only candles in memory are the feed's.
+      drFeedRef.current = feed;
+      setDrInfo(info);
+      setDrPreview(null);
+      setDrConfirm(false);
+      drCompletedRef.current = false;
+      // 5) Engine over the sealed array, with the independent DR
+      //    balance. Boundary: the locked candle is the last COMPLETED
+      //    candle — buildDrEngine releases exactly one more candle
+      //    and starts the engine at startIndex + 1, so the NEXT
+      //    candle is the first one that forms.
+      const eng = await buildDrEngine(
+        feed,
+        info.startIndex,
+        DAILY_REPLAY_STARTING_BALANCE
+      );
+      engineRef.current = eng;
+      savedSessionIdRef.current = null;
+      lastSavedPnlRef.current = 0;
+      setCandles(feed.candles);
+      setMeta({
+        ticker: info.ticker,
+        tradeDate: info.tradeDate,
+        source: "twelvedata",
+        startIndex: info.startIndex,
+        premarketUnavailable,
+      });
+      setDrHistoryNote(null);
+      setDrPhase("active");
+      try {
+        localStorage.setItem(
+          DAILY_REPLAY_STATE_KEY,
+          encodeDrResumeHint({
+            attemptId: info.attemptId,
+            datasetId: info.datasetId,
+            ticker: info.ticker,
+            tradeDate: info.tradeDate,
+            startIndex: info.startIndex,
+          })
+        );
+      } catch { /* non-authoritative UI hint only */ }
+      bump();
+    } catch (e) {
+      setDrError(
+        isDrStorageMissing(e)
+          ? DR_STORAGE_MISSING_MSG
+          : e instanceof Error
+            ? e.message
+            : "Could not start Daily Replay."
+      );
+    } finally {
+      setDrBusy(false);
+    }
+  }, [drPreview, bump]);
+
+  // Step button for Daily Replay: release the next candle first when
+  // the engine sits at the sealed end — exactly one candle, through
+  // the same strict ensure() gate the play loop uses.
+  const drStepNext = useCallback(async () => {
+    const eng = engineRef.current;
+    const feed = drFeedRef.current;
+    if (!eng || !feed) return;
+    if (eng.atEnd && !feed.finished) {
+      setDrBuffering(true);
+      try {
+        await feed.ensure(eng.index + 1);
+      } catch (e) {
+        handleDrAdvanceError(e);
+        return;
+      } finally {
+        setDrBuffering(false);
+      }
+    }
+    if (!eng.atEnd) eng.step();
+    setEnded(eng.atEnd && feed.finished);
+    bump();
+  }, [bump, handleDrAdvanceError]);
+
+  // Leave Daily Replay. The server-side attempt stays 'active' (the
+  // client holds no position it could forge anyway); the local sealed
+  // array and engine are dropped.
+  const exitDailyReplay = useCallback(() => {
+    stopTimer();
+    // Timeline: record the exit and flush what we can before teardown.
+    const rec = drRecorderRef.current;
+    if (rec && drPhaseRef.current !== "done") {
+      rec.record("session_exited", {}, drCtx());
+    }
+    void flushDrEvents();
+    drRecorderRef.current = null;
+    // The attempt (and its working orders) stays 'active' server-side
+    // for a later resume — only the local tracking is dropped.
+    drOrderTrackerRef.current = null;
+    drFeedRef.current = null;
+    drCompletedRef.current = false;
+    setDrEvents([]);
+    setDrHistoryNote(null);
+    setDrInfo(null);
+    setDrFinal(null);
+    setDrSaveMsg(null);
+    setDrError(null);
+    setDrPhase("off");
+    engineRef.current = null;
+    setCandles(null);
+    setMeta(null);
+    setEnded(false);
+    bump();
+  }, [bump, stopTimer]);
+
+  // Refresh-resume: rebuild an in-progress attempt from its server
+  // artifacts — the sealed feed (dr_get_revealed: revealed prefix +
+  // authoritative position) and the persisted Decision Timeline
+  // (fills re-applied at their exact recorded prices, mirroring the
+  // saved-session reload below). The starting candle cannot change:
+  // resume re-enters the ACTIVE phase directly; there is no path
+  // back to preview for this attempt.
+  const resumeDailyReplay = useCallback(async () => {
+    const offer = drResume;
+    if (!offer || drResuming) return;
+    setDrResuming(true);
+    setDrError(null);
+    try {
+      if (!isSupabaseConfigured()) {
+        setDrError(DR_STORAGE_MISSING_MSG);
+        return;
+      }
+      const supabase = createClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) {
+        setDrError("Please sign in to resume your Daily Replay attempt.");
+        return;
+      }
+      // Re-verify at click time: the attempt may have finished (or
+      // been finished on another device) since the offer was shown.
+      const { data: att, error: attErr } = await supabase
+        .from("daily_replay_attempts")
+        .select("id, dataset_id, start_index, position, status, starting_balance")
+        .eq("id", offer.attemptId)
+        .maybeSingle();
+      if (attErr) throw attErr;
+      if (!att || !shouldOfferDrResume(att.status)) {
+        try { localStorage.removeItem(DAILY_REPLAY_STATE_KEY); } catch { /* ignore */ }
+        setDrResume(null);
+        setDrError("That Daily Replay attempt is no longer active.");
+        return;
+      }
+      // Sealed feed: attach pulls ONLY the revealed prefix; the
+      // position in the response is authoritative.
+      const feed = new SealedCandleFeed(createDrTransport(supabase));
+      feed.setTotal(offer.total);
+      await feed.attach(offer.attemptId);
+      // Boundary (same rule as a fresh lock): the locked candle is
+      // completed history and the NEXT candle is the first live one.
+      // If the server position never moved past the locked candle
+      // (locked, then refreshed before playing), release exactly that
+      // next candle now so reconstruction has a candle to form; if
+      // the position already advanced during the original run, the
+      // revealed prefix already contains it.
+      const lockIndex = att.start_index as number;
+      if (!feed.finished && feed.position <= lockIndex) {
+        await feed.advance(1);
+      }
+      // Decision Timeline: the attempt's persisted events, in order.
+      // If they cannot be read (or none were ever persisted), resume
+      // the candles + position with a fresh trading state and say so
+      // in the timeline — fills are never fabricated.
+      let events: DrEvent[] = [];
+      let historyOk = true;
+      const { data: rows, error: evErr } = await supabase
+        .from("daily_replay_events")
+        .select("seq, type, wall_ts, market_idx, market_ts, payload")
+        .eq("attempt_id", offer.attemptId)
+        .order("seq", { ascending: true });
+      if (evErr) {
+        historyOk = false;
+      } else {
+        events = (rows ?? []).map((r) => ({
+          seq: r.seq as number,
+          type: r.type as DrEventType,
+          wallTs: Date.parse(r.wall_ts as string),
+          marketIdx: (r.market_idx as number | null) ?? null,
+          marketTs: r.market_ts != null ? Number(r.market_ts) : null,
+          payload: (r.payload ?? {}) as Record<string, unknown>,
+        }));
+        if (events.length === 0) historyOk = false;
+      }
+      // Persistent orders: the attempt's daily_replay_orders rows are
+      // the AUTHORITATIVE working-order state (v2). Read them under
+      // the owner SELECT policy, in creation order; reconstruction
+      // re-places exactly the 'working' ones at remaining qty. If the
+      // v2 storage is missing, resume proceeds without orders (the
+      // pre-v2 behavior) and placement persistence stays latched off.
+      let orderRows: DrOrderRow[] = [];
+      drOrdersMissingRef.current = false;
+      const { data: oRows, error: oErr } = await supabase
+        .from("daily_replay_orders")
+        .select(
+          "id, attempt_id, side, order_type, qty, filled_qty, limit_price, status, engine_order_id, created_at"
+        )
+        .eq("attempt_id", offer.attemptId)
+        .order("created_at", { ascending: true });
+      if (oErr) {
+        if (isDrStorageMissing(oErr)) {
+          drOrdersMissingRef.current = true;
+        } else {
+          historyOk = false;
+        }
+      } else {
+        orderRows = (oRows ?? []).map((r) => ({
+          id: r.id as string,
+          attemptId: r.attempt_id as string,
+          side: r.side as "buy" | "sell",
+          orderType: (r.order_type as string) ?? "limit",
+          qty: Number(r.qty),
+          filledQty: Number(r.filled_qty),
+          limitPrice: Number(r.limit_price),
+          status: r.status as DrOrderRow["status"],
+          engineOrderId:
+            r.engine_order_id != null ? Number(r.engine_order_id) : null,
+          createdAt: (r.created_at as string) ?? undefined,
+        }));
+      }
+      const startingBalance =
+        Number(att.starting_balance) || DAILY_REPLAY_STARTING_BALANCE;
+      const recon = reconstructDrAttempt({
+        candles: feed.candles,
+        startingBalance,
+        startIndex: att.start_index,
+        events,
+        orders: orderRows,
+      });
+      const { engine: eng, recorder } = recon;
+      // Wire the attempt exactly like a fresh lock does.
+      drFeedRef.current = feed;
+      drRecorderRef.current = recorder;
+      drFlushedRef.current = events.length; // everything loaded is already persisted
+      drEventsMissingRef.current = false;
+      drSeenFillsRef.current = eng.fills.length; // restored fills are already recorded
+      drPlayStartedRef.current = true; // the next Play is a resume, not a start
+      drCompletedRef.current = false;
+      // Register the restored working orders with the tracker under
+      // their persistent ids, so fills/cancels from here on keep
+      // updating the SAME server rows (no duplicates, ever). Restored
+      // orders emit no new limit_placed events — the originals are
+      // already in the loaded stream.
+      const tracker = new DrOrderTracker();
+      for (const ro of recon.restoredOrders) {
+        tracker.track(ro.engineOrderId, {
+          id: ro.orderId,
+          attemptId: offer.attemptId,
+          side: ro.side,
+          orderType: "limit",
+          qty: ro.qty,
+          filledQty: ro.filledQty,
+          limitPrice: ro.limitPrice,
+          status: "working",
+          engineOrderId: ro.engineOrderId,
+        });
+      }
+      drOrderTrackerRef.current = tracker;
+      drOrderChainsRef.current = new Map();
+      recorder.setListener(() => {
+        setDrEvents(recorder.all);
+        if (recorder.length - drFlushedRef.current >= 10) {
+          void flushDrEvents();
+        }
+      });
+      setDrEvents(recorder.all);
+      if (recon.restoredPlannedBrackets) {
+        setPlannedSL(recon.restoredPlannedBrackets.sl);
+        setPlannedTP(recon.restoredPlannedBrackets.tp);
+      }
+      const info: DrInfo = {
+        attemptId: offer.attemptId,
+        datasetId: att.dataset_id as string,
+        ticker: offer.ticker,
+        tradeDate: offer.tradeDate,
+        startIndex: att.start_index as number,
+        total: offer.total,
+      };
+      stopTimer();
+      setEnded(false);
+      engineRef.current = eng;
+      savedSessionIdRef.current = null;
+      lastSavedPnlRef.current = 0;
+      setCandles(feed.candles);
+      setMeta({
+        ticker: info.ticker,
+        tradeDate: info.tradeDate,
+        source: "twelvedata",
+        startIndex: info.startIndex,
+      });
+      setDrInfo(info);
+      setDrHistoryNote(
+        historyOk
+          ? null
+          : "Earlier trade history for this attempt could not be restored, so the trade state starts fresh — your locked starting candle and every candle revealed so far are intact."
+      );
+      setDrResume(null);
+      setDrPhase("active");
+      // The reload gap is part of the history: mark it in the
+      // timeline (seq continues from the restored maximum).
+      recorder.record(
+        "session_resumed",
+        { via: "page-reload", restoredOrders: recon.restoredOrders.length },
+        drCtx()
+      );
+      bump();
+    } catch (e) {
+      setDrError(
+        isDrStorageMissing(e)
+          ? DR_STORAGE_MISSING_MSG
+          : e instanceof Error
+            ? e.message
+            : "Could not resume Daily Replay."
+      );
+    } finally {
+      setDrResuming(false);
+    }
+  }, [drResume, drResuming, bump, stopTimer]);
 
   // Load a saved session (?session=<id>)
   useEffect(() => {
@@ -345,6 +1062,71 @@ function ReplayPageInner() {
         setLoadingSession(false);
       }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Daily Replay resume detection (mount, best-effort): if the
+  // resume hint names an attempt the server still reports 'active'
+  // for this signed-in user, offer to resume it. Finished/abandoned/
+  // missing attempts clear the hint silently; an unverifiable hint
+  // (signed out, storage not enabled) is left alone and stays silent.
+  useEffect(() => {
+    if (searchParams.get("session")) return; // a saved-session load wins
+    let cancelled = false;
+    (async () => {
+      try {
+        if (!isSupabaseConfigured()) return;
+        const raw = localStorage.getItem(DAILY_REPLAY_STATE_KEY);
+        const hint = decodeDrResumeHint(raw);
+        if (!hint) {
+          if (raw) {
+            try { localStorage.removeItem(DAILY_REPLAY_STATE_KEY); } catch { /* ignore */ }
+          }
+          return;
+        }
+        const supabase = createClient();
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        if (!user || cancelled) return; // leave the hint for a signed-in visit
+        const { data: att, error } = await supabase
+          .from("daily_replay_attempts")
+          .select("id, dataset_id, start_index, position, status, starting_balance")
+          .eq("id", hint.attemptId)
+          .maybeSingle();
+        if (cancelled || error) return; // cannot verify — keep the hint, stay silent
+        if (!att || !shouldOfferDrResume(att.status)) {
+          try { localStorage.removeItem(DAILY_REPLAY_STATE_KEY); } catch { /* ignore */ }
+          return;
+        }
+        const { data: ds } = await supabase
+          .from("daily_replay_datasets")
+          .select("ticker, trade_date, candle_count")
+          .eq("id", att.dataset_id)
+          .maybeSingle();
+        if (cancelled) return;
+        if (!ds) {
+          // Attempt without its dataset can never resume.
+          try { localStorage.removeItem(DAILY_REPLAY_STATE_KEY); } catch { /* ignore */ }
+          return;
+        }
+        setDrResume({
+          attemptId: att.id as string,
+          ticker: ds.ticker as string,
+          tradeDate: ds.trade_date as string,
+          startIndex: att.start_index as number,
+          position: att.position as number,
+          total: ds.candle_count as number,
+          startingBalance:
+            Number(att.starting_balance) || DAILY_REPLAY_STARTING_BALANCE,
+        });
+      } catch {
+        /* resume is best-effort; the normal flow is unaffected */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -599,29 +1381,51 @@ function ReplayPageInner() {
   const buyErr = (qty: number): string | null => {
     const eng = engineRef.current;
     if (!eng) return "Load a session first.";
-    if (!(qty > 0)) return "Enter a share quantity.";
+    const rec = drRec();
+    const q = Math.floor(qty);
+    if (!(qty > 0)) {
+      rec?.recordOrderRejected({ side: "buy", qty: q, reason: "Enter a share quantity." }, drCtx());
+      return "Enter a share quantity.";
+    }
     // Psychology Guard: block entries during lockout (engine also enforces).
     if (eng.tradeGuard) {
       const msg = eng.tradeGuard();
-      if (msg) return msg;
+      if (msg) {
+        rec?.recordOrderRejected({ side: "buy", qty: q, reason: msg }, drCtx());
+        return msg;
+      }
     }
-    const f = eng.buy(Math.floor(qty));
+    rec?.recordOrderSubmitted({ orderType: "market", side: "buy", qty: q }, drCtx());
+    const f = eng.buy(q);
     if (f) {
       // Activate any planned SL/TP on the new position.
       if (plannedSL != null || plannedTP != null) {
         eng.setBrackets(plannedSL, plannedTP);
+        drBracketsChanged(plannedSL, plannedTP, "control", "active");
+        drBracketsChanged(null, null, "control", "planned");
         setPlannedLevels(null, null);
       }
     }
     bump();
-    return f ? null : "Not enough virtual cash for that size.";
+    if (!f) {
+      rec?.recordOrderRejected({ side: "buy", qty: q, reason: "Not enough virtual cash for that size." }, drCtx());
+      return "Not enough virtual cash for that size.";
+    }
+    return null;
   };
   const sellErr = (qty: number): string | null => {
     const eng = engineRef.current;
     if (!eng) return "Load a session first.";
-    const f = eng.sell(Math.floor(qty));
+    const rec = drRec();
+    const q = Math.floor(qty);
+    rec?.recordOrderSubmitted({ orderType: "market", side: "sell", qty: q }, drCtx());
+    const f = eng.sell(q);
     bump();
-    return f ? null : "No open position to sell.";
+    if (!f) {
+      rec?.recordOrderRejected({ side: "sell", qty: q, reason: "No open position to sell." }, drCtx());
+      return "No open position to sell.";
+    }
+    return null;
   };
 
   // Guest trade limit gate: wraps buyErr for new positions (guests only).
@@ -685,7 +1489,12 @@ function ReplayPageInner() {
         else { setEnded(false); setPlayNonce((n) => n + 1); setPlaying(true); }
       } else if (match(DEFAULT_HOTKEYS.stepForward)) {
         e.preventDefault();
-        if (!playing) { eng.step(); setEnded(eng.atEnd); bump(); }
+        if (!playing) {
+          // Daily Replay: the hotkey must release sealed candles at
+          // the held end exactly like the Step button does.
+          if (drPhaseRef.current === "active") void drStepNext();
+          else { eng.step(); setEnded(eng.atEnd); bump(); }
+        }
       } else if (match(DEFAULT_HOTKEYS.speed05)) { setSpeed(0.5); }
       else if (match(DEFAULT_HOTKEYS.speed1)) { setSpeed(1); }
       else if (match(DEFAULT_HOTKEYS.speed2)) { setSpeed(2); }
@@ -694,7 +1503,7 @@ function ReplayPageInner() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [playing, orderQty, buyErr, sellErr, stopTimer, bump]);
+  }, [playing, orderQty, buyErr, sellErr, stopTimer, bump, drStepNext]);
 
   const placeLimitErr = (side: "buy" | "sell", qty: number, price: number): string | null => {
     const eng = engineRef.current;
@@ -710,12 +1519,53 @@ function ReplayPageInner() {
         return "Daily guest limit reached (5 trades).";
       }
     }
+    const pendingBefore = new Set(eng.pendingOrders.map((o) => o.id));
     const err = eng.placeLimitOrder(side, qty, price);
+    const rec = drRec();
+    if (err) {
+      // Engine refused synchronously — the order exists nowhere and
+      // is never persisted (a rejected placement cannot resurrect).
+      rec?.recordOrderRejected({ side, qty, reason: err }, drCtx());
+    } else {
+      // The accepted order is the one pending entry that is new.
+      const placed = eng.pendingOrders.find((o) => !pendingBefore.has(o.id));
+      // Daily Replay: register the order server-side under a fresh
+      // persistent uuid BEFORE recording, so the timeline events and
+      // the authoritative order row share the same identity.
+      let orderUuid: string | undefined;
+      const tracker = drOrderTrackerRef.current;
+      const info = drInfoRef.current;
+      if (placed && tracker && info && drPhaseRef.current === "active") {
+        orderUuid = newDrOrderId();
+        const row: DrOrderRow = {
+          id: orderUuid,
+          attemptId: info.attemptId,
+          side: placed.side,
+          orderType: "limit",
+          qty: placed.qty,
+          filledQty: 0,
+          limitPrice: placed.limitPrice,
+          status: "working",
+          engineOrderId: placed.id,
+        };
+        tracker.track(placed.id, row);
+        persistDrOrderPlace(row);
+      }
+      rec?.recordOrderSubmitted(
+        { orderType: "limit", side, qty, requestedPrice: price, orderUuid },
+        drCtx()
+      );
+      rec?.recordLimitPlaced({ side, qty, limitPrice: price, orderUuid }, drCtx());
+    }
     bump();
     return err;
   };
 
   const saveSession = async (isAutoSave = false) => {
+    // Daily Replay has its own save path (see completeDailyReplay):
+    // routing a DR session through here would wrongly apply its P&L to
+    // the persistent Trade Lab balance as a delta.
+    if (drPhaseRef.current === "active" || drPhaseRef.current === "done") return;
     const eng = engineRef.current;
     if (!eng || !candles || !meta) return;
     if (!isSupabaseConfigured()) {
@@ -804,21 +1654,715 @@ function ReplayPageInner() {
     }
   };
 
+  /* Daily Replay completion: save the finished attempt to the journal
+   * via replay_sessions/session_trades like a normal session — by now
+   * every candle has been legitimately revealed to this user — but
+   * WITHOUT the profiles.account_balance delta (DR money is separate),
+   * then mark the attempt finished server-side with the session link. */
+  const completeDailyReplay = useCallback(async () => {
+    const eng = engineRef.current;
+    const feed = drFeedRef.current;
+    const info = drInfoRef.current;
+    if (!eng || !feed || !info) return;
+    // Settle fills/orders from the final candle FIRST: a limit order
+    // that filled on it must reach its server row as 'filled' before
+    // the settle-all below marks the leftovers cancelled. (The sync
+    // is idempotent; the version effect will re-run it as a no-op.)
+    drSyncFills();
+    drRecorderRef.current?.record(
+      "session_completed",
+      { realizedPnl: eng.realizedPnl, equity: eng.equity() },
+      drCtx()
+    );
+    // Any order still working at the end is extinguished with the
+    // session: settle its server row as cancelled so it can never be
+    // restored (the attempt is about to be marked finished anyway).
+    drSettleTrackedOrders();
+    setDrFinal({ realized: eng.realizedPnl, equity: eng.equity() });
+    setDrPhase("done");
+    try {
+      if (!isSupabaseConfigured()) {
+        setDrSaveMsg("Replay complete. (Session saving is unavailable — Supabase is not configured.)");
+        return;
+      }
+      const supabase = createClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) {
+        setDrSaveMsg("Replay complete. (Not signed in — session was not saved.)");
+        return;
+      }
+      const { data: s, error } = await supabase
+        .from("replay_sessions")
+        .insert({
+          user_id: user.id,
+          ticker: info.ticker,
+          trade_date: info.tradeDate,
+          source: "twelvedata",
+          candles: feed.candles,
+          start_index: info.startIndex,
+          final_cash: eng.cash,
+          realized_pnl: eng.realizedPnl,
+        })
+        .select("id")
+        .single();
+      if (error || !s) throw error ?? new Error("Daily Replay session save failed.");
+      if (eng.fills.length > 0) {
+        const { error: tErr } = await supabase.from("session_trades").insert(
+          eng.fills.map((f) => ({
+            session_id: s.id,
+            user_id: user.id,
+            side: f.side,
+            qty: f.qty,
+            price: f.price,
+            candle_index: f.candleIndex,
+            candle_time: new Date(f.time).toISOString(),
+            realized_pnl: f.realizedPnl,
+            note: f.note ?? null,
+          }))
+        );
+        if (tErr) throw tErr;
+      }
+      const { error: fErr } = await supabase.rpc("dr_finish_attempt", {
+        p_attempt_id: info.attemptId,
+        p_session_id: s.id,
+      });
+      if (fErr) throw fErr;
+      // The attempt is finished server-side: the resume hint is spent.
+      try { localStorage.removeItem(DAILY_REPLAY_STATE_KEY); } catch { /* ignore */ }
+      await flushDrEvents();
+      setDrSaveMsg("Saved to your journal — find it under My Sessions.");
+    } catch (e) {
+      setDrSaveMsg(
+        `Replay complete — journal save failed: ${e instanceof Error ? e.message : "unknown error"}`
+      );
+    }
+    // The timeline flushes regardless of how the journal save went.
+    await flushDrEvents();
+  }, []);
+
+  // Fires when the play/step flow reports the end. In Daily Replay that
+  // only counts once the feed is finished (every candle released); at
+  // the merely-held end it is a buffering state, not completion.
+  useEffect(() => {
+    if (!ended || drPhase !== "active") return;
+    const feed = drFeedRef.current;
+    if (!feed || !feed.finished) {
+      setEnded(false);
+      return;
+    }
+    if (drCompletedRef.current) return;
+    drCompletedRef.current = true;
+    void completeDailyReplay();
+  }, [ended, drPhase, completeDailyReplay]);
+
+  /* ---------------- Decision Timeline plumbing ----------------
+   * flushDrEvents / drSyncFills / drBracketsChanged / drCtx are plain
+   * closures (not hooks) used by handlers defined across this file;
+   * they only ever run in response to user actions or effects, after
+   * the component body has fully initialized. */
+
+  /** The recorder, only while a Daily Replay attempt is on screen. */
+  const drRec = (): DrEventRecorder | null =>
+    drPhaseRef.current === "active" || drPhaseRef.current === "done"
+      ? drRecorderRef.current
+      : null;
+
+  /** Current market-candle context for an event. */
+  const drCtx = (): { marketIdx: number | null; marketTs: number | null } => {
+    const e = engineRef.current;
+    if (!e) return { marketIdx: null, marketTs: null };
+    return {
+      marketIdx: e.index,
+      marketTs: e.candles[e.index]?.t ?? null,
+    };
+  };
+
+  /** Feed an SL/TP application (drag or control, planned or active). */
+  const drBracketsChanged = (
+    sl: number | null,
+    tp: number | null,
+    method: DrBracketMethod,
+    scope: DrBracketScope
+  ): void => {
+    const rec = drRec();
+    if (!rec) return;
+    const e = engineRef.current;
+    rec.recordBrackets(sl, tp, method, scope, drCtx(), {
+      avgEntry: e && e.positionQty > 0 ? e.positionAvg : null,
+      direction: "long", // the engine is long-only in this round
+    });
+  };
+
+  /**
+   * Persist recorded events in one small batch. If the events table is
+   * missing (migration not applied yet), remember that and stop trying
+   * — the timeline still works in-page and at completion, and nothing
+   * crashes. Other failures keep the events pending for the next flush.
+   */
+  const flushDrEvents = async (): Promise<void> => {
+    const rec = drRecorderRef.current;
+    const info = drInfoRef.current;
+    if (!rec || !info || drEventsMissingRef.current) return;
+    const pending = rec.all.slice(drFlushedRef.current);
+    if (pending.length === 0) return;
+    try {
+      if (!isSupabaseConfigured()) return;
+      const supabase = createClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return;
+      const { error } = await supabase.from("daily_replay_events").insert(
+        pending.map((e) => ({
+          attempt_id: info.attemptId,
+          user_id: user.id,
+          seq: e.seq,
+          type: e.type,
+          wall_ts: new Date(e.wallTs).toISOString(),
+          market_idx: e.marketIdx,
+          market_ts: e.marketTs,
+          payload: e.payload,
+        }))
+      );
+      if (error) throw error;
+      drFlushedRef.current += pending.length;
+    } catch (e) {
+      if (isDrStorageMissing(e)) {
+        drEventsMissingRef.current = true;
+      }
+      // otherwise: leave pending; a later flush retries. Never crash.
+    }
+  };
+
+  /* ---------------- Persistent working orders (v2) ----------------
+   * Every limit order the engine accepts during a Daily Replay
+   * attempt is registered server-side (dr_place_order) under a fresh
+   * uuid — the persistent identity the Decision Timeline events also
+   * carry as orderUuid. Status changes flow through dr_update_order
+   * only. All ops for one order are serialized on a per-order chain:
+   * a fill observed a tick after placement can never reach the
+   * server before the placement insert lands. Failures never crash
+   * trading: if the v2 migration is missing we latch that and stop
+   * trying (the order still works in-page; it just won't survive a
+   * refresh — the pre-v2 behavior); other errors are swallowed per
+   * op, and an update for a row the server never got fails as
+   * "order not found" and simply drops. */
+
+  /** Run `op` after every previously queued op for this order. */
+  const enqueueDrOrderOp = (orderId: string, op: () => Promise<void>): void => {
+    if (drOrdersMissingRef.current) return;
+    const chains = drOrderChainsRef.current;
+    const prev = chains.get(orderId) ?? Promise.resolve();
+    const next = prev
+      .then(op)
+      .catch((e) => {
+        if (isDrStorageMissing(e)) drOrdersMissingRef.current = true;
+      });
+    chains.set(orderId, next);
+    // Drop the chain entry once it drains, unless a newer op queued.
+    void next.then(() => {
+      if (chains.get(orderId) === next) chains.delete(orderId);
+    });
+  };
+
+  /** Register a freshly accepted engine order server-side. */
+  const persistDrOrderPlace = (row: DrOrderRow): void => {
+    const info = drInfoRef.current;
+    if (!info) return;
+    enqueueDrOrderOp(row.id, async () => {
+      if (!isSupabaseConfigured()) return;
+      const supabase = createClient();
+      const { error } = await supabase.rpc("dr_place_order", {
+        p_attempt_id: info.attemptId,
+        p_order_id: row.id,
+        p_side: row.side,
+        p_qty: row.qty,
+        p_limit_price: row.limitPrice,
+        p_engine_order_id: row.engineOrderId != null ? String(row.engineOrderId) : null,
+      });
+      if (error) throw error;
+    });
+  };
+
+  /** Persist a batch of tracker-decided status transitions. */
+  const persistDrOrderUpdates = (ops: DrOrderUpdateOp[]): void => {
+    for (const op of ops) {
+      enqueueDrOrderOp(op.orderId, async () => {
+        if (!isSupabaseConfigured()) return;
+        const supabase = createClient();
+        const { error } = await supabase.rpc("dr_update_order", {
+          p_order_id: op.orderId,
+          p_status: op.status,
+          p_filled_qty: op.filledQty,
+        });
+        if (error) throw error;
+      });
+    }
+  };
+
+  /**
+   * Settle every still-tracked order as cancelled (session reset /
+   * attempt completion: the engine extinguished them, so their
+   * server rows must end terminal or a resume would resurrect them).
+   * Used at the reset call sites and at completion; tick-driven
+   * removals are settled by the departure diff in drSyncFills.
+   */
+  const drSettleTrackedOrders = (): void => {
+    const tracker = drOrderTrackerRef.current;
+    if (!tracker || tracker.size === 0) return;
+    const ops: DrOrderUpdateOp[] = tracker.all().map((row) => ({
+      orderId: row.id,
+      status: "cancelled" as const,
+      filledQty: row.filledQty,
+    }));
+    tracker.clear();
+    persistDrOrderUpdates(ops);
+  };
+
+  /**
+   * Observe engine fills centrally (market/limit fills from handlers,
+   * bracket triggers + limit fills from the tick loop) and feed them
+   * to the recorder exactly once each. A shrinking fills array means
+   * the engine was reset — the shadow restarts, history stays.
+   *
+   * The same pass settles persistent orders: fills are collected
+   * first, the order tracker diffs tracked orders against the
+   * engine's current pendingOrders (matching departed orders to this
+   * pass's limit fills), and only then are the fills recorded — so a
+   * limit fill's order_filled event carries its persistent orderUuid.
+   */
+  const drSyncFills = (): void => {
+    const e = engineRef.current;
+    const rec = drRecorderRef.current;
+    if (!e || !rec) return;
+    if (drPhaseRef.current !== "active" && drPhaseRef.current !== "done") return;
+    if (e.fills.length < drSeenFillsRef.current) {
+      drSeenFillsRef.current = 0;
+      rec.resetTradingState();
+    }
+    const newFills: Fill[] = [];
+    while (drSeenFillsRef.current < e.fills.length) {
+      newFills.push(e.fills[drSeenFillsRef.current++]);
+    }
+    let fillOrderId = new Map<Fill, string>();
+    const tracker = drOrderTrackerRef.current;
+    if (tracker && drPhaseRef.current === "active") {
+      const settled = tracker.syncDepartures(
+        new Set(e.pendingOrders.map((o) => o.id)),
+        newFills
+      );
+      fillOrderId = settled.fillOrderId;
+      if (settled.updates.length > 0) persistDrOrderUpdates(settled.updates);
+    }
+    for (const f of newFills) {
+      const wasFlat = rec.positionQty === 0;
+      rec.recordFill({
+        side: f.side,
+        qty: f.qty,
+        price: f.price,
+        candleIndex: f.candleIndex,
+        time: f.time,
+        note: f.note,
+        realizedPnl: f.realizedPnl,
+        orderUuid: fillOrderId.get(f),
+      });
+      if (f.side === "buy" && wasFlat) {
+        // Risk snapshot at first entry, from the levels now in force.
+        const sl = e.stopLoss ?? plannedSL;
+        const tp = e.takeProfit ?? plannedTP;
+        const risk =
+          sl != null ? Math.abs(f.price - sl) * f.qty : null;
+        const rr =
+          sl != null && tp != null && Math.abs(f.price - sl) > 0
+            ? Math.abs(tp - f.price) / Math.abs(f.price - sl)
+            : null;
+        rec.recordRiskSnapshot(
+          {
+            entry: f.price,
+            qty: f.qty,
+            stopLoss: sl,
+            takeProfit: tp,
+            plannedRisk: risk,
+            rewardRisk: rr,
+          },
+          { marketIdx: f.candleIndex, marketTs: f.time }
+        );
+      }
+    }
+  };
+
+  // Fills can appear on any bump (tick batch, step, order) — sync after
+  // every render in which the version advanced.
+  useEffect(() => {
+    drSyncFills();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [version]);
+
   const eng = engineRef.current;
   const daily = snap ? snap.realized + snap.unreal : 0;
+  const isDr = drPhase === "active" || drPhase === "done";
+  // In Daily Replay the chart session key must be stable while the
+  // sealed array grows — the standard key embeds candles.length.
+  const chartSessionKey =
+    isDr && drInfo
+      ? `dr|${drInfo.attemptId}|${timeframe}`
+      : `${meta?.ticker}|${meta?.tradeDate}|${meta?.source}|${candles?.length}|${timeframe}`;
+  // Locked/selected-candle highlight (Daily Replay only). Preview: the
+  // band follows the currently selected starting candle. Active/done:
+  // it is pinned to the attempt's locked starting candle (drInfo
+  // .startIndex into the feed's array — the same index resume restores
+  // from), so it survives pan/zoom, pause/play, and refresh/resume,
+  // and it never moves for the life of the attempt. Purely visual:
+  // the lock, timestamps, and execution are untouched.
+  const drPreviewKey = drPreview
+    ? drDatasetKey(drPreview.meta.ticker, drPreview.meta.tradeDate, drPreview.candles.length)
+    : null;
+  const drPreviewGate =
+    drPreview && drPreviewKey
+      ? premarketWarningGate({
+          premarketAvailable: drPreview.premarketAvailable,
+          datasetKey: drPreviewKey,
+          dismissedKey: drPremarketDismissedKey,
+        })
+      : null;
+  const drPreviewBand = drPreview
+    ? highlightBandFor(drPreview.candles, drPreview.selected)
+    : null;
+  const drActiveBand =
+    isDr && drInfo && candles
+      ? highlightBandFor(candles, drInfo.startIndex)
+      : null;
 
   return (
     <div className="ws">
-      {(!eng || !candles || !meta || !snap) && (
+      {drPhase === "preview" && drPreview && (
+        <div className="ws-welcome" style={{ maxWidth: 1120, margin: "0 auto", width: "100%" }}>
+          <div
+            style={{
+              background: "rgba(251,191,36,0.10)",
+              border: "1px solid rgba(251,191,36,0.45)",
+              borderRadius: 8,
+              padding: "10px 14px",
+              fontWeight: 800,
+              letterSpacing: "0.04em",
+              color: "#fbbf24",
+              fontSize: 14,
+              textAlign: "center",
+            }}
+          >
+            FULL-DAY PREVIEW — FUTURE CANDLES ARE VISIBLE
+          </div>
+          {drPreviewGate?.showWarning && (
+            <div
+              role="alert"
+              style={{
+                display: "flex", alignItems: "flex-start", gap: 10,
+                background: "rgba(251,191,36,0.08)",
+                border: "1px solid rgba(251,191,36,0.45)",
+                borderRadius: 8, padding: "10px 14px", marginTop: 10,
+                fontSize: 13,
+              }}
+            >
+              <span style={{ color: "#fbbf24", fontSize: 15 }}>⚠</span>
+              <div style={{ lineHeight: 1.45, flex: 1 }}>
+                <div style={{ fontWeight: 700, color: "#fbbf24", letterSpacing: "0.02em" }}>
+                  PREMARKET DATA UNAVAILABLE
+                </div>
+                <div style={{ color: "var(--muted)" }}>
+                  Historical premarket data is unavailable for this session. The replay
+                  starts at 9:30 AM ET using verified regular-market data.
+                </div>
+              </div>
+              <button
+                className="btn"
+                onClick={() => setDrPremarketDismissedKey(drPreviewKey)}
+                style={{ flexShrink: 0 }}
+              >
+                Got it
+              </button>
+              <button
+                onClick={() => setDrPremarketDismissedKey(drPreviewKey)}
+                title="Dismiss"
+                aria-label="Dismiss premarket warning"
+                style={{
+                  background: "none", border: "none", color: "var(--muted)",
+                  cursor: "pointer", fontSize: 16, padding: "2px 6px", flexShrink: 0,
+                }}
+              >
+                ×
+              </button>
+            </div>
+          )}
+          <p className="hint" style={{ marginTop: 10 }}>
+            {drPreview.meta.ticker} · {drPreview.meta.tradeDate} · 1-minute candles ·{" "}
+            {drPreview.candles.length} candles loaded. This preview is intentionally
+            unsealed so you can inspect the whole day and choose where to begin —
+            it is <b>not</b> a blind replay, and trading is disabled here. Click a
+            candle on the chart (or set “Replay starts at” before loading) to choose
+            your starting candle, then lock it: from that moment the server releases
+            candles only as you advance.
+          </p>
+          {drPreview.warnings.length > 0 && (
+            <div
+              style={{
+                background: "rgba(251,191,36,0.06)",
+                border: "1px solid rgba(251,191,36,0.25)",
+                borderRadius: 8,
+                padding: "8px 12px",
+                marginBottom: 10,
+                fontSize: 12.5,
+              }}
+            >
+              <b>Data warnings</b> (nothing was filled in or invented):
+              <ul style={{ margin: "6px 0 0 0", paddingLeft: 18 }}>
+                {drPreview.warnings.map((w, i) => (
+                  <li key={i}>{w}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <div className="ws-chart" style={{ position: "relative", height: 440 }}>
+            <LwcChart
+              candles={drPreview.candles}
+              revealedCount={drPreview.candles.length}
+              sessionKey={`dr-preview|${drPreview.meta.ticker}|${drPreview.meta.tradeDate}|${drPreview.candles.length}`}
+              countdown={null}
+              lastPrice={drPreview.candles[drPreview.selected].c}
+              brackets={DR_EMPTY_BRACKETS}
+              fitOnLoad
+              fitAnchorIndex={drPreview.selected}
+              showFitAll
+              highlightTimeSec={drPreviewBand?.timeSec ?? null}
+              highlightSpanSec={drPreviewBand?.spanSec ?? 60}
+              onCandleClick={(timeSec) => {
+                // While the premarket warning is undismissed, candle
+                // selection stays disabled (the chart itself remains
+                // viewable and pannable).
+                if (drPreviewGate?.blockSelection) return;
+                const t = timeSec * 1000;
+                let best = 0;
+                let bestDist = Infinity;
+                drPreview.candles.forEach((c, i) => {
+                  const d = Math.abs(c.t - t);
+                  if (d < bestDist) { bestDist = d; best = i; }
+                });
+                setDrPreview((p) => (p ? { ...p, selected: best } : p));
+              }}
+              onPlannedDrag={() => {}}
+              onActiveDrag={() => {}}
+              drawings={[]}
+              onDrawingsChange={() => {}}
+              drawingTool="select"
+              onDrawingToolChange={() => {}}
+            />
+          </div>
+          {(() => {
+            const sel = drPreview.candles[drPreview.selected];
+            return (
+              <div
+                style={{
+                  display: "flex", flexWrap: "wrap", gap: 14, alignItems: "center",
+                  marginTop: 12, padding: "10px 14px",
+                  background: "rgba(255,255,255,0.03)",
+                  border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8,
+                  fontSize: 13,
+                }}
+              >
+                <span>
+                  <b>Starting candle:</b> {drPreview.meta.tradeDate}{" "}
+                  {formatEtTime(sel.t)} ET (#{drPreview.selected + 1} of{" "}
+                  {drPreview.candles.length})
+                </span>
+                <span className="num">O {sel.o.toFixed(2)}</span>
+                <span className="num">H {sel.h.toFixed(2)}</span>
+                <span className="num">L {sel.l.toFixed(2)}</span>
+                <span className="num">C {sel.c.toFixed(2)}</span>
+                <span className="num">V {sel.v.toLocaleString()}</span>
+              </div>
+            );
+          })()}
+          <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+            <button
+              className="btn primary big"
+              onClick={() => { setDrError(null); setDrConfirm(true); }}
+              disabled={drPreviewGate?.blockSelection ?? false}
+              title={drPreviewGate?.blockSelection ? "Dismiss the premarket warning above to choose a starting candle" : undefined}
+            >
+              Lock Starting Candle
+            </button>
+            <button className="btn big" onClick={startStandardFromPreview}>
+              Start standard replay instead
+            </button>
+            <button className="btn big" onClick={exitDrPreview}>
+              Back to data sources
+            </button>
+          </div>
+          {drError && <div className="err" style={{ marginTop: 10 }}>{drError}</div>}
+          {drConfirm && (
+            <div
+              style={{
+                marginTop: 12, padding: "12px 14px",
+                background: "rgba(16,185,129,0.06)",
+                border: "1px solid rgba(16,185,129,0.35)", borderRadius: 8,
+                fontSize: 13.5,
+              }}
+            >
+              <b>Start Daily Replay?</b>
+              <div style={{ margin: "8px 0", lineHeight: 1.7 }}>
+                <div>Ticker: <b>{drPreview.meta.ticker}</b></div>
+                <div>Date: <b>{drPreview.meta.tradeDate}</b></div>
+                <div>Timeframe: <b>1 minute</b></div>
+                <div>
+                  Starting candle:{" "}
+                  <b>
+                    {drPreview.meta.tradeDate}{" "}
+                    {formatEtTime(drPreview.candles[drPreview.selected].t)} ET
+                  </b>
+                </div>
+                <div>
+                  Starting balance: <b>{formatMoney(DAILY_REPLAY_STARTING_BALANCE)}</b>{" "}
+                  (separate Daily Replay account — your Trade Lab balance is untouched)
+                </div>
+                <div style={{ color: "var(--muted)" }}>
+                  Once locked, the starting point cannot be changed for this attempt,
+                  and candles after it stay sealed on the server until you reach them.
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="btn primary" onClick={confirmDrLock} disabled={drBusy}>
+                  {drBusy ? "Locking…" : "Confirm — start Daily Replay"}
+                </button>
+                <button className="btn" onClick={() => setDrConfirm(false)} disabled={drBusy}>
+                  Back
+                </button>
+              </div>
+              {drError && <div className="err" style={{ marginTop: 8 }}>{drError}</div>}
+            </div>
+          )}
+        </div>
+      )}
+
+      {drPhase !== "preview" && (!eng || !candles || !meta || !snap) && (
         <div className="ws-welcome">
           {loadingSession && <div className="hint">Loading saved session…</div>}
-          <DataSourcePanel candles={candles} meta={meta} onLoad={handleLoad} />
+          {drResume && (
+            <div
+              style={{
+                display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center",
+                padding: "10px 12px", marginBottom: 12,
+                background: "rgba(16,185,129,0.08)",
+                border: "1px solid rgba(16,185,129,0.35)", borderRadius: 8,
+                fontSize: 13,
+              }}
+            >
+              <b style={{ color: "var(--emerald-bright)", letterSpacing: "0.04em" }}>
+                RESUME DAILY REPLAY
+              </b>
+              <span>
+                {drResume.ticker} · {drResume.tradeDate} — candle{" "}
+                {drResume.position + 1} of {drResume.total}. Your starting
+                candle stays locked; position, trades, and timeline are
+                restored from the server.
+              </span>
+              <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+                <button
+                  className="btn primary"
+                  onClick={() => { void resumeDailyReplay(); }}
+                  disabled={drResuming}
+                >
+                  {drResuming ? "Resuming…" : "Resume"}
+                </button>
+                <button
+                  className="btn"
+                  onClick={() => setDrResume(null)}
+                  disabled={drResuming}
+                >
+                  Not now
+                </button>
+              </span>
+            </div>
+          )}
+          {drError && (
+            <div className="err" style={{ marginBottom: 12 }}>
+              {drError}{" "}
+              <button className="btn" onClick={() => setDrError(null)}>Dismiss</button>
+            </div>
+          )}
+          <DataSourcePanel candles={candles} meta={meta} onLoad={handleLoad} onPreview={handleDrPreview} />
           {saveMsg && <div className="err" style={{ marginTop: 12 }}>{saveMsg}</div>}
         </div>
       )}
 
       {eng && candles && meta && snap && (
         <>
+          {/* Daily Replay status banner */}
+          {isDr && drInfo && (
+            <div
+              style={{
+                display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center",
+                padding: "8px 12px", marginBottom: 8,
+                background: "rgba(16,185,129,0.08)",
+                border: "1px solid rgba(16,185,129,0.35)", borderRadius: 8,
+                fontSize: 12.5,
+              }}
+            >
+              <b style={{ color: "var(--emerald-bright)", letterSpacing: "0.04em" }}>
+                {drPhase === "done" ? "DAILY REPLAY COMPLETE" : "DAILY REPLAY ACTIVE"}
+              </b>
+              <span>
+                {drInfo.ticker} · {drInfo.tradeDate} · started{" "}
+                {formatEtTime(eng.candles[drInfo.startIndex]?.t ?? 0)} ET
+              </span>
+              <span>
+                Candle {Math.min(eng.index + 1, drInfo.total)} of {drInfo.total}
+                {eng.candles[eng.index] ? ` · ${formatEtTime(eng.candles[eng.index].t)} ET` : ""}
+              </span>
+              <span title="Daily Replay uses its own $100,000 account — the Trade Lab balance is not touched">
+                DR balance: cash {formatMoney(snap.cash)} · equity {formatMoney(snap.equity)}
+              </span>
+              {drBuffering && <span style={{ color: "#fbbf24" }}>Loading next candles…</span>}
+              {drFeedRef.current?.lastError && (
+                <span style={{ color: "#fbbf24" }}>{drFeedRef.current.lastError}</span>
+              )}
+              <button className="btn" style={{ marginLeft: "auto" }} onClick={exitDailyReplay}>
+                Exit Daily Replay
+              </button>
+            </div>
+          )}
+          {isDr && drError && (
+            <div className="err" style={{ marginBottom: 8 }}>
+              {drError}{" "}
+              <button className="btn" onClick={() => setDrError(null)}>Dismiss</button>
+            </div>
+          )}
+          {drPhase === "done" && drFinal && (
+            <div
+              style={{
+                padding: "12px 14px", marginBottom: 8,
+                background: "rgba(16,185,129,0.06)",
+                border: "1px solid rgba(16,185,129,0.3)", borderRadius: 8,
+                fontSize: 13.5, lineHeight: 1.6,
+              }}
+            >
+              <b>Daily Replay complete</b> — {drInfo?.ticker} {drInfo?.tradeDate}. Final
+              realized P&amp;L{" "}
+              <b className={drFinal.realized >= 0 ? "pos" : "neg"}>
+                {formatSigned(drFinal.realized)}
+              </b>{" "}
+              · final equity <b>{formatMoney(drFinal.equity)}</b>.
+              {drSaveMsg && <div>{drSaveMsg}</div>}
+              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                <a className="btn" href="/sessions" style={{ textDecoration: "none" }}>
+                  My Sessions
+                </a>
+                <button className="btn primary" onClick={exitDailyReplay}>
+                  New session
+                </button>
+              </div>
+            </div>
+          )}
           {/* top strip: instrument + price + actions */}
           <div className="ws-top">
             <div className="ws-sym">
@@ -833,7 +2377,10 @@ function ReplayPageInner() {
               <span className="hod-line">HOD <b className="num">{formatMoney(eng.hod)}</b></span>
             </div>
             <div className="ws-top-actions">
-              {/* Persistent account balance */}
+              {/* Persistent account balance — hidden in Daily Replay,
+                  whose balance is separate (see the DR banner). */}
+              {!isDr && (
+              <>
               <span
                 title="Account balance — carries P&L across sessions. Click ↺ to reset to $100,000."
                 style={{ fontSize: 12, color: "var(--muted)", display: "flex", alignItems: "center", gap: 6 }}
@@ -856,7 +2403,10 @@ function ReplayPageInner() {
                   <span className="err" style={{ fontSize: 12 }}>{saveMsg}</span>
                 )
               )}
+              </>
+              )}
               <button className="btn" onClick={() => setDataOpen((v) => !v)}>Data</button>
+              {!isDr && (
               <label
                 title="Auto-save session for signed-in users (saves after each closed trade)"
                 style={{ fontSize: 12, color: "var(--muted)", display: "flex", alignItems: "center", gap: 4, cursor: "pointer", userSelect: "none" }}
@@ -869,9 +2419,12 @@ function ReplayPageInner() {
                 />
                 Auto-save
               </label>
+              )}
+              {!isDr && (
               <button className="btn primary" onClick={() => saveSession(false)} disabled={saving}>
                 {saving ? "Saving…" : "Save"}
               </button>
+              )}
             </div>
           </div>
 
@@ -881,18 +2434,29 @@ function ReplayPageInner() {
               <ReplayControls
                 compact
                 playing={playing}
-                canPlay={!eng.atEnd}
+                canPlay={isDr ? drPhase === "active" : !eng.atEnd}
                 ended={ended}
-                onPlay={() => { setEnded(false); setPlayNonce((n) => n + 1); setPlaying(true); }}
-                onPause={stopTimer}
-                onNext={() => { eng.step(); setEnded(eng.atEnd); bump(); }}
-                onReset={() => { const wasPlaying = playing; stopTimer(); setEnded(false); eng.reset(); bump(); if (wasPlaying) { setPlayNonce((n) => n + 1); setPlaying(true); } }}
-                onRestart={() => { stopTimer(); setEnded(false); eng.reset(); bump(); setPlayNonce((n) => n + 1); setPlaying(true); }}
+                onPlay={() => {
+                  setEnded(false); setPlayNonce((n) => n + 1); setPlaying(true);
+                  const rec = drRec();
+                  if (rec) {
+                    if (!drPlayStartedRef.current) {
+                      drPlayStartedRef.current = true;
+                      rec.record("session_started", {}, drCtx());
+                    } else {
+                      rec.record("session_resumed", {}, drCtx());
+                    }
+                  }
+                }}
+                onPause={() => { stopTimer(); drRec()?.record("session_paused", {}, drCtx()); }}
+                onNext={isDr ? () => { void drStepNext(); } : () => { eng.step(); setEnded(eng.atEnd); bump(); }}
+                onReset={() => { const wasPlaying = playing; stopTimer(); setEnded(false); drSyncFills(); drSettleTrackedOrders(); eng.reset(); drRec()?.record("session_reset", {}, drCtx()); bump(); if (wasPlaying) { setPlayNonce((n) => n + 1); setPlaying(true); } }}
+                onRestart={() => { stopTimer(); setEnded(false); drSyncFills(); drSettleTrackedOrders(); eng.reset(); drRec()?.record("session_reset", {}, drCtx()); bump(); setPlayNonce((n) => n + 1); setPlaying(true); }}
                 speed={speed}
                 onSpeed={setSpeed}
                 index={eng.index}
-                total={candles.length}
-                progress={(eng.index + eng.formationProgress + 1) / Math.max(1, candles.length)}
+                total={isDr && drInfo ? drInfo.total : candles.length}
+                progress={(eng.index + eng.formationProgress + 1) / Math.max(1, isDr && drInfo ? drInfo.total : candles.length)}
               />
               <div className="ws-chart" style={{ position: "relative" }}>
                 {/* Timeframe selector — display only, never touches engine state.
@@ -925,8 +2489,14 @@ function ReplayPageInner() {
                     </button>
                   ))}
                 </div>
-                {/* Honest premarket notice — shown only when verified premarket data is unavailable */}
-                {meta?.premarketUnavailable && !premarketNoticeDismissed && (
+                {/* Honest premarket notice — shown only when verified premarket data is unavailable.
+                    Standard-replay surface only: Daily Replay attempts (active/done, incl.
+                    resumed) never render it — the preview gate already informed the user. */}
+                {premarketOverlayVisible({
+                  phase: drPhase,
+                  premarketUnavailable: meta?.premarketUnavailable ?? false,
+                  dismissed: premarketNoticeDismissed,
+                }) && (
                   <div
                     style={{
                       position: "absolute",
@@ -977,7 +2547,7 @@ function ReplayPageInner() {
                   candles={chartCandles ?? eng.displayCandles}
                   revealedCount={(chartCandles ?? eng.displayCandles).length}
                   historyCount={meta.startIndex}
-                  sessionKey={`${meta.ticker}|${meta.tradeDate}|${meta.source}|${candles.length}|${timeframe}`}
+                  sessionKey={chartSessionKey}
                   overlays={{
                     hod: eng.hod,
                     stopLoss: eng.stopLoss,
@@ -992,14 +2562,18 @@ function ReplayPageInner() {
                   <LwcChart
                     candles={chartCandles ?? eng.displayCandles}
                     revealedCount={(chartCandles ?? eng.displayCandles).length}
-                    sessionKey={`${meta.ticker}|${meta.tradeDate}|${meta.source}|${candles.length}|${timeframe}`}
+                    sessionKey={chartSessionKey}
                     countdown={tfCountdown}
                     lastPrice={snap.price}
                     brackets={brackets}
-                    onPlannedDrag={(sl, tp) => { setPlannedLevels(sl, tp); }}
+                    showFitAll={isDr}
+                    stableScale={isDr}
+                    highlightTimeSec={isDr ? (drActiveBand?.timeSec ?? null) : undefined}
+                    highlightSpanSec={drActiveBand?.spanSec ?? 60}
+                    onPlannedDrag={(sl, tp) => { setPlannedLevels(sl, tp); drBracketsChanged(sl, tp, "drag", "planned"); }}
                     onActiveDrag={(sl, tp) => {
                       const e = engineRef.current;
-                      if (e) { e.setBrackets(sl, tp); bump(); }
+                      if (e) { e.setBrackets(sl, tp); drBracketsChanged(sl, tp, "drag", "active"); bump(); }
                     }}
                     drawings={drawings}
                     onDrawingsChange={setDrawings}
@@ -1113,7 +2687,32 @@ function ReplayPageInner() {
                 onBuy={gateBuy}
                 onSell={sellErr}
                 onPlaceLimit={placeLimitErr}
-                onCancelOrder={(id) => { eng.cancelOrder(id); bump(); }}
+                onCancelOrder={(id) => {
+                  const o = eng.pendingOrders.find((x) => x.id === id);
+                  if (eng.cancelOrder(id) && o) {
+                    // Daily Replay: settle the persistent row in the
+                    // same action — the tracker hands back the row so
+                    // the departure diff never sees (or double-settles)
+                    // this cancel.
+                    const row = drOrderTrackerRef.current?.take(id);
+                    if (row) {
+                      persistDrOrderUpdates([
+                        { orderId: row.id, status: "cancelled", filledQty: row.filledQty },
+                      ]);
+                    }
+                    drRec()?.recordOrderCancelled(
+                      {
+                        orderId: id,
+                        side: o.side,
+                        qty: o.qty,
+                        limitPrice: o.limitPrice,
+                        orderUuid: row?.id,
+                      },
+                      drCtx()
+                    );
+                  }
+                  bump();
+                }}
                 onSetBrackets={(sl, tp) => {
                   const eng = engineRef.current;
                   if (!eng) return;
@@ -1123,9 +2722,11 @@ function ReplayPageInner() {
                   if (eng.positionQty > 0) {
                     // Position open: active brackets on the engine.
                     eng.setBrackets(nSL, nTP);
+                    drBracketsChanged(nSL, nTP, "control", "active");
                   } else {
                     // Flat: planned levels only (dashed, no engine effect).
                     setPlannedLevels(nSL, nTP);
+                    drBracketsChanged(nSL, nTP, "control", "planned");
                   }
                   bump();
                 }}
@@ -1146,13 +2747,21 @@ function ReplayPageInner() {
                 positionQty={eng.positionQty}
                 positionRealized={positionRealized}
                 unrealizedPnl={snap.unreal}
-                onPlannedChange={(sl, tp) => { setPlannedLevels(sl != null ? normalizePrice(sl) : null, tp != null ? normalizePrice(tp) : null); }}
+                onPlannedChange={(sl, tp) => {
+                  const nSL = sl != null ? normalizePrice(sl) : null;
+                  const nTP = tp != null ? normalizePrice(tp) : null;
+                  setPlannedLevels(nSL, nTP);
+                  drBracketsChanged(nSL, nTP, "control", "planned");
+                }}
                 onActiveChange={(sl, tp) => {
                   const e = engineRef.current;
-                  if (e) { e.setBrackets(sl != null ? normalizePrice(sl) : null, tp != null ? normalizePrice(tp) : null); bump(); }
+                  const nSL = sl != null ? normalizePrice(sl) : null;
+                  const nTP = tp != null ? normalizePrice(tp) : null;
+                  if (e) { e.setBrackets(nSL, nTP); drBracketsChanged(nSL, nTP, "control", "active"); bump(); }
                 }}
                 onApplyBrackets={(sl, tp) => {
                   setPlannedLevels(sl, tp);
+                  drBracketsChanged(sl, tp, "control", "planned");
                   bump();
                 }}
                 onBuySized={gateBuy}
@@ -1179,6 +2788,45 @@ function ReplayPageInner() {
             </aside>
           </div>
 
+          {/* Daily Replay — Decision Timeline (review) */}
+          {isDr && (
+            <details
+              open={drPhase === "done"}
+              style={{
+                marginTop: 10, padding: "8px 12px",
+                background: "rgba(255,255,255,0.02)",
+                border: "1px solid rgba(255,255,255,0.07)", borderRadius: 8,
+              }}
+            >
+              <summary style={{ cursor: "pointer", fontWeight: 700, fontSize: 13 }}>
+                Decision Timeline ({drEvents.length} events)
+                {drEventsMissingRef.current && (
+                  <span style={{ color: "var(--muted)", fontWeight: 400, fontSize: 12 }}>
+                    {" "}— on this device until Daily Replay storage is enabled
+                  </span>
+                )}
+              </summary>
+              {drHistoryNote && (
+                <div style={{ marginTop: 8, color: "#fbbf24", fontSize: 12.5 }}>
+                  {drHistoryNote}
+                </div>
+              )}
+              <div style={{ marginTop: 8, maxHeight: 260, overflowY: "auto", fontSize: 12.5, lineHeight: 1.9 }}>
+                {drEvents.map((e) => (
+                  <div key={e.seq} style={{ display: "flex", gap: 8 }}>
+                    <span style={{ color: "var(--muted)", whiteSpace: "nowrap" }}>
+                      {formatDrClock(e.marketTs ?? e.wallTs)}
+                    </span>
+                    <span>{describeDrEvent(e)}</span>
+                  </div>
+                ))}
+                {drEvents.length === 0 && (
+                  <div className="hint">No events recorded yet.</div>
+                )}
+              </div>
+            </details>
+          )}
+
           {/* Guest daily limit modal */}
           {showGuestModal && (
             <GuestLimitModal
@@ -1194,7 +2842,7 @@ function ReplayPageInner() {
           {dataOpen && (
             <div className="ws-data-pop" role="dialog" aria-label="Data source">
               <button className="mini-x ws-data-x" onClick={() => setDataOpen(false)} title="Close">✕</button>
-              <DataSourcePanel candles={candles} meta={meta} onLoad={handleLoad} />
+              <DataSourcePanel candles={candles} meta={meta} onLoad={handleLoad} onPreview={handleDrPreview} />
             </div>
           )}
           {searchParams.get("diag") === "1" && eng && (

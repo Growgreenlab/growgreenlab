@@ -5,6 +5,7 @@ import type { Candle, DataSource, SessionMeta } from "../lib/types";
 import { generateSampleSession, stripSynthetic } from "../lib/marketData";
 import { fetchTwelveData } from "../lib/marketData.twelve";
 import { parseCsv, candlesToCsv } from "../lib/marketData.csv";
+import { validateDataset, marketSessionStatus } from "../lib/dailyReplay";
 
 interface Props {
   candles: Candle[] | null;
@@ -12,13 +13,23 @@ interface Props {
   defaultTicker?: string;
   defaultDate?: string;
   onLoad: (candles: Candle[], meta: SessionMeta) => void;
+  /**
+   * Daily Replay: when provided, a successful Real Market Data load is
+   * validated and handed to the full-day PREVIEW (with validation
+   * warnings) instead of starting a replay immediately. Sample and CSV
+   * loads are unaffected and always use onLoad.
+   */
+  onPreview?: (candles: Candle[], meta: SessionMeta, warnings: string[]) => void;
 }
+
+/** Quick-select symbols for the Daily Replay workflow (manual entry stays). */
+const QUICK_TICKERS = ["AAPL", "TSLA", "NVDA"];
 
 function todayStr(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-export default function DataSourcePanel({ candles, meta, defaultTicker, defaultDate, onLoad }: Props) {
+export default function DataSourcePanel({ candles, meta, defaultTicker, defaultDate, onLoad, onPreview }: Props) {
   const [tab, setTab] = useState<DataSource>("sample");
   const [ticker, setTicker] = useState(defaultTicker ?? "VEEA");
   const [date, setDate] = useState(defaultDate ?? todayStr());
@@ -53,7 +64,18 @@ export default function DataSourcePanel({ candles, meta, defaultTicker, defaultD
   };
 
   const loadTwelve = async () => {
-    setError(null); setLoading(true);
+    setError(null);
+    // Daily Replay Step A: refuse non-trading dates up front, with the
+    // reason — never call the API and never substitute another date.
+    const session = marketSessionStatus(date);
+    if (!session.isTradingDay) {
+      setError(
+        `${date} is a ${session.reason} — the US market is closed, so there is no session to load. ` +
+        "No substitute date was used; please pick a trading day."
+      );
+      return;
+    }
+    setLoading(true);
     try {
       const real = await fetchTwelveData(ticker, date, apiKey);
       // No synthetic premarket: use verified historical candles only.
@@ -64,13 +86,29 @@ export default function DataSourcePanel({ candles, meta, defaultTicker, defaultD
       const firstMins = (() => { const d = new Date(firstEt); return d.getHours() * 60 + d.getMinutes(); })();
       const hasPremarket = firstMins < 9 * 60 + 29;
       const si = Math.max(timeToIndex(cs, startTime), 0);
-      onLoad(cs, {
+      const m: SessionMeta = {
         ticker: ticker.toUpperCase().trim(),
         tradeDate: date,
         source: "twelvedata",
         startIndex: si,
         premarketUnavailable: !hasPremarket,
+      };
+      // Validate the returned dataset before anything proceeds.
+      const v = validateDataset(cs, {
+        ticker: m.ticker,
+        tradeDate: date,
+        timeframeMinutes: 1,
       });
+      if (!v.ok) {
+        setError(`This dataset failed validation and was not loaded: ${v.errors.join(" ")}`);
+        return;
+      }
+      if (onPreview) {
+        // Daily Replay Step B: full-day preview (intentionally unsealed).
+        onPreview(cs, m, v.warnings);
+      } else {
+        onLoad(cs, m);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Twelve Data request failed.");
     } finally {
@@ -114,6 +152,24 @@ export default function DataSourcePanel({ candles, meta, defaultTicker, defaultD
         <div className="field" style={{ marginBottom: 0 }}>
           <label>Ticker symbol</label>
           <input className="input mono" value={ticker} onChange={(e) => setTicker(e.target.value.toUpperCase())} placeholder="VEEA" maxLength={12} />
+          <div style={{ display: "flex", gap: 4, marginTop: 4 }}>
+            {QUICK_TICKERS.map((q) => (
+              <button
+                key={q}
+                type="button"
+                onClick={() => setTicker(q)}
+                title={`Quick-select ${q} (Daily Replay)`}
+                style={{
+                  padding: "2px 8px", fontSize: 11, fontWeight: 700, borderRadius: 999,
+                  border: "1px solid rgba(255,255,255,0.14)", cursor: "pointer",
+                  background: ticker === q ? "var(--emerald, #10b981)" : "rgba(255,255,255,0.04)",
+                  color: ticker === q ? "#0a0e14" : "var(--muted)",
+                }}
+              >
+                {q}
+              </button>
+            ))}
+          </div>
         </div>
         <div className="field" style={{ marginBottom: 0 }}>
           <label>Trading date</label>
