@@ -482,11 +482,25 @@ function ReplayPageInner() {
       }
       if (ran > 0) bump();
       if (finished) {
-        done = true;
-        if (timerRef.current) clearInterval(timerRef.current);
-        timerRef.current = null;
-        setPlaying(false);
-        setEnded(true);
+        // Daily Replay: finalizing the last HELD candle is a
+        // buffering state, not the end (see the ended-effect below).
+        // The engine's atEnd fires in this same tick, before any
+        // interval pass could observe it and release the next candle
+        // — so stopping here would halt playback after every candle.
+        // Keep the timer alive instead: the next pass takes the
+        // Daily Replay branch above, releases exactly one candle via
+        // ensure(), and ticking resumes. A finished feed (or any
+        // standard session) still ends playback exactly as before.
+        const feedNow = drFeedRef.current;
+        const drBuffering =
+          drPhaseRef.current === "active" && feedNow !== null && !feedNow.finished;
+        if (!drBuffering) {
+          done = true;
+          if (timerRef.current) clearInterval(timerRef.current);
+          timerRef.current = null;
+          setPlaying(false);
+          setEnded(true);
+        }
       }
     }, 50);
     timerRef.current = id;
@@ -2553,6 +2567,7 @@ function ReplayPageInner() {
                     lastPrice={snap.price}
                     brackets={brackets}
                     showFitAll={isDr}
+                    stableScale={isDr}
                     highlightTimeSec={isDr ? (drActiveBand?.timeSec ?? null) : undefined}
                     highlightSpanSec={drActiveBand?.spanSec ?? 60}
                     onPlannedDrag={(sl, tp) => { setPlannedLevels(sl, tp); drBracketsChanged(sl, tp, "drag", "planned"); }}

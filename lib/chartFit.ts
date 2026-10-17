@@ -95,3 +95,75 @@ export function readableWindow(input: ReadableWindowInput): LogicalRange | null 
   );
   return { from: start, to: start + count - 1 };
 }
+
+/* ---------- Managed price range (Daily Replay playback stability) ----------
+ * During tick-by-tick playback, lightweight-charts' autoscale re-derives
+ * the price range from the visible bars on EVERY update — including the
+ * still-forming candle's evolving extremes — and re-chooses its axis
+ * tick set as the range breathes. On a phone that reads as the whole
+ * chart shaking: finalized candles jump vertically in small steps, and
+ * because the price axis width is recomputed from live label text, the
+ * plot width changes too, re-deriving the visible time range and
+ * sliding every candle horizontally (measured: plot width oscillating
+ * 280–296px and a fixed candle drifting 16px inside ONE forming candle).
+ *
+ * The helpers below implement the managed alternative used when a
+ * parent opts in (Daily Replay only): the price window is computed
+ * once per candle from the VISIBLE FINALIZED extremes (exactly the
+ * autoscale margins above, applied manually), and within a candle it
+ * may only WIDEN — monotonically, and only when price genuinely exits
+ * the window — so nothing ever clips and nothing oscillates. No future
+ * data is used: every input is a bar already pushed to the chart. */
+
+export interface PriceRange {
+  from: number;
+  to: number;
+}
+
+/** Padded price window for data extremes [lo, hi]: the data occupies
+ *  the middle (1 - top - bottom) of the window, mirroring what
+ *  autoscale + CANDLE_SCALE_MARGINS would produce for the same data. */
+export function paddedPriceRange(lo: number, hi: number): PriceRange {
+  const { top, bottom } = CANDLE_SCALE_MARGINS;
+  let span = hi - lo;
+  if (!Number.isFinite(span) || span <= 0) {
+    span = Math.max(Math.abs(hi) * 0.002, 0.01);
+    lo = hi - span / 2;
+    hi = lo + span;
+  }
+  const total = span / (1 - top - bottom);
+  return { from: lo - total * bottom, to: hi + total * top };
+}
+
+/** Widen `range` just enough that [lo, hi] sits inside its
+ *  margin-free zone (the same proportions paddedPriceRange applies).
+ *  Monotone: the result never narrows the input range, and it equals
+ *  the input when [lo, hi] is already comfortably inside — so calling
+ *  it on every tick is a no-op until price genuinely exits. */
+export function expandPriceRange(range: PriceRange, lo: number, hi: number): PriceRange {
+  const { top, bottom } = CANDLE_SCALE_MARGINS;
+  let { from, to } = range;
+  const total = to - from;
+  if (!Number.isFinite(total) || total <= 0) return paddedPriceRange(lo, hi);
+  // Data zone: prices render inside [from + total*bottom, to - total*top].
+  if (hi > to - total * top) {
+    // Expand upward only, `from` fixed: solve hi == newTo - newTotal*top.
+    const newTotal = (hi - from) / (1 - top);
+    to = from + newTotal;
+  }
+  const total2 = to - from;
+  if (lo < from + total2 * bottom) {
+    // Expand downward only, `to` fixed: solve lo == newFrom + newTotal*bottom.
+    const newTotal = (to - lo) / (1 - bottom);
+    from = to - newTotal;
+  }
+  return { from, to };
+}
+
+/** Epsilon comparison for price ranges (ownership detection: did the
+ *  range move since the manager last set it, beyond float noise?). */
+export function priceRangesClose(a: PriceRange, b: PriceRange): boolean {
+  const span = Math.max(1, Math.abs(a.to - a.from), Math.abs(b.to - b.from));
+  const eps = span * 1e-9;
+  return Math.abs(a.from - b.from) <= eps && Math.abs(a.to - b.to) <= eps;
+}

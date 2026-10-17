@@ -27,11 +27,15 @@ import {
 } from "lightweight-charts";
 import type { CanvasRenderingTarget2D } from "fancy-canvas";
 import type { Candle } from "../lib/types";
-import { planBarPush, type BarPushState } from "../lib/chartPush";
+import { planBarPush, type BarPushState, type BarPushPlan } from "../lib/chartPush";
 import {
   CANDLE_SCALE_MARGINS,
   VOLUME_SCALE_MARGINS,
   readableWindow,
+  paddedPriceRange,
+  expandPriceRange,
+  priceRangesClose,
+  type PriceRange,
 } from "../lib/chartFit";
 import { resolveHighlightBar, type HighlightDisplayBar } from "../lib/dailyReplay";
 import { diag } from "../lib/diag";
@@ -262,6 +266,34 @@ interface Props {
    *  tap — the way back from the readable window or any zoom.
    *  Omit = no control (drills, standard Trade Lab). */
   showFitAll?: boolean;
+  /** Optional (Daily Replay active/done only): viewport stability
+   *  during tick-by-tick playback. Library autoscale re-derives the
+   *  price range from the visible bars on every tick — including the
+   *  forming candle's evolving extremes — and the price axis width is
+   *  recomputed from live label text; together they made finalized
+   *  candles jump vertically and slide horizontally mid-candle on
+   *  phones (the chart "shake"). With this on:
+   *   - candle-scale autoscale is OFF; the price window is managed
+   *     (lib/chartFit): recomputed once per candle from the visible
+   *     finalized extremes with the usual margins, and within a
+   *     candle it may only WIDEN — monotonically, only when price
+   *     genuinely exits it — so price never clips and never jitters;
+   *   - the volume overlay scale's axis is hidden AND its series'
+   *     last-value tag is switched off (the tag renders on the axis
+   *     even with the scale hidden, and its text grows from "0" to
+   *     e.g. "18.47K" as the forming candle's volume accumulates —
+   *     the axis widened to fit it mid-candle; the volume bars
+   *     still render in their strip);
+   *   - the price axis gets a minimum width just above its measured
+   *     width at the first managed push, so residual label-width
+   *     variance can't resize the plot and re-derive the visible
+   *     time range mid-candle;
+   *   - a manual axis drag takes ownership of the range: the manager
+   *     then only widens on genuine exits until the next full load
+   *     or Fit-all tap.
+   *  Omit/false = library autoscale exactly as before (drills,
+   *  standard Trade Lab, the Daily Replay preview). */
+  stableScale?: boolean;
   /** Optional: notified with the clicked candle's time (seconds) on chart
    *  click. Used by Daily Replay's full-day preview to pick the starting
    *  candle. Omit = no behavior (all existing parents). */
@@ -284,7 +316,7 @@ interface Props {
   onDrawingToolChange: (tool: DrawingTool) => void;
 }
 
-export default function LwcChart({ candles, revealedCount, sessionKey, countdown, lastPrice, brackets, referenceLevels, fitOnLoad, fitAnchorIndex, showFitAll, onCandleClick, highlightTimeSec, highlightSpanSec, onPlannedDrag, onActiveDrag, drawings, onDrawingsChange, drawingTool, onDrawingToolChange }: Props) {
+export default function LwcChart({ candles, revealedCount, sessionKey, countdown, lastPrice, brackets, referenceLevels, fitOnLoad, fitAnchorIndex, showFitAll, stableScale, onCandleClick, highlightTimeSec, highlightSpanSec, onPlannedDrag, onActiveDrag, drawings, onDrawingsChange, drawingTool, onDrawingToolChange }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const elRef = useRef<HTMLDivElement>(null);
   const countdownRef = useRef<HTMLDivElement>(null);
@@ -311,6 +343,27 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
   // time only — a ref keeps later selection changes from re-windowing).
   const fitAnchorIndexRef = useRef(fitAnchorIndex);
   fitAnchorIndexRef.current = fitAnchorIndex;
+  // Stable-scale (Daily Replay) state: read through refs inside the
+  // data-push effect (which re-runs on every parent bump) so the
+  // manager never depends on effect ordering or stale closures.
+  const stableScaleRef = useRef(stableScale);
+  stableScaleRef.current = stableScale;
+  const revealedCountRef = useRef(revealedCount);
+  revealedCountRef.current = revealedCount;
+  // The last price window the manager itself set (null = not managing
+  // yet / just reset). Compared against the live range on each candle
+  // boundary: a mismatch means the user dragged the axis and owns the
+  // range until the next full load or Fit-all tap.
+  const scaleWinRef = useRef<{ lastSet: PriceRange | null }>({ lastSet: null });
+  // Whether the price-axis minimum-width floor has been applied for
+  // this stable-scale activation (applied at the first managed push,
+  // when the axis has real labels to measure — at activation time the
+  // scale may still report width 0).
+  const axisFloorRef = useRef(false);
+  // Whether stable-scale mode has ever been entered on this mount —
+  // keeps the activation effect a literal no-op for parents that
+  // never opt in (drills, standard Trade Lab, DR preview).
+  const stableActiveRef = useRef(false);
   // Drawing state.
   const [selectedDrawingId, setSelectedDrawingId] = useState<string | null>(null);
   const drawingsRef = useRef(drawings);
@@ -516,6 +569,45 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     };
   }, []);
 
+  // Stable-scale activation (Daily Replay only; see the prop docs).
+  // Runs after creation (declaration order) and whenever the parent
+  // toggles the mode: entering takes the candle scale off autoscale,
+  // hides the volume scale's axis labels, and floors the price axis
+  // width just above its current width; leaving restores the library
+  // defaults exactly, so a shared mount never leaks the mode into a
+  // standard session or the drills.
+  useEffect(() => {
+    const chart = chartRef.current;
+    const cs = candleSeriesRef.current;
+    const vs = volumeSeriesRef.current;
+    if (!chart || !cs) return;
+    // Parents that never opt in must see literally zero calls: the
+    // restore branch runs only if this mount was previously active.
+    if (!stableScale && !stableActiveRef.current) return;
+    if (stableScale) {
+      stableActiveRef.current = true;
+      cs.priceScale().setAutoScale(false);
+      chart.priceScale("").applyOptions({ visible: false });
+      // The volume series' last-value tag renders on the shared axis
+      // even with its scale hidden, and its text grows from "0" to
+      // e.g. "18.47K" as the forming candle's volume accumulates —
+      // the axis widened to fit it mid-candle, resizing the plot and
+      // sliding every candle (measured). Kill the tag in this mode;
+      // the volume bars themselves still render.
+      if (vs) vs.applyOptions({ lastValueVisible: false });
+      scaleWinRef.current.lastSet = null;
+      axisFloorRef.current = false;
+    } else {
+      stableActiveRef.current = false;
+      cs.priceScale().setAutoScale(true);
+      chart.priceScale("").applyOptions({ visible: true });
+      if (vs) vs.applyOptions({ lastValueVisible: true });
+      cs.priceScale().applyOptions({ minimumWidth: 0 });
+      scaleWinRef.current.lastSet = null;
+      axisFloorRef.current = false;
+    }
+  }, [stableScale]);
+
   // Sync bracket price lines (planned = dashed gray, active = solid red/green).
   // Depends on individual values, not the brackets object identity, so the
   // 50ms re-render cycle doesn't re-apply unchanged lines.
@@ -610,12 +702,14 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       color: c.c >= c.o ? UP_VOL : DOWN_VOL,
     });
 
+    let plan: BarPushPlan = null;
+    const prevPushed = pushedRef.current;
     try {
       // Push planning lives in lib/chartPush (pure + unit-tested). The key
       // property: when the array grows, the previously-last bar is re-pushed
       // FIRST — it was the forming candle and may have finalized mid-batch,
       // so without this its partial forming OHLCV would stay on the chart.
-      const plan = planBarPush(pushedRef.current, sessionKey, n);
+      plan = planBarPush(pushedRef.current, sessionKey, n);
       if (plan?.mode === "full") {
         // New session, reset, or dataset shrank: full replace.
         const bars = [];
@@ -678,6 +772,86 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       }
     } catch (e) {
       diag.errors.push(e instanceof Error ? e.message : String(e));
+    }
+
+    // Stable-scale management (Daily Replay only; see the prop docs).
+    // Runs after the push, on the same effect cycle, so the window is
+    // set before the browser paints the new bar: full loads and candle
+    // boundaries recompute the window from the VISIBLE FINALIZED
+    // extremes (plus the forming bar's already-printed extremes);
+    // intra-candle updates only widen it on a genuine exit. A live
+    // range that no longer matches what the manager last set means
+    // the user dragged the axis — they own it, and the manager limits
+    // itself to anti-clip widening until the next recompute trigger.
+    if (stableScaleRef.current && chartRef.current && plan) {
+      try {
+        const ps = cs.priceScale();
+        // Floor the axis width once, now that real labels exist:
+        // any residual label-width variance then can't resize the
+        // plot (and re-derive the visible time range) mid-candle.
+        if (!axisFloorRef.current) {
+          const w = ps.width();
+          if (w > 0) {
+            ps.applyOptions({ minimumWidth: w + 2 });
+            axisFloorRef.current = true;
+          }
+        }
+        const forming = candles[n - 1];
+        const appended = plan.mode === "updates" && plan.state.n > (prevPushed?.n ?? 0);
+        if (plan.mode === "full" || appended) {
+          const ts = chartRef.current.timeScale();
+          const vlr = ts.getVisibleLogicalRange();
+          let lo = Infinity;
+          let hi = -Infinity;
+          const lastFinal = n - 2;
+          if (lastFinal >= 0) {
+            let a = 0;
+            let b = lastFinal;
+            if (vlr) {
+              a = Math.max(0, Math.floor(vlr.from));
+              b = Math.min(lastFinal, Math.ceil(vlr.to));
+              if (b < a) { a = 0; b = lastFinal; }
+            }
+            for (let i = a; i <= b; i++) {
+              if (candles[i].l < lo) lo = candles[i].l;
+              if (candles[i].h > hi) hi = candles[i].h;
+            }
+          }
+          if (!Number.isFinite(lo) || !Number.isFinite(hi)) {
+            lo = forming.l;
+            hi = forming.h;
+          }
+          const cur = ps.getVisibleRange();
+          const owned =
+            scaleWinRef.current.lastSet === null ||
+            (cur !== null && priceRangesClose(cur, scaleWinRef.current.lastSet));
+          if (owned) {
+            const win = paddedPriceRange(
+              Math.min(lo, forming.l),
+              Math.max(hi, forming.h)
+            );
+            ps.setVisibleRange(win);
+            scaleWinRef.current.lastSet = win;
+          } else if (cur) {
+            const win = expandPriceRange(cur, forming.l, forming.h);
+            if (!priceRangesClose(win, cur)) {
+              ps.setVisibleRange(win);
+              scaleWinRef.current.lastSet = win;
+            }
+          }
+        } else {
+          const cur = ps.getVisibleRange();
+          if (cur) {
+            const win = expandPriceRange(cur, forming.l, forming.h);
+            if (!priceRangesClose(win, cur)) {
+              ps.setVisibleRange(win);
+              scaleWinRef.current.lastSet = win;
+            }
+          }
+        }
+      } catch {
+        /* scale management must never break the data path */
+      }
     }
 
     // Position the countdown pill under the last-price tag.
@@ -1274,6 +1448,30 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
           onClick={(e) => {
             e.stopPropagation();
             chartRef.current?.timeScale().fitContent();
+            // Stable-scale (Daily Replay): the time fit changes which
+            // bars are visible, so recompute the managed price window
+            // from ALL revealed extremes immediately — otherwise the
+            // per-candle window could clip the full-session range the
+            // user just asked to see. This also re-takes ownership
+            // from any manual axis drag.
+            if (stableScaleRef.current) {
+              const cs2 = candleSeriesRef.current;
+              const arr = candlesRef.current;
+              const n2 = Math.max(0, Math.min(revealedCountRef.current, arr.length));
+              if (cs2 && n2 > 0) {
+                let lo = Infinity;
+                let hi = -Infinity;
+                for (let i = 0; i < n2; i++) {
+                  if (arr[i].l < lo) lo = arr[i].l;
+                  if (arr[i].h > hi) hi = arr[i].h;
+                }
+                if (Number.isFinite(lo) && Number.isFinite(hi)) {
+                  const win = paddedPriceRange(lo, hi);
+                  cs2.priceScale().setVisibleRange(win);
+                  scaleWinRef.current.lastSet = win;
+                }
+              }
+            }
           }}
           title="Fit the whole session"
           style={{

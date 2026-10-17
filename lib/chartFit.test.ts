@@ -8,6 +8,9 @@ import {
   VOLUME_SCALE_MARGINS,
   NARROW_CONTAINER_MAX_PX,
   readableWindow,
+  paddedPriceRange,
+  expandPriceRange,
+  priceRangesClose,
 } from "./chartFit";
 
 let passed = 0;
@@ -91,6 +94,66 @@ function eqRange(
     readableWindow({ plotWidthPx: 0, barCount: 390, containerWidthPx: 390, anchorIndex: 0 }) === null);
   check("premarket-length session (720 bars) windows like any other",
     readableWindow({ plotWidthPx: 300, barCount: 720, containerWidthPx: 390, anchorIndex: 0 }) !== null);
+}
+
+/* ---------- Managed price range (playback stability) ---------- */
+{
+  const { top, bottom } = CANDLE_SCALE_MARGINS;
+  const usable = 1 - top - bottom; // 0.78
+  // paddedPriceRange: data [70, 71] occupies exactly the usable middle.
+  const r = paddedPriceRange(70, 71);
+  const total = r.to - r.from;
+  check("padded: total span = data span / usable fraction",
+    Math.abs(total - 1 / usable) < 1e-9);
+  check("padded: lo sits exactly at the bottom-margin boundary",
+    Math.abs(r.from + total * bottom - 70) < 1e-9);
+  check("padded: hi sits exactly at the top-margin boundary",
+    Math.abs(r.to - total * top - 71) < 1e-9);
+  check("padded: window contains the data", r.from < 70 && r.to > 71);
+  // Zero-span data still yields a finite, containing window.
+  const flat = paddedPriceRange(50, 50);
+  check("padded: flat data -> finite containing window",
+    Number.isFinite(flat.from) && Number.isFinite(flat.to) && flat.from < 50 && flat.to > 50 && flat.to > flat.from);
+
+  // expandPriceRange: no-op while price stays inside the data zone.
+  const inside = expandPriceRange(r, 70.2, 70.8);
+  check("expand: price inside the zone -> range unchanged",
+    priceRangesClose(inside, r) && inside.from === r.from && inside.to === r.to);
+  check("expand: price exactly AT the zone edge -> unchanged",
+    (() => { const e = expandPriceRange(r, r.from + total * bottom, r.to - total * top); return e.from === r.from && e.to === r.to; })());
+  // Genuine exit upward: only `to` grows; hi lands on the new top boundary.
+  const up = expandPriceRange(r, 70.2, 72);
+  check("expand: upward exit grows only the top", up.from === r.from && up.to > r.to);
+  check("expand: exited high lands on the new top-margin boundary",
+    Math.abs(up.to - (up.to - up.from) * top - 72) < 1e-9);
+  // Genuine exit downward: only `from` drops; lo lands on the new bottom boundary.
+  const down = expandPriceRange(r, 69, 70.8);
+  check("expand: downward exit grows only the bottom", down.to === r.to && down.from < r.from);
+  check("expand: exited low lands on the new bottom-margin boundary",
+    Math.abs(down.from + (down.to - down.from) * bottom - 69) < 1e-9);
+  // Both sides at once: widens both ways and contains the data zone.
+  const both = expandPriceRange(r, 68, 73);
+  check("expand: two-sided exit widens both ways",
+    both.from < r.from && both.to > r.to && both.from < 68 && both.to > 73);
+  // Monotonicity across a wandering tick path: never narrows.
+  let w = r;
+  let monotone = true;
+  for (const [plo, phi] of [[70.1, 70.9], [69.5, 70.4], [70.3, 71.6], [69.8, 71.2], [70.0, 70.5]] as const) {
+    const next = expandPriceRange(w, plo, phi);
+    if (next.from > w.from || next.to < w.to) monotone = false;
+    w = next;
+  }
+  check("expand: a wandering tick path never narrows the window", monotone);
+  // Degenerate input range falls back to a padded window.
+  const degen = expandPriceRange({ from: 5, to: 5 }, 4, 6);
+  check("expand: degenerate range -> containing padded window", degen.from < 4 && degen.to > 6);
+
+  // priceRangesClose: float noise vs real moves.
+  check("close: identical ranges are close", priceRangesClose(r, { ...r }));
+  check("close: sub-epsilon jitter is close",
+    priceRangesClose(r, { from: r.from + total * 1e-10, to: r.to - total * 1e-10 }));
+  check("close: a real user drag is NOT close",
+    !priceRangesClose(r, { from: r.from - 0.5, to: r.to }));
 }
 
 console.log(`\n=== CHART FIT RESULT: ${passed} passed, ${failed} failed ===`);
