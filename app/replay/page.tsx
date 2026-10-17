@@ -14,6 +14,7 @@ import type { Candle, Fill, SessionMeta } from "../../lib/types";
 import { TIMEFRAMES, aggregateCandles, higherTimeframeProgress, timeframeMinutes, formatEtTime, type TimeframeId } from "../../lib/marketData";
 import {
   SealedCandleFeed,
+  buildDrEngine,
   DAILY_REPLAY_STARTING_BALANCE,
   DAILY_REPLAY_STATE_KEY,
   encodeDrResumeHint,
@@ -678,11 +679,15 @@ function ReplayPageInner() {
       setDrPreview(null);
       setDrConfirm(false);
       drCompletedRef.current = false;
-      // 5) Engine over the sealed array, with the independent DR balance.
-      const eng = new ReplayEngine(
-        feed.candles,
-        DAILY_REPLAY_STARTING_BALANCE,
-        info.startIndex
+      // 5) Engine over the sealed array, with the independent DR
+      //    balance. Boundary: the locked candle is the last COMPLETED
+      //    candle — buildDrEngine releases exactly one more candle
+      //    and starts the engine at startIndex + 1, so the NEXT
+      //    candle is the first one that forms.
+      const eng = await buildDrEngine(
+        feed,
+        info.startIndex,
+        DAILY_REPLAY_STARTING_BALANCE
       );
       engineRef.current = eng;
       savedSessionIdRef.current = null;
@@ -820,6 +825,17 @@ function ReplayPageInner() {
       const feed = new SealedCandleFeed(createDrTransport(supabase));
       feed.setTotal(offer.total);
       await feed.attach(offer.attemptId);
+      // Boundary (same rule as a fresh lock): the locked candle is
+      // completed history and the NEXT candle is the first live one.
+      // If the server position never moved past the locked candle
+      // (locked, then refreshed before playing), release exactly that
+      // next candle now so reconstruction has a candle to form; if
+      // the position already advanced during the original run, the
+      // revealed prefix already contains it.
+      const lockIndex = att.start_index as number;
+      if (!feed.finished && feed.position <= lockIndex) {
+        await feed.advance(1);
+      }
       // Decision Timeline: the attempt's persisted events, in order.
       // If they cannot be read (or none were ever persisted), resume
       // the candles + position with a fresh trading state and say so

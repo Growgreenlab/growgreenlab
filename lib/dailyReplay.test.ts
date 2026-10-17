@@ -17,6 +17,7 @@ import {
   premarketOverlayVisible,
   drDatasetKey,
   SealedCandleFeed,
+  buildDrEngine,
   DAILY_REPLAY_STARTING_BALANCE,
   DAILY_REPLAY_STATE_KEY,
   encodeDrResumeHint,
@@ -711,9 +712,161 @@ function balanceTests() {
   check("resume hint rejects partial data", decodeDrResumeHint('{"attemptId":"a1"}') === null);
 }
 
+/* ------------- locked-candle boundary (buildDrEngine) -------------
+ * The confirmed semantics: the locked candle is the LAST COMPLETED
+ * historical candle; the NEXT candle forms tick-by-tick; candles
+ * beyond it stay hidden. buildDrEngine is the exact construction the
+ * page's confirm handler runs. Candles here have DISJOINT price
+ * ranges (candle i trades strictly inside [100+i+0.05, 100+i+0.9])
+ * so an execution price provably belongs to exactly one candle. */
+function makeDisjointCandles(date: string, from: string, n: number): Candle[] {
+  const [fh, fm] = from.split(":").map(Number);
+  const out: Candle[] = [];
+  for (let i = 0; i < n; i++) {
+    const mins = fh * 60 + fm + i;
+    const hhmm = `${String(Math.floor(mins / 60)).padStart(2, "0")}:${String(mins % 60).padStart(2, "0")}`;
+    const b = 100 + i;
+    out.push({
+      t: etToUtcMs(date, hhmm),
+      o: b + 0.4, h: b + 0.9, l: b + 0.05, c: b + 0.6, v: 1000 + i * 10,
+    });
+  }
+  return out;
+}
+
+async function boundaryTests() {
+  const DAYB = makeDisjointCandles(FRI, "09:30", 120);
+  const LOCK = 40;
+
+  // --- fresh attempt, mid-session lock ---
+  {
+    const store = new FakeStore();
+    const dsId = store.addDataset("user-a", DAYB);
+    const feed = new SealedCandleFeed(new FakeTransport(store, "user-a"));
+    feed.setTotal(DAYB.length);
+    await feed.create(dsId, LOCK);
+    check("boundary: create leaves position AT the locked candle",
+      feed.position === LOCK && feed.candles.length === LOCK + 1);
+
+    const eng = await buildDrEngine(feed, LOCK, DAILY_REPLAY_STARTING_BALANCE);
+    check("boundary: exactly one extra candle released for formation",
+      feed.position === LOCK + 1 && feed.candles.length === LOCK + 2);
+    check("(a) completed set at start is [0..lock]",
+      eng.index === LOCK && eng.revealed.length === LOCK + 1
+      && eng.revealed.every((c, i) => c.t === DAYB[i].t));
+    check("(a) locked candle displayed with its full true OHLC",
+      (() => { const d = eng.displayCandles[LOCK]; return d.o === DAYB[LOCK].o && d.h === DAYB[LOCK].h && d.l === DAYB[LOCK].l && d.c === DAYB[LOCK].c; })());
+    check("(b) first forming candle is lock+1, starting at its own open",
+      (() => { const d = eng.displayCandles; const f = d[d.length - 1]; return d.length === LOCK + 2 && f.t === DAYB[LOCK + 1].t && f.o === DAYB[LOCK + 1].o && f.c === DAYB[LOCK + 1].o && f.v === 0; })());
+    check("(c) client array holds nothing beyond the forming candle at start",
+      feed.candles.length === LOCK + 2 && eng.displayCandles.length === LOCK + 2);
+
+    // (e) Immediate market buy: executes inside the FORMING candle.
+    const fill0 = eng.buy(10);
+    check("(e) buy at start fills on candle lock+1 at its open",
+      !!fill0 && fill0.candleIndex === LOCK + 1 && fill0.price === DAYB[LOCK + 1].o && fill0.time === DAYB[LOCK + 1].t);
+
+    // (b)+(d) Tick the forming candle through: every tick stays
+    // inside its true range, volume accrues monotonically up to its
+    // true volume, and it finalizes after exactly 360 ticks, landing
+    // on its true OHLCV.
+    let inRange = true, volMono = true, prevV = 0, ticks = 0, finalized = false;
+    while (ticks < 400) {
+      const r = eng.tick(); ticks++;
+      const d = eng.displayCandles;
+      const f = d[d.length - 1];
+      if (f.c < DAYB[LOCK + 1].l || f.c > DAYB[LOCK + 1].h) inRange = false;
+      if (f.v < prevV || f.v > DAYB[LOCK + 1].v) volMono = false;
+      prevV = f.v;
+      if (r.finalized) { finalized = true; break; }
+    }
+    check("(b) forming candle finalizes after exactly 360 ticks", finalized && ticks === 360);
+    check("(d) every tick stayed inside the forming candle's true range", inRange);
+    check("(d) forming volume accrued monotonically up to the true volume",
+      volMono && prevV === DAYB[LOCK + 1].v);
+    check("(b) settled candle is the true candle (exact OHLCV)",
+      eng.index === LOCK + 1
+      && eng.revealed[LOCK + 1].o === DAYB[LOCK + 1].o && eng.revealed[LOCK + 1].h === DAYB[LOCK + 1].h
+      && eng.revealed[LOCK + 1].l === DAYB[LOCK + 1].l && eng.revealed[LOCK + 1].c === DAYB[LOCK + 1].c
+      && eng.revealed[LOCK + 1].v === DAYB[LOCK + 1].v);
+    check("(d) displayed timestamps are the dataset's, in order",
+      eng.displayCandles.every((c, i) => c.t === DAYB[i].t));
+
+    // Play-loop shape (page timer + Step button): drain with batch
+    // releases; the display must never run ahead of finalized + the
+    // one forming candle, and the held array never past the position.
+    let displayOk = true, sealOk = true, guard = 0;
+    while (guard++ < 500) {
+      if (eng.atEnd) {
+        if (feed.finished) break;
+        await feed.advance(30);
+      }
+      eng.step();
+      const d = eng.displayCandles;
+      if (!(d.length === eng.index + 1
+        || (d.length === eng.index + 2 && d[d.length - 1].t === DAYB[eng.index + 1].t))) displayOk = false;
+      if (!d.every((c, i) => c.t === DAYB[i].t)) displayOk = false;
+      if (feed.candles.length !== feed.position + 1) sealOk = false;
+    }
+    check("play loop: display never exceeds finalized + the one forming candle", displayOk);
+    check("play loop: held array never exceeds the server position", sealOk);
+    check("play loop: session drains to the final candle, fully revealed",
+      eng.index === DAYB.length - 1 && feed.finished && eng.revealed.length === DAYB.length);
+  }
+
+  // --- mid-formation execution provenance ---
+  {
+    const store = new FakeStore();
+    const dsId = store.addDataset("user-a", DAYB);
+    const feed = new SealedCandleFeed(new FakeTransport(store, "user-a"));
+    feed.setTotal(DAYB.length);
+    await feed.create(dsId, LOCK);
+    const eng = await buildDrEngine(feed, LOCK, DAILY_REPLAY_STARTING_BALANCE);
+    for (let i = 0; i < 100; i++) eng.tick();
+    const fill = eng.buy(5);
+    check("(e) mid-formation buy is stamped on the forming candle",
+      !!fill && fill.candleIndex === LOCK + 1 && fill.time === DAYB[LOCK + 1].t);
+    check("(e) mid-formation price belongs to the forming candle only (disjoint ranges)",
+      !!fill && fill.price >= DAYB[LOCK + 1].l && fill.price <= DAYB[LOCK + 1].h
+      && !(fill.price >= DAYB[LOCK].l && fill.price <= DAYB[LOCK].h));
+  }
+
+  // --- lock the second-to-last candle ---
+  {
+    const store = new FakeStore();
+    const dsId = store.addDataset("user-a", DAYB);
+    const feed = new SealedCandleFeed(new FakeTransport(store, "user-a"));
+    feed.setTotal(DAYB.length);
+    await feed.create(dsId, DAYB.length - 2);
+    const eng = await buildDrEngine(feed, DAYB.length - 2, DAILY_REPLAY_STARTING_BALANCE);
+    check("boundary: locking #N-1 releases the final candle and forms it",
+      feed.position === DAYB.length - 1 && feed.finished
+      && eng.index === DAYB.length - 2
+      && eng.displayCandles[DAYB.length - 1].t === DAYB[DAYB.length - 1].t);
+    eng.step();
+    check("boundary: locking #N-1 completes on the final candle",
+      eng.atEnd && eng.index === DAYB.length - 1 && eng.revealed.length === DAYB.length);
+  }
+
+  // --- lock the final candle (degenerate) ---
+  {
+    const store = new FakeStore();
+    const dsId = store.addDataset("user-a", DAYB);
+    const feed = new SealedCandleFeed(new FakeTransport(store, "user-a"));
+    feed.setTotal(DAYB.length);
+    await feed.create(dsId, DAYB.length - 1);
+    const eng = await buildDrEngine(feed, DAYB.length - 1, DAILY_REPLAY_STARTING_BALANCE);
+    check("boundary: locking the final candle opens already at the end",
+      eng.atEnd && eng.index === DAYB.length - 1 && eng.revealed.length === DAYB.length);
+    check("boundary: the final locked candle stands complete (not re-formed)",
+      (() => { const d = eng.displayCandles; const last = d[d.length - 1]; return d.length === DAYB.length && last.h === DAYB[DAYB.length - 1].h && last.c === DAYB[DAYB.length - 1].c && last.v === DAYB[DAYB.length - 1].v; })());
+  }
+}
+
 (async () => {
   await sealingTests();
   await engineGrowthTests();
+  await boundaryTests();
   twelveDataTests();
   eventsTests();
   balanceTests();

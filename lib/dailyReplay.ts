@@ -20,6 +20,7 @@
  */
 import type { Candle } from "./types";
 import { formatEtTime } from "./marketData";
+import { ReplayEngine } from "./engine";
 
 /** Daily Replay attempts always start from this balance — fully
  *  separate from the Trade Lab persistent account balance. */
@@ -686,6 +687,51 @@ export class SealedCandleFeed {
       );
     }
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Attempt engine construction (the locked-candle boundary)            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Build the ReplayEngine for a Daily Replay attempt whose LOCKED
+ * candle is `lockIndex` (the attempt's stored start_index).
+ *
+ * Boundary contract: the locked candle is the LAST COMPLETED
+ * historical candle — it stands fully revealed as history — and the
+ * NEXT candle (lockIndex + 1) is the first one that forms
+ * tick-by-tick. ReplayEngine's own startIndex means "first LIVE
+ * candle", so the engine is constructed with lockIndex + 1. For the
+ * engine to form that candle it must already hold it, so exactly one
+ * more candle is released from the server first (feed.advance(1)) —
+ * after create() the server position sits AT the locked candle.
+ *
+ * Degenerate case — the locked candle is the dataset's final candle:
+ * nothing exists after it. advance() is then a no-op (the feed is
+ * finished), the engine constructor clamps its startIndex onto the
+ * locked candle and begins forming it; that formation is finalized
+ * instantly here (the engine is flat with no orders at construction,
+ * so step() can produce no fills) so the locked candle stands as
+ * completed history and the attempt opens already at its end instead
+ * of re-forming its final candle.
+ */
+export async function buildDrEngine(
+  feed: SealedCandleFeed,
+  lockIndex: number,
+  startingBalance: number,
+): Promise<ReplayEngine> {
+  if (!feed.finished && feed.position <= lockIndex) {
+    await feed.advance(1);
+  }
+  const engine = new ReplayEngine(feed.candles, startingBalance, lockIndex + 1);
+  if (
+    feed.finished &&
+    lockIndex >= feed.candles.length - 1 &&
+    engine.index < lockIndex
+  ) {
+    engine.step();
+  }
+  return engine;
 }
 
 /* ------------------------------------------------------------------ */

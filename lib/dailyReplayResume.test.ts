@@ -411,10 +411,97 @@ async function resetStreamTests() {
   check("guard: restored events are frozen", Object.isFrozen(other.all[0]) && Object.isFrozen(other.all[0].payload));
 }
 
+/* ---------------- locked-candle boundary on resume ---------------- */
+async function boundaryResumeTests() {
+  const DAY = makeCandles(FRI, "04:00", 120);
+
+  // Locked, then refreshed BEFORE ever playing: the server position
+  // never moved past the locked candle. The page's resume rule
+  // releases exactly the first live candle, then reconstruction must
+  // rest ON the locked candle (complete) with lock+1 forming next.
+  {
+    const store = new FakeStore();
+    const dsId = store.addDataset("user-a", DAY);
+    const feedA = new SealedCandleFeed(new FakeTransport(store, "user-a"));
+    feedA.setTotal(DAY.length);
+    await feedA.create(dsId, 40);
+
+    const feed = new SealedCandleFeed(new FakeTransport(store, "user-a"));
+    feed.setTotal(DAY.length);
+    await feed.attach(feedA.attemptId!);
+    if (!feed.finished && feed.position <= 40) await feed.advance(1); // page resume rule
+    check("resume-boundary: first live candle released at resume",
+      feed.position === 41 && feed.candles.length === 42);
+
+    const recon = reconstructDrAttempt({
+      candles: feed.candles, startingBalance: 100_000, startIndex: 40, events: [],
+    });
+    const e = recon.engine;
+    check("resume-boundary: engine rests ON the locked candle, complete",
+      e.index === 40 && e.revealed.length === 41 && e.revealed[40].t === DAY[40].t);
+    check("resume-boundary: the next candle (lock+1) is the one forming",
+      e.displayCandles.length === 42 && e.displayCandles[41].t === DAY[41].t);
+    let ticks = 0;
+    while (e.index < 41 && ticks < 400) { e.tick(); ticks++; }
+    check("resume-boundary: 360 ticks finalize lock+1 (the locked candle never re-forms)",
+      ticks === 360 && e.index === 41);
+  }
+
+  // Legacy stream: a fill recorded under the OLD boundary at the
+  // locked candle itself (it formed live before the fix) must still
+  // replay exactly — same fill, same candle index — and the engine
+  // then continues with lock+1 as the next live candle.
+  {
+    const store = new FakeStore();
+    const dsId = store.addDataset("user-a", DAY);
+    const feed = new SealedCandleFeed(new FakeTransport(store, "user-a"));
+    feed.setTotal(DAY.length);
+    await feed.create(dsId, 40);
+    await feed.advance(30); // server position 70: prefix [0..70]
+
+    let wt = 1_780_800_000_000;
+    const rec = new DrEventRecorder(() => (wt += 1000));
+    rec.record("attempt_created", { ticker: "TEST", tradeDate: FRI, startIndex: 40, startingBalance: 100_000 }, { marketIdx: 40, marketTs: DAY[40].t });
+    rec.recordFill({ side: "buy", qty: 10, price: DAY[40].c, candleIndex: 40, time: DAY[40].t, realizedPnl: 0 });
+
+    const recon = reconstructDrAttempt({
+      candles: feed.candles, startingBalance: 100_000, startIndex: 40, events: rec.all,
+    });
+    check("resume-boundary: legacy fill at the locked candle replays exactly",
+      recon.fillsReplayed === 1 && recon.engine.fills.length === 1
+      && recon.engine.fills[0].candleIndex === 40 && recon.engine.positionQty === 10);
+    check("resume-boundary: after a legacy fill the next live candle is lock+1",
+      recon.engine.index === 40 && recon.engine.displayCandles[41]?.t === DAY[41].t);
+  }
+
+  // Locked the dataset's FINAL candle, then refreshed: the attempt
+  // restores already at its end, the final candle complete.
+  {
+    const DAY30 = makeCandles(FRI, "09:30", 30);
+    const store = new FakeStore();
+    const dsId = store.addDataset("user-a", DAY30);
+    const feedA = new SealedCandleFeed(new FakeTransport(store, "user-a"));
+    feedA.setTotal(DAY30.length);
+    await feedA.create(dsId, 29);
+
+    const feed = new SealedCandleFeed(new FakeTransport(store, "user-a"));
+    feed.setTotal(DAY30.length);
+    await feed.attach(feedA.attemptId!);
+    const recon = reconstructDrAttempt({
+      candles: feed.candles, startingBalance: 100_000, startIndex: 29, events: [],
+    });
+    const e = recon.engine;
+    check("resume-boundary: locking the final candle resumes at the end, complete",
+      e.atEnd && e.index === 29 && e.displayCandles.length === 30
+      && e.displayCandles[29].h === DAY30[29].h && e.displayCandles[29].c === DAY30[29].c);
+  }
+}
+
 (async () => {
   await attachTests();
   await reconstructionTests();
   await resetStreamTests();
+  await boundaryResumeTests();
   console.log(`\n=== DAILY REPLAY RESUME RESULT: ${passed} passed, ${failed} failed ===`);
   if (failed > 0) process.exit(1);
 })();

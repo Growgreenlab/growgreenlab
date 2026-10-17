@@ -41,8 +41,9 @@
  * What is deliberately NOT restored:
  *  - Intra-candle tick progress and any candle progress past the
  *    last recorded fill. Neither is persisted anywhere; the engine
- *    resumes at the last fill's candle (or the starting candle when
- *    nothing has filled yet) and the user replays forward from
+ *    resumes at the last fill's candle (or resting ON the locked
+ *    starting candle — complete, per the locked-candle boundary —
+ *    when nothing has filled yet) and the user replays forward from
  *    there, through candles the feed already legitimately holds.
  *  - Bracket backstop extremes (lowSinceEntry/highSinceEntry): the
  *    engine re-tracks them from the resume point forward, the same
@@ -135,7 +136,15 @@ export function reconstructDrAttempt(opts: {
   const recorder = new DrEventRecorder();
   recorder.loadExisting(events);
 
-  const engine = new ReplayEngine(candles, startingBalance, startIndex);
+  // Boundary: startIndex is the attempt's LOCKED candle, which is
+  // completed history — the engine's first LIVE candle is the one
+  // after it (ReplayEngine startIndex semantics), exactly as a fresh
+  // lock builds it (buildDrEngine in lib/dailyReplay.ts). The caller
+  // guarantees candles[startIndex + 1] is held whenever a next candle
+  // exists (the resume path releases it before reconstructing); when
+  // the array ends AT the locked candle the constructor clamps and
+  // the finalize guard below settles it.
+  const engine = new ReplayEngine(candles, startingBalance, startIndex + 1);
   let fillsReplayed = 0;
   for (const e of events) {
     if (e.type === "session_reset") {
@@ -180,6 +189,20 @@ export function reconstructDrAttempt(opts: {
           ? engine.sellAt(qty, price, candleIndex, time)
           : null;
     if (fill) fillsReplayed++;
+  }
+
+  // Boundary guard for the degenerate restore: the held array ends
+  // AT the locked candle (it was the dataset's final candle, or
+  // nothing past it was ever released and the resume-time release
+  // found the attempt finished). The constructor had to clamp the
+  // first-live index onto the locked candle itself and began forming
+  // it; if no recorded fill already finalized it, finalize it now so
+  // the locked candle stands as completed history instead of
+  // re-forming after the reload. (When fills WERE replayed, the loop
+  // above already left the engine at or past the locked candle, so
+  // this cannot fire under an open position.)
+  if (startIndex >= candles.length - 1 && engine.index < startIndex) {
+    engine.step();
   }
 
   // Current brackets: final recorded values win for the LIVE levels;
