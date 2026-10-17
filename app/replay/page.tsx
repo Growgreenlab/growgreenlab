@@ -433,8 +433,10 @@ function ReplayPageInner() {
       if (now - nextTick > 1000) nextTick = now;
       // Daily Replay: the engine may only form candles the sealed feed
       // already holds. At the held end (engine.atEnd with more candles
-      // still sealed server-side), release the next batch instead of
-      // ticking — and pause ticking while that request is in flight.
+      // still sealed server-side), release exactly the next candle —
+      // strict release-on-consume via the feed's ensure() gate, never
+      // a batch — instead of ticking, and pause ticking while that
+      // request is in flight.
       if (drPhaseRef.current === "active") {
         const feed = drFeedRef.current;
         if (feed && eng.atEnd && !feed.finished) {
@@ -442,7 +444,7 @@ function ReplayPageInner() {
             drAdvancingRef.current = true;
             setDrBuffering(true);
             feed
-              .advance(30)
+              .ensure(eng.index + 1)
               .then(() => bump())
               .catch((e) => drOnErrorRef.current(e))
               .finally(() => {
@@ -728,8 +730,9 @@ function ReplayPageInner() {
     }
   }, [drPreview, bump]);
 
-  // Step button for Daily Replay: release more candles first when the
-  // engine sits at the sealed end.
+  // Step button for Daily Replay: release the next candle first when
+  // the engine sits at the sealed end — exactly one candle, through
+  // the same strict ensure() gate the play loop uses.
   const drStepNext = useCallback(async () => {
     const eng = engineRef.current;
     const feed = drFeedRef.current;
@@ -737,7 +740,7 @@ function ReplayPageInner() {
     if (eng.atEnd && !feed.finished) {
       setDrBuffering(true);
       try {
-        await feed.advance(30);
+        await feed.ensure(eng.index + 1);
       } catch (e) {
         handleDrAdvanceError(e);
         return;

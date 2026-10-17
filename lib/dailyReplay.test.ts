@@ -390,15 +390,18 @@ async function sealingTests() {
     check("advance: last held candle is the position candle", feed.candles[50].t === DAY[50].t);
     check("has() respects the sealed position", feed.has(50) && !feed.has(51));
   }
-  // ensure(): advances until the index is held.
+  // ensure(): the strict release gate — advances one candle at a
+  // time until the index is held, and never one candle further.
   {
     const store = new FakeStore();
     const dsId = store.addDataset("user-a", DAY);
     const feed = new SealedCandleFeed(new FakeTransport(store, "user-a"));
     await feed.create(dsId, 5);
-    const ok = await feed.ensure(50, 10);
+    const ok = await feed.ensure(50);
     check("ensure: advances until held", ok && feed.position >= 50 && feed.candles.length === feed.position + 1);
-    const beyond = await feed.ensure(DAY.length + 100, 60);
+    check("ensure: stops exactly at the requested candle (no overshoot)",
+      feed.position === 50 && feed.candles.length === 51);
+    const beyond = await feed.ensure(DAY.length + 100);
     check("ensure: beyond the end returns false, clamps at finished", beyond === false && feed.finished && feed.position === DAY.length - 1);
   }
   // Advance past the end clamps + finished.
@@ -792,14 +795,16 @@ async function boundaryTests() {
     check("(d) displayed timestamps are the dataset's, in order",
       eng.displayCandles.every((c, i) => c.t === DAYB[i].t));
 
-    // Play-loop shape (page timer + Step button): drain with batch
-    // releases; the display must never run ahead of finalized + the
-    // one forming candle, and the held array never past the position.
+    // Play-loop shape (page timer + Step button, post-strict-sealing):
+    // drain through the ensure() gate; the display must never run
+    // ahead of finalized + the one forming candle, and — the strict
+    // invariant — the held array must never run ahead of the forming
+    // candle either (position ≤ engine.index + 1 at all times).
     let displayOk = true, sealOk = true, guard = 0;
     while (guard++ < 500) {
       if (eng.atEnd) {
         if (feed.finished) break;
-        await feed.advance(30);
+        await feed.ensure(eng.index + 1);
       }
       eng.step();
       const d = eng.displayCandles;
@@ -807,6 +812,7 @@ async function boundaryTests() {
         || (d.length === eng.index + 2 && d[d.length - 1].t === DAYB[eng.index + 1].t))) displayOk = false;
       if (!d.every((c, i) => c.t === DAYB[i].t)) displayOk = false;
       if (feed.candles.length !== feed.position + 1) sealOk = false;
+      if (feed.position > eng.index + 1) sealOk = false;
     }
     check("play loop: display never exceeds finalized + the one forming candle", displayOk);
     check("play loop: held array never exceeds the server position", sealOk);
@@ -863,10 +869,200 @@ async function boundaryTests() {
   }
 }
 
+/* ------------- strict future-candle sealing (release-on-consume) -------------
+ * The guarantee: future candle data must NOT be present in the
+ * browser before replay reveals it. The only releases in the DR
+ * flow are create's prefix [0..lock], buildDrEngine's single
+ * advance(1), resume's single advance(1), and — during play, step,
+ * and fast step-through — the feed.ensure(engine.index + 1) gate,
+ * which advances exactly one candle per transport call and stops at
+ * the requested candle. These tests drive the page's exact call
+ * shapes over a counting transport and pin both the invariant
+ * (feed length ≤ formingIndex + 1 at every instant) and the
+ * release-call accounting. */
+class CountingTransport implements SealedTransport {
+  advanceSteps: number[] = [];
+  constructor(private inner: FakeTransport) {}
+  createAttempt(datasetId: string, startIndex: number) {
+    return this.inner.createAttempt(datasetId, startIndex);
+  }
+  async advance(attemptId: string, steps: number) {
+    this.advanceSteps.push(steps);
+    return this.inner.advance(attemptId, steps);
+  }
+  getRevealed(attemptId: string) {
+    return this.inner.getRevealed(attemptId);
+  }
+}
+
+/** Fails exactly one advance — the one that would release candle
+ *  `failIndex` — then heals. The failure is raised BEFORE the inner
+ *  transport is touched, mirroring a network/RPC error. */
+class FailOnceTransport implements SealedTransport {
+  private failed = false;
+  constructor(
+    private store: FakeStore,
+    private inner: FakeTransport,
+    private failIndex: number,
+  ) {}
+  createAttempt(datasetId: string, startIndex: number) {
+    return this.inner.createAttempt(datasetId, startIndex);
+  }
+  async advance(attemptId: string, steps: number) {
+    const att = this.store.attempts.get(attemptId)!;
+    if (!this.failed && att.position + 1 === this.failIndex) {
+      this.failed = true;
+      throw new Error("simulated release failure");
+    }
+    return this.inner.advance(attemptId, steps);
+  }
+  getRevealed(attemptId: string) {
+    return this.inner.getRevealed(attemptId);
+  }
+}
+
+async function strictSealingTests() {
+  const DAYB = makeDisjointCandles(FRI, "09:30", 120);
+  const LOCK = 40;
+  const N = DAYB.length;
+
+  // (1)+(2) Full play-through in the page's shape: the timer's gate
+  // call interleaved with tick(), invariant asserted after EVERY
+  // tick and EVERY release; then the release-call accounting.
+  {
+    const store = new FakeStore();
+    const dsId = store.addDataset("user-a", DAYB);
+    const transport = new CountingTransport(new FakeTransport(store, "user-a"));
+    const feed = new SealedCandleFeed(transport);
+    feed.setTotal(N);
+    await feed.create(dsId, LOCK);
+    const eng = await buildDrEngine(feed, LOCK, DAILY_REPLAY_STARTING_BALANCE);
+
+    let invariantOk = true;
+    const assertInvariant = () => {
+      const forming = eng.index + 1; // candle being formed / next to form
+      if (feed.candles.length > forming + 1) invariantOk = false;
+      if (feed.position > forming) invariantOk = false;
+      if (eng.displayCandles.length > feed.candles.length) invariantOk = false;
+    };
+    assertInvariant();
+    let guard = 0;
+    while (guard++ < 200_000) {
+      if (eng.atEnd) {
+        if (feed.finished) break;
+        await feed.ensure(eng.index + 1); // the play loop's exact gate call
+        assertInvariant();
+        continue;
+      }
+      eng.tick();
+      assertInvariant();
+    }
+    check("strict: array never ahead of the forming candle across a full tick-by-tick play-through",
+      invariantOk);
+    check("strict: play-through completes the session",
+      eng.index === N - 1 && feed.finished && feed.position === N - 1 && eng.revealed.length === N);
+    check("strict: every release requested exactly one candle (zero requests for steps > 1)",
+      transport.advanceSteps.length > 0 && transport.advanceSteps.every((s) => s === 1));
+    check("strict: release calls = candles consumed after the lock",
+      transport.advanceSteps.length === N - 1 - LOCK);
+  }
+
+  // Gate precision: ensure(i) lands exactly on i — never a batch
+  // end — and ensure of an already-held candle releases nothing.
+  {
+    const store = new FakeStore();
+    const dsId = store.addDataset("user-a", DAYB);
+    const transport = new CountingTransport(new FakeTransport(store, "user-a"));
+    const feed = new SealedCandleFeed(transport);
+    feed.setTotal(N);
+    await feed.create(dsId, LOCK); // position = LOCK
+    const held = await feed.ensure(LOCK);
+    check("strict gate: ensure of a held candle releases nothing",
+      held && transport.advanceSteps.length === 0 && feed.position === LOCK);
+    await feed.ensure(LOCK + 5);
+    check("strict gate: ensure(i) lands exactly on i, one candle per call",
+      feed.position === LOCK + 5 && feed.candles.length === LOCK + 6
+      && transport.advanceSteps.length === 5 && transport.advanceSteps.every((s) => s === 1));
+  }
+
+  // (3) Step button shape + fast step-through ("skip"): every
+  // boundary crossing goes through the same gate; K step-throughs
+  // consume exactly one single-candle release per candle formed.
+  {
+    const store = new FakeStore();
+    const dsId = store.addDataset("user-a", DAYB);
+    const transport = new CountingTransport(new FakeTransport(store, "user-a"));
+    const feed = new SealedCandleFeed(transport);
+    feed.setTotal(N);
+    await feed.create(dsId, LOCK);
+    const eng = await buildDrEngine(feed, LOCK, DAILY_REPLAY_STARTING_BALANCE);
+    // drStepNext's exact shape: gate first, then step.
+    const drStep = async () => {
+      if (eng.atEnd && !feed.finished) await feed.ensure(eng.index + 1);
+      if (!eng.atEnd) eng.step();
+    };
+    let invariantOk = feed.position <= eng.index + 1;
+    const K = 25;
+    for (let s = 0; s < K; s++) {
+      await drStep();
+      if (feed.position > eng.index + 1) invariantOk = false;
+      if (feed.candles.length > eng.index + 2) invariantOk = false;
+    }
+    check("strict step: array-never-ahead invariant holds after every step", invariantOk);
+    check("strict step: K step-throughs finalize exactly K candles",
+      eng.index === LOCK + K);
+    check("strict step: exactly one single-candle release per candle formed",
+      transport.advanceSteps.length === K
+      && transport.advanceSteps.every((s) => s === 1)
+      && feed.position === LOCK + K);
+  }
+
+  // (4) A failed release mid-play: the error surfaces, the feed is
+  // left untouched at exactly [0..k-1] with the engine finalized on
+  // k-1 — no partial or phantom candle — and a retry succeeds.
+  {
+    const FAIL = 60;
+    const store = new FakeStore();
+    const dsId = store.addDataset("user-a", DAYB);
+    const transport = new FailOnceTransport(store, new FakeTransport(store, "user-a"), FAIL);
+    const feed = new SealedCandleFeed(transport);
+    feed.setTotal(N);
+    await feed.create(dsId, LOCK);
+    const eng = await buildDrEngine(feed, LOCK, DAILY_REPLAY_STARTING_BALANCE);
+    let surfaced: unknown = null;
+    let guard = 0;
+    while (guard++ < 200_000) {
+      if (eng.atEnd) {
+        if (feed.finished) break;
+        try {
+          await feed.ensure(eng.index + 1);
+        } catch (e) {
+          surfaced = e;
+          break;
+        }
+        continue;
+      }
+      eng.tick();
+    }
+    check("strict failure: the release error surfaces to the caller",
+      surfaced instanceof Error && /simulated release failure/.test((surfaced as Error).message));
+    check("strict failure: feed holds exactly [0..k-1] — no partial/phantom candle",
+      feed.position === FAIL - 1 && feed.candles.length === FAIL
+      && feed.candles[FAIL - 1].t === DAYB[FAIL - 1].t
+      && !feed.candles.some((c) => c.t === DAYB[FAIL].t));
+    check("strict failure: engine rests finalized on candle k-1",
+      eng.index === FAIL - 1 && eng.atEnd);
+    const ok = await feed.ensure(eng.index + 1);
+    check("strict failure: retry releases exactly the failed candle",
+      ok && feed.position === FAIL && feed.candles[FAIL].t === DAYB[FAIL].t);
+  }
+}
+
 (async () => {
   await sealingTests();
   await engineGrowthTests();
   await boundaryTests();
+  await strictSealingTests();
   twelveDataTests();
   eventsTests();
   balanceTests();

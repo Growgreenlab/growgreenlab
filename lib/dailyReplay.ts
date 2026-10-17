@@ -536,15 +536,26 @@ export class SealedCandleFeed {
   }
 
   /**
-   * Ensure candle `index` is held, advancing the server position in
-   * batches until it is (or the dataset ends). Returns whether the
-   * candle is held. The replay loop calls this — via advance() —
-   * before the engine may form a candle beyond the held array.
+   * Ensure candle `index` is held — the STRICT release gate.
+   *
+   * Release-on-consume: the server position advances exactly ONE
+   * candle per transport call, and the loop stops the moment `index`
+   * is held, so this method can never leave the array holding a
+   * candle beyond `index`. Callers (the page's play loop and Step
+   * button) pass only the index of the candle the engine is about to
+   * form, which keeps the invariant: at any moment the array holds
+   * nothing beyond the currently forming candle. No batch prefetch
+   * exists anywhere in the Daily Replay flow.
+   *
+   * Returns whether the candle is held (false only when the dataset
+   * ended first). A transport failure propagates to the caller with
+   * the feed untouched — the failed candle is not partially ingested —
+   * so a later retry is safe.
    */
-  async ensure(index: number, batch = 30): Promise<boolean> {
+  async ensure(index: number): Promise<boolean> {
     while (!this.has(index) && !this.finished) {
       const before = this.position;
-      await this.advance(batch);
+      await this.advance(1);
       if (this.position === before) break; // server made no progress
     }
     return this.has(index);
