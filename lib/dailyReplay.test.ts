@@ -22,6 +22,17 @@ import {
 } from "./dailyReplay";
 import { ReplayEngine } from "./engine";
 import { etToUtcMs } from "./marketData";
+import {
+  DrEventRecorder,
+  classifyBracketMove,
+  describeDrEvent,
+  formatDrClock,
+} from "./dailyReplayEvents";
+import {
+  parseTwelveDataResponse,
+  classifyTwelveError,
+  TwelveDataError,
+} from "./marketData.twelve";
 import type { Candle } from "./types";
 
 let passed = 0, failed = 0;
@@ -359,6 +370,152 @@ async function engineGrowthTests() {
     eng.displayCandles.length <= feed.candles.length);
 }
 
+/* ------------- Twelve Data pre-replay verification -------------
+ * Representative response payloads mapped to distinct error kinds:
+ * the load gate shows the kind's message inline and never proceeds. */
+function expectTwelveKind(name: string, payload: unknown, kind: string) {
+  try {
+    parseTwelveDataResponse(payload);
+    check(name, false);
+  } catch (e) {
+    check(name, e instanceof TwelveDataError && e.kind === kind);
+  }
+}
+function twelveDataTests() {
+  // Success: newest-first values become chronological candles.
+  const ok = parseTwelveDataResponse({
+    status: "ok",
+    values: [
+      { datetime: "2026-10-16 09:31:00", open: "101.00", high: "101.50", low: "100.90", close: "101.20", volume: "12345" },
+      { datetime: "2026-10-16 09:30:00", open: "100.00", high: "100.80", low: "99.90", close: "100.50", volume: "23456" },
+    ],
+  });
+  check("twelvedata success: parses + reorders chronologically",
+    ok.length === 2 && ok[0].t === etToUtcMs(FRI, "09:30") && ok[1].c === 101.2 && ok[0].v === 23456);
+  expectTwelveKind("twelvedata invalid key (401) → invalid_key",
+    { code: 401, message: "Invalid API key", status: "error" }, "invalid_key");
+  expectTwelveKind("twelvedata rate limit (429 credits) → rate_limit",
+    { code: 429, message: "You have run out of API credits for the current minute. Please wait and try again.", status: "error" }, "rate_limit");
+  expectTwelveKind("twelvedata plan-restricted (403) → plan_restricted",
+    { code: 403, message: "You are not authorized to access this resource", status: "error" }, "plan_restricted");
+  expectTwelveKind("twelvedata plan-restricted (message) → plan_restricted",
+    { code: 400, message: "This interval is not available on your plan. Please upgrade to access 1min historical data.", status: "error" }, "plan_restricted");
+  expectTwelveKind("twelvedata unknown symbol (400) → symbol_not_found",
+    { code: 400, message: "Symbol not found", status: "error" }, "symbol_not_found");
+  expectTwelveKind("twelvedata empty values → no_data",
+    { status: "ok", values: [] }, "no_data");
+  expectTwelveKind("twelvedata missing values → no_data",
+    { status: "ok" }, "no_data");
+  check("classify: message-only rate limit", classifyTwelveError(undefined, "API rate limit exceeded") === "rate_limit");
+  check("classify: 401 wins over message", classifyTwelveError(401, "whatever") === "invalid_key");
+  check("classify: unknown stays unknown", classifyTwelveError(500, "Internal error") === "unknown");
+}
+
+/* ------------- Decision Timeline recorder ------------- */
+function eventsTests() {
+  let tick = 0;
+  const now = () => 1_760_000_000_000 + (tick += 1000); // deterministic wall clock
+  const rec = new DrEventRecorder(now);
+  let heard = 0;
+  rec.setListener(() => { heard++; });
+  const t40 = etToUtcMs(FRI, "09:30");
+  const ctx = { marketIdx: 40, marketTs: t40 };
+  const pos = { avgEntry: 182.44, direction: "long" as const };
+
+  rec.record("attempt_created", {
+    ticker: "AAPL", tradeDate: FRI, startIndex: 40, startEtTime: "09:30",
+    startingBalance: 100_000,
+  }, ctx);
+  rec.record("session_started", {}, ctx);
+  rec.recordOrderSubmitted({ orderType: "market", side: "buy", qty: 100 }, ctx);
+  rec.recordFill({ side: "buy", qty: 100, price: 182.44, candleIndex: 40, time: t40, realizedPnl: 0 });
+  rec.recordRiskSnapshot({
+    entry: 182.44, qty: 100, stopLoss: 180, takeProfit: 190,
+    plannedRisk: 244, rewardRisk: 3.1,
+  }, ctx);
+  rec.recordBrackets(180, 190, "control", "active", ctx, pos); // initial set
+  rec.recordBrackets(181.5, 190, "drag", "active", ctx, pos); // drag SL tighter
+  rec.recordBrackets(182.44, 190, "drag", "active", ctx, pos); // drag SL to breakeven
+  rec.recordBrackets(182.44, 195, "control", "active", ctx, pos); // panel widens TP
+  const countsDuringTrade = rec.bracketMoveCounts("active"); // per-trade: resets at close
+  const t55 = etToUtcMs(FRI, "09:55");
+  rec.recordFill({ side: "sell", qty: 50, price: 185, candleIndex: 55, time: t55, realizedPnl: 128 }); // partial exit
+  const t70 = etToUtcMs(FRI, "10:10");
+  rec.recordFill({ side: "sell", qty: 50, price: 182.4, candleIndex: 70, time: t70, note: "stop-loss", realizedPnl: -2 }); // stop closes the rest
+  rec.record("session_completed", { realizedPnl: 126, equity: 100_126 }, { marketIdx: 70, marketTs: t70 });
+
+  const evts = rec.all;
+  const types = evts.map((e) => e.type);
+  const expected = [
+    "attempt_created", "session_started", "order_submitted", "order_filled",
+    "position_changed", "risk_snapshot", "bracket_set", "bracket_modified",
+    "bracket_modified", "bracket_modified", "order_filled", "partial_exit",
+    "bracket_triggered", "order_filled", "position_closed", "session_completed",
+  ];
+  check("scripted session: exact event sequence", JSON.stringify(types) === JSON.stringify(expected));
+  check("seq is monotonic from 1", evts.every((e, i) => e.seq === i + 1));
+  check("wall timestamps distinct + increasing (two clocks kept separate)",
+    evts.every((e, i) => i === 0 || e.wallTs > evts[i - 1].wallTs));
+  check("market clock rides along (idx/ts)", evts[3].marketIdx === 40 && evts[3].marketTs === t40);
+  check("listener heard every append", heard === evts.length);
+
+  const slTighten = evts[7];
+  check("SL drag: prev/new preserved", slTighten.payload.prev === 180 && slTighten.payload.next === 181.5);
+  check("SL drag: classified tightened (long, stop up)", slTighten.payload.classification === "tightened");
+  check("SL drag: method + counter", slTighten.payload.method === "drag" && slTighten.payload.timesMoved === 1);
+  const slBE = evts[8];
+  check("SL to avg entry: moved-to-breakeven", slBE.payload.classification === "moved-to-breakeven" && slBE.payload.timesMoved === 2);
+  const tpWiden = evts[9];
+  check("TP panel change: widened, prev/new kept", tpWiden.payload.field === "takeProfit"
+    && tpWiden.payload.prev === 190 && tpWiden.payload.next === 195
+    && tpWiden.payload.classification === "widened" && tpWiden.payload.method === "control");
+  check("per-trade counters on the recorder (during the trade)",
+    countsDuringTrade.sl === 2 && countsDuringTrade.tp === 1);
+  check("per-trade counters reset for the next trade at close", (() => {
+    const c = rec.bracketMoveCounts("active"); return c.sl === 0 && c.tp === 0;
+  })());
+  check("counters derivable from the stream", (() => {
+    const mods = evts.filter((e) => e.type === "bracket_modified");
+    return mods.filter((e) => e.payload.field === "stopLoss").length === 2
+      && mods.filter((e) => e.payload.field === "takeProfit").length === 1;
+  })());
+  const partial = evts[11];
+  check("partial exit: qty after + P&L snapshot", partial.payload.qtyAfter === 50 && partial.payload.sessionRealized === 128);
+  const closed = evts[14];
+  check("close: stop-loss reason + cumulative realized", closed.payload.reason === "stop-loss" && closed.payload.sessionRealized === 126);
+  check("shadow position flat after close", rec.positionQty === 0);
+
+  // Append-only: events are frozen; earlier events never change.
+  check("events are frozen", Object.isFrozen(evts[0]) && Object.isFrozen(evts[0].payload));
+  const before = JSON.stringify(evts[7]);
+  rec.record("session_paused", {}, ctx);
+  check("later appends never rewrite earlier events", JSON.stringify(rec.all[7]) === before);
+
+  // Plain-language rendering (the Review Timeline lines).
+  check("describe: SL move line", describeDrEvent(slTighten) === "Stop-loss moved $180.00 → $181.50 (tightened, drag)");
+  check("describe: breakeven line", describeDrEvent(slBE) === "Stop-loss moved to breakeven $182.44 (was $181.50, drag)");
+  check("describe: trigger line", describeDrEvent(evts[12]) === "Stop-loss triggered @ $182.40");
+  check("describe: clock is ET 12-hour", formatDrClock(etToUtcMs(FRI, "10:04")) === "10:04 AM ET");
+
+  // Direction-aware classification, incl. shorts.
+  check("classify: short stop down = tightened", classifyBracketMove("stopLoss", 100, 99, null, "short") === "tightened");
+  check("classify: short stop up = widened", classifyBracketMove("stopLoss", 100, 101, null, "short") === "widened");
+  check("classify: short target up (toward entry) = tightened", classifyBracketMove("takeProfit", 90, 95, null, "short") === "tightened");
+  check("classify: long target down (toward entry) = tightened", classifyBracketMove("takeProfit", 190, 185, null, "long") === "tightened");
+  check("classify: new level = set, removal = cleared",
+    classifyBracketMove("stopLoss", null, 100, null, "long") === "set"
+    && classifyBracketMove("stopLoss", 100, null, null, "long") === "cleared");
+
+  // Scopes are independent trackers.
+  const rec2 = new DrEventRecorder(now);
+  rec2.recordBrackets(10, 12, "drag", "planned", ctx, { avgEntry: null, direction: "long" });
+  rec2.recordBrackets(11, 12, "drag", "planned", ctx, { avgEntry: null, direction: "long" });
+  const p = rec2.all;
+  check("planned scope: set then modify, independent of active",
+    p.length === 2 && p[0].type === "bracket_set" && p[0].payload.scope === "planned"
+    && p[1].type === "bracket_modified" && p[1].payload.classification === "tightened");
+}
+
 /* ------------- balance independence ------------- */
 function balanceTests() {
   check("DR state key is the DR key", DAILY_REPLAY_STATE_KEY === "ggl-daily-replay-state");
@@ -394,6 +551,8 @@ function balanceTests() {
 (async () => {
   await sealingTests();
   await engineGrowthTests();
+  twelveDataTests();
+  eventsTests();
   balanceTests();
   console.log(`\n=== DAILY REPLAY RESULT: ${passed} passed, ${failed} failed ===`);
   process.exit(failed > 0 ? 1 : 0);
