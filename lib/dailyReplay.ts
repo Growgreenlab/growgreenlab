@@ -27,6 +27,17 @@ import { ReplayEngine, TICKS_PER_CANDLE } from "./engine";
 export const DAILY_REPLAY_STARTING_BALANCE = 100_000;
 
 /**
+ * Normalize a saved session's stored source for the standard replay
+ * loader. Daily Replay completions save with source 'daily_replay'
+ * (schema 2.0); their candle data IS Twelve Data market data, so the
+ * session must load exactly like a 'twelvedata' session. This is the
+ * single normalization point — the stored row is never rewritten.
+ */
+export function normalizeReloadedSource(source: string): "sample" | "twelvedata" | "csv" {
+  return source === "daily_replay" ? "twelvedata" : (source as "sample" | "twelvedata" | "csv");
+}
+
+/**
  * localStorage key reserved for NON-AUTHORITATIVE Daily Replay UI
  * preferences (e.g. the resume hint written at lock time). Deliberately
  * different from the Trade Lab balance key ("ggl-account-balance"):
@@ -494,7 +505,12 @@ export interface RevealedResult {
  * lib/dailyReplay.test.ts that mirrors those rules).
  */
 export interface SealedTransport {
-  createAttempt(datasetId: string, startIndex: number): Promise<CreateAttemptResult>;
+  /**
+   * Create an attempt. `strategyVersionId` (optional) binds the
+   * attempt to an immutable strategy version at creation — it is set
+   * server-side and can never be attached later or changed.
+   */
+  createAttempt(datasetId: string, startIndex: number, strategyVersionId?: string | null): Promise<CreateAttemptResult>;
   advance(attemptId: string, steps: number): Promise<AdvanceResult>;
   getRevealed(attemptId: string): Promise<RevealedResult>;
 }
@@ -562,11 +578,11 @@ export class SealedCandleFeed {
   }
 
   /** Create the attempt server-side and ingest the revealed prefix. */
-  async create(datasetId: string, startIndex: number): Promise<CreateAttemptResult> {
+  async create(datasetId: string, startIndex: number, strategyVersionId?: string | null): Promise<CreateAttemptResult> {
     if (this.attemptId !== null) {
       throw new Error("SealedCandleFeed: this feed already has an attempt.");
     }
-    const r = await this.transport.createAttempt(datasetId, startIndex);
+    const r = await this.transport.createAttempt(datasetId, startIndex, strategyVersionId ?? null);
     this.attemptId = r.attemptId;
     this.ingestPrefix(r.candles, r.position);
     this.position = r.position;

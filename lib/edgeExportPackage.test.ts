@@ -17,6 +17,8 @@ import {
   type ExportSnapshotInput, type ExportUnifiedInput,
 } from "./edgeExport";
 import { generateEdgePackage } from "./edgeExportPackage";
+import { deriveDrEvidence } from "./drTradeEvidence";
+import type { DrEvent } from "./dailyReplayEvents";
 import JSZip from "jszip";
 import { inflateSync } from "node:zlib";
 
@@ -357,6 +359,73 @@ async function main() {
     check("pdf: drawdown chart titled per-trade", pdfT.includes("per trade"));
     check("pdf: drawdown chart min label == -headline (-$20.00)", pdfT.includes("min -$20.00"));
     check("pdf: headline maximum drawdown $20.00 present", pdfT.includes("$20.00"));
+  }
+
+  /* ---- schema 2.0: Daily Replay package contents ---- */
+  {
+    const DR_SESSION = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+    const ATT = "a1111111-1111-4111-8111-111111111111";
+    const drTrade: GroupedTrade = groupFillsIntoTrades([
+      sf("x1", "buy", 100, 10.00, 5, 0, "2026-10-15T13:35:00.000Z"),
+      sf("x2", "sell", 100, 11.00, 9, 100, "2026-10-15T13:39:00.000Z"),
+    ], { id: DR_SESSION, ticker: "DRCO", trade_date: "2026-10-15", source: "daily_replay" })[0];
+    // groupFillsIntoTrades' sf helper hardcodes S1_SESSION above; rebuild key:
+    const drGrouped: GroupedTrade = { ...drTrade, tradeKey: `${DR_SESSION}:1`, sessionId: DR_SESSION, fills: drTrade.fills.map((f) => ({ ...f, session_id: DR_SESSION })) };
+    const drEvents: DrEvent[] = [
+      { seq: 1, type: "order_filled", wallTs: 1760600000000, marketIdx: 5, marketTs: 1760544300000, payload: { side: "buy", qty: 100, price: 10, candleIndex: 5 } },
+      { seq: 2, type: "risk_snapshot", wallTs: 1760600001000, marketIdx: 5, marketTs: 1760544300000, payload: { entry: 10, qty: 100, stopLoss: 9.5, takeProfit: 11, plannedRisk: 50, rewardRisk: 2 } },
+      { seq: 3, type: "order_filled", wallTs: 1760600100000, marketIdx: 9, marketTs: 1760544540000, payload: { side: "sell", qty: 100, price: 11, candleIndex: 9 } },
+      { seq: 4, type: "position_closed", wallTs: 1760600100000, marketIdx: 9, marketTs: 1760544540000, payload: { qty: 100, price: 11, realizedPnl: 100, sessionRealized: 100, reason: "target", unrealizedPnl: 0 } },
+    ];
+    const derived = deriveDrEvidence({ attemptId: ATT, trades: [drGrouped], events: drEvents });
+    const drInput: ExportSnapshotInput = {
+      unified: [{
+        key: drGrouped.tradeKey, source: "simulator", ticker: "DRCO", tradeDate: "2026-10-15",
+        direction: "long", entryPrice: 10, exitPrice: 11, qty: 100, realizedPnl: 100, isOpen: false,
+        rMultiple: derived.byTradeKey.get(drGrouped.tradeKey)?.rMultiple ?? null,
+        sessionSource: "daily_replay", attemptId: ATT,
+      }],
+      metas: {},
+      realTrades: [],
+      simTrades: [drGrouped],
+      drAttempts: [{ id: ATT, sessionId: DR_SESSION, strategyVersionId: null, status: "finished", startIndex: 4, createdAt: "2026-10-16T16:00:00Z", finishedAt: "2026-10-16T16:30:00Z", ticker: "DRCO", tradeDate: "2026-10-15" }],
+      drEvidence: derived.byTradeKey,
+      drEvents: drEvents.map((event, i) => ({ id: `ev-${i + 1}`, attemptId: ATT, event })),
+      drEventTradeKeys: new Map([[ATT, derived.eventTradeKey]]),
+      strategies: [], strategyVersions: [],
+    };
+    const drSnap = buildExportSnapshot(drInput, { range: { start: "2026-10-01", end: "2026-10-31" }, mode: "custom", source: "daily_replay" });
+    const DR_SHOT = "dr-shot.png";
+    const drClient = {
+      storage: {
+        from: (_bucket: string) => ({
+          list: async (prefix: string) => prefix === `${USER}/${DR_SESSION}_1`
+            ? { data: [{ name: DR_SHOT, id: "obj-dr", created_at: "2026-10-16T16:10:00.000Z" }], error: null }
+            : { data: [], error: null },
+          createSignedUrls: async (paths: string[]) => ({ data: paths.map((p) => ({ path: p, signedUrl: "https://signed.example/y", error: null })), error: null }),
+          download: async (path: string) => path === `${USER}/${DR_SESSION}_1/${DR_SHOT}`
+            ? { data: new Blob([new Uint8Array(FAKE_PNG)]), error: null }
+            : { data: null, error: { message: "Object not found" } },
+        }),
+      },
+    } as any;
+    const res = await generateEdgePackage(drClient, USER, drSnap, { includeScreenshots: true, includePdf: false });
+    check("2.0 pkg: filesIncluded lists decision_timeline.csv + strategy.json",
+      res.summary.filesIncluded.includes("decision_timeline.csv") && res.summary.filesIncluded.includes("strategy.json"));
+    const zip = await JSZip.loadAsync(new Uint8Array(await res.blob.arrayBuffer()));
+    check("2.0 pkg: ZIP contains decision_timeline.csv", !!zip.file("decision_timeline.csv"));
+    check("2.0 pkg: ZIP contains strategy.json", !!zip.file("strategy.json"));
+    const tlText = await zip.file("decision_timeline.csv")!.async("string");
+    check("2.0 pkg: timeline names the attempt + trade", tlText.includes(ATT) && tlText.includes("risk_snapshot"));
+    const sjText = await zip.file("strategy.json")!.async("string");
+    check("2.0 pkg: strategy.json notes unbound attempt", sjText.includes(ATT));
+    check("2.0 pkg: DR screenshot bytes included", res.summary.screenshotFiles === 1 && !!zip.file(`screenshots/${res.manifest[0]?.fileName}`));
+    check("2.0 pkg: manifest marks DR screenshot included", res.manifest.length === 1 && res.manifest[0].status === "included");
+    const noTl = await generateEdgePackage(drClient, USER, drSnap, { includeScreenshots: true, includePdf: false, includeDecisionTimeline: false });
+    const zip2 = await JSZip.loadAsync(new Uint8Array(await noTl.blob.arrayBuffer()));
+    check("2.0 pkg: timeline toggle off omits the file but keeps strategy.json",
+      !zip2.file("decision_timeline.csv") && !!zip2.file("strategy.json"));
+    check("2.0 pkg: prompt does not list an omitted timeline", !noTl.promptText.includes("decision_timeline.csv - the"));
   }
 
   console.log(`edgeExportPackage tests: ${passed} passed, ${failed} failed`);

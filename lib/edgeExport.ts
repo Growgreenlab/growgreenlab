@@ -25,15 +25,29 @@
  * `TRADE-<uuid>` / `TRADE-<sessionUuid>-<seq>`.
  */
 import {
-  breakdown, riskMetrics, dailyPnl, edgeInsights, holdMinutes,
+  breakdown, riskMetrics, dailyPnl, edgeInsights, holdMinutes, isDailyReplayTrade,
   type AnalyticsTrade, type BreakdownDimension,
 } from "./journalAnalytics";
 import {
   calcMetrics, perExitPnl, parseKeyLevels,
   type KeyLevel, type PlanChange, type RawFill, type RealFill, type RealTradeCalc,
 } from "./journal";
+import { describeDrEvent, type DrEvent } from "./dailyReplayEvents";
+import type { DrTradeEvidence } from "./drTradeEvidence";
+import {
+  strategyVersionLabel, type Strategy, type StrategyVersion,
+} from "./strategies";
 
-export const EDGE_EXPORT_SCHEMA_VERSION = "1.0";
+/**
+ * Export schema version. 2.0 (Daily Replay Strategy & AI Edge Export):
+ * additive over 1.0 — trades.csv keeps its original columns first, in
+ * order, with four Daily Replay columns appended; analytics.json gains
+ * a dailyReplay block plus strategy / strategyVersion breakdowns;
+ * decision_timeline.csv and strategy.json are new files, present only
+ * when Daily Replay trades are in the selection. A 1.0 consumer
+ * reading a 2.0 package sees the same fields it always did.
+ */
+export const EDGE_EXPORT_SCHEMA_VERSION = "2.0";
 
 /* ================= inputs (structural mirrors of the journal page) ====== */
 
@@ -49,6 +63,11 @@ export interface ExportUnifiedInput {
   realizedPnl: number;
   isOpen: boolean;
   rMultiple: number | null;
+  /** Daily Replay linkage (simulator-class trades only): the raw
+   *  session source and owning attempt id, when this trade came from
+   *  a Daily Replay attempt. */
+  sessionSource?: string | null;
+  attemptId?: string | null;
 }
 
 export interface ExportMetaInput {
@@ -102,17 +121,47 @@ export interface ExportSimTradeInput {
   fills: RawFill[];
 }
 
+/** A daily_replay_attempts row joined with its dataset identity. */
+export interface ExportDrAttemptInput {
+  id: string;
+  sessionId: string | null;
+  strategyVersionId: string | null;
+  status: string;
+  startIndex: number | null;
+  createdAt: string | null;
+  finishedAt: string | null;
+  ticker: string | null;
+  tradeDate: string | null;
+}
+
+/** One daily_replay_events row: database id + the recorder event. */
+export interface ExportDrEventInput {
+  id: string;
+  attemptId: string;
+  event: DrEvent;
+}
+
 export interface ExportSnapshotInput {
   unified: ExportUnifiedInput[];
   metas: Record<string, ExportMetaInput>;
   realTrades: ExportRealTradeInput[];
   simTrades: ExportSimTradeInput[];
+  /* --- Daily Replay (all optional; absent = pre-feature journal) --- */
+  drAttempts?: ExportDrAttemptInput[];
+  /** Per-trade plan evidence derived by lib/drTradeEvidence. */
+  drEvidence?: Map<string, DrTradeEvidence>;
+  drEvents?: ExportDrEventInput[];
+  /** attemptId -> (event seq -> owning tradeKey | null), from the
+   *  same derivation — used to attribute timeline rows to trades. */
+  drEventTradeKeys?: Map<string, Map<number, string | null>>;
+  strategies?: Strategy[];
+  strategyVersions?: StrategyVersion[];
 }
 
 /* ================= period selection & date ranges ======================= */
 
 export type ExportPeriodMode = "daily" | "weekly" | "monthly" | "custom";
-export type ExportSource = "real" | "simulator" | "all";
+export type ExportSource = "real" | "simulator" | "daily_replay" | "all";
 
 export interface ExportPeriodSelection {
   mode: ExportPeriodMode;
@@ -194,7 +243,15 @@ export function periodModeLabel(mode: ExportPeriodMode): string {
 }
 
 export function sourceLabel(source: ExportSource): string {
-  return source === "real" ? "Real Market" : source === "simulator" ? "Simulator" : "All Trades (Real Market + Simulator)";
+  return source === "real" ? "Real Market"
+    : source === "simulator" ? "Simulator"
+    : source === "daily_replay" ? "Daily Replay / Backtest"
+    : "All Trades (Real Market + Simulator + Daily Replay)";
+}
+
+/** The one Daily Replay predicate over unified export inputs. */
+export function isDrUnified(t: Pick<ExportUnifiedInput, "source" | "sessionSource" | "attemptId">): boolean {
+  return isDailyReplayTrade({ source: t.source, sessionSource: t.sessionSource ?? null, attemptId: t.attemptId ?? null });
 }
 
 export function formatRangeText(range: ExportDateRange, mode: ExportPeriodMode): string {
@@ -275,6 +332,31 @@ export interface ExportTradeRecord {
   notes: string | null;
   lessons: string | null;
   wouldTakeAgain: boolean | null;
+  /* --- Daily Replay linkage (null/false for real + Trade Lab trades) --- */
+  /** True when this trade came from a Daily Replay attempt. */
+  isDailyReplay: boolean;
+  /** The session's raw source string ('daily_replay' for new DR
+   *  completions; 'twelvedata' for DR attempts completed before
+   *  source marking — the attempt link is the authority). */
+  sessionSource: string | null;
+  attemptId: string | null;
+  strategyId: string | null;
+  strategyVersionId: string | null;
+  strategyName: string | null;
+  strategyVersion: number | null;
+  strategyLabel: string | null;
+}
+
+/** The Daily Replay subset of a snapshot: only the attempts,
+ *  strategies, versions, events and evidence the SELECTED trades
+ *  touch — an export never carries unselected attempts. */
+export interface ExportDrSubset {
+  attempts: ExportDrAttemptInput[];
+  strategies: Strategy[];
+  versions: StrategyVersion[];
+  events: ExportDrEventInput[];
+  evidence: Map<string, DrTradeEvidence>;
+  eventTradeKeys: Map<string, Map<number, string | null>>;
 }
 
 export interface ExportSnapshot {
@@ -295,8 +377,12 @@ export interface ExportSnapshot {
   counts: {
     total: number; closed: number; open: number;
     real: number; simulator: number;
+    /** Subset of `simulator`: trades that came from Daily Replay. */
+    dailyReplay: number;
     wins: number; losses: number; breakevens: number;
   };
+  /** Daily Replay subset, or null when no DR trade is selected. */
+  dailyReplay: ExportDrSubset | null;
   warnings: string[];
 }
 
@@ -317,22 +403,53 @@ function metaFields(meta: ExportMetaInput | undefined) {
   };
 }
 
+export interface ExportSelection {
+  range: ExportDateRange;
+  mode: ExportPeriodMode;
+  source: ExportSource;
+  /** Export-panel-only narrowing (decision: attempt-level selection
+   *  lives here, never in the journal's own filters). */
+  strategyId?: string | null;
+  strategyVersionId?: string | null;
+  attemptId?: string | null;
+}
+
 export function buildExportSnapshot(
   input: ExportSnapshotInput,
-  selection: { range: ExportDateRange; mode: ExportPeriodMode; source: ExportSource },
+  selection: ExportSelection,
   generatedAt: Date = new Date(),
 ): ExportSnapshot {
   const { range, mode, source } = selection;
   const realByKey = new Map(input.realTrades.map((t) => [`real:${t.id}`, t]));
   const simByKey = new Map(input.simTrades.map((t) => [t.tradeKey, t]));
+  const attemptById = new Map((input.drAttempts ?? []).map((a) => [a.id, a]));
+  const versionById = new Map((input.strategyVersions ?? []).map((v) => [v.id, v]));
+  const strategyById = new Map((input.strategies ?? []).map((s) => [s.id, s]));
+
+  // Resolve a unified trade's strategy chain (attempt -> version ->
+  // strategy). Null when any link is missing — never guessed.
+  const chainOf = (t: ExportUnifiedInput) => {
+    const attempt = t.attemptId ? attemptById.get(t.attemptId) : undefined;
+    const version = attempt?.strategyVersionId ? versionById.get(attempt.strategyVersionId) : undefined;
+    const strategy = version ? strategyById.get(version.strategyId) : undefined;
+    return { attempt, version, strategy };
+  };
 
   // Source + range filter over the unified list, deduped by trade key:
   // in "All" a trade appears exactly once (its key is unique per source).
   const seen = new Set<string>();
   const selected: ExportUnifiedInput[] = [];
   for (const t of input.unified) {
-    if (source !== "all" && t.source !== source) continue;
+    if (source === "daily_replay") {
+      if (!isDrUnified(t)) continue;
+    } else if (source !== "all" && t.source !== source) continue;
     if (t.tradeDate < range.start || t.tradeDate > range.end) continue;
+    if (selection.attemptId && t.attemptId !== selection.attemptId) continue;
+    if (selection.strategyVersionId || selection.strategyId) {
+      const { version } = chainOf(t);
+      if (selection.strategyVersionId && version?.id !== selection.strategyVersionId) continue;
+      if (selection.strategyId && version?.strategyId !== selection.strategyId) continue;
+    }
     if (seen.has(t.key)) continue;
     seen.add(t.key);
     selected.push(t);
@@ -395,6 +512,14 @@ export function buildExportSnapshot(
         floatShares: rt?.float_shares ?? null,
         relativeVolume: rt?.relative_volume ?? null,
         marketConditions: rt?.market_conditions ?? null,
+        isDailyReplay: false,
+        sessionSource: null,
+        attemptId: null,
+        strategyId: null,
+        strategyVersionId: null,
+        strategyName: null,
+        strategyVersion: null,
+        strategyLabel: null,
         ...mf,
       };
     } else {
@@ -406,6 +531,13 @@ export function buildExportSnapshot(
         qty: Number(f.qty), price: Number(f.price), time: f.candle_time,
         grossPnl: Number(f.realized_pnl || 0),
       }));
+      const isDr = isDrUnified(t);
+      const ev = isDr ? input.drEvidence?.get(t.key) : undefined;
+      const chain = isDr ? chainOf(t) : { attempt: undefined, version: undefined, strategy: undefined };
+      if (isDr && ev) {
+        initialRisk = ev.initialRisk;
+        stopForAnalytics = ev.stopLoss;
+      }
       rec = {
         exportId: exportIdForTradeKey(t.key),
         tradeKey: t.key,
@@ -417,25 +549,42 @@ export function buildExportSnapshot(
         entryTime: g?.entryTime ?? (entries.length > 0 ? entries[0].time : null),
         exitTime: g?.exitTime ?? (exits.length > 0 ? exits[exits.length - 1].time : null),
         setup: meta?.setup_tag ?? null,
-        strategy: null,
+        strategy: isDr ? (chain.strategy?.name ?? null) : null,
         avgEntry: g?.entryPrice ?? t.entryPrice,
         avgExit: g?.exitPrice ?? t.exitPrice,
         entryQty: entries.reduce((s, e) => s + e.qty, 0) || t.qty,
         entries, exits,
-        stopLoss: null,
-        target: null,
-        originalStopLoss: null,
-        originalTarget: null,
-        planHistory: [],
+        // Daily Replay trades carry their plan from the attempt's
+        // recorded evidence; Trade Lab simulator trades keep the
+        // long-standing nulls (nothing is reconstructed for them).
+        stopLoss: ev ? ev.stopLoss : null,
+        target: ev ? ev.target : null,
+        originalStopLoss: ev ? ev.originalStopLoss : null,
+        originalTarget: ev ? ev.originalTarget : null,
+        planHistory: ev ? ev.planHistory : [],
         fees: null,
         grossRealized: null,
         realizedPnl: t.realizedPnl,
-        initialRisk: null,
-        rMultiple: t.rMultiple,
-        riskBasis: "Unavailable - simulator trades do not record a stop loss, so R cannot be calculated.",
+        initialRisk: ev ? ev.initialRisk : null,
+        rMultiple: ev ? ev.rMultiple : t.rMultiple,
+        riskBasis: ev
+          ? ev.riskBasis
+          : isDr
+            ? "Unavailable - Daily Replay plan evidence could not be derived for this trade (its attempt events were unavailable or did not reconcile), so R cannot be calculated. Never reconstructed."
+            : "Unavailable - simulator trades do not record a stop loss, so R cannot be calculated.",
         floatShares: null,
         relativeVolume: null,
         marketConditions: null,
+        isDailyReplay: isDr,
+        sessionSource: t.sessionSource ?? null,
+        attemptId: t.attemptId ?? null,
+        strategyId: chain.strategy?.id ?? null,
+        strategyVersionId: chain.version?.id ?? null,
+        strategyName: chain.strategy?.name ?? null,
+        strategyVersion: chain.version?.version ?? null,
+        strategyLabel: chain.strategy
+          ? strategyVersionLabel(chain.strategy.name, chain.version?.version ?? null)
+          : null,
         ...mf,
       };
     }
@@ -445,7 +594,7 @@ export function buildExportSnapshot(
       analyticsTrades.push({
         key: t.key, source: t.source, ticker: t.ticker, tradeDate: t.tradeDate,
         direction: t.direction, entryPrice: t.entryPrice, exitPrice: t.exitPrice,
-        qty: t.qty, realizedPnl: t.realizedPnl, rMultiple: t.rMultiple, isOpen: false,
+        qty: t.qty, realizedPnl: t.realizedPnl, rMultiple: rec.rMultiple, isOpen: false,
         setupTag: meta?.setup_tag ?? null,
         hodClass: meta?.hod_class ?? null,
         followedPlan: meta?.followed_plan ?? null,
@@ -455,6 +604,12 @@ export function buildExportSnapshot(
         stopLoss: stopForAnalytics, initialRisk,
         keyLevelType: mf.keyLevels[0]?.type ?? null,
         keyLevelInteraction: mf.keyLevels[0]?.interaction ?? null,
+        sessionSource: rec.sessionSource,
+        attemptId: rec.attemptId,
+        strategyId: rec.strategyId,
+        strategyVersionId: rec.strategyVersionId,
+        strategyName: rec.strategyName,
+        strategyVersionLabel: rec.strategyLabel,
       });
     }
   }
@@ -469,8 +624,13 @@ export function buildExportSnapshot(
 
   const warnings: string[] = [];
   const simCount = records.filter((r) => r.source === "simulator").length;
-  if (simCount > 0) {
-    warnings.push(`${simCount} simulator trade${simCount === 1 ? "" : "s"} included: simulator trades have no screenshots, no recorded fees, and no recorded original stop/target (platform limitation) - those fields are exported as unavailable, never invented.`);
+  const drCount = records.filter((r) => r.isDailyReplay).length;
+  const tlSimCount = simCount - drCount;
+  if (tlSimCount > 0) {
+    warnings.push(`${tlSimCount} simulator trade${tlSimCount === 1 ? "" : "s"} included: simulator trades have no screenshots, no recorded fees, and no recorded original stop/target (platform limitation) - those fields are exported as unavailable, never invented.`);
+  }
+  if (drCount > 0) {
+    warnings.push(`${drCount} Daily Replay backtest trade${drCount === 1 ? "" : "s"} included: Daily Replay is a historical simulation, not live trading and not a guarantee of future performance. It has no fee or slippage model (fees export as unavailable, never invented). Original plan and R come only from risk snapshots recorded at entry - trades without one export R as unavailable.`);
   }
   const realNoOriginal = records.filter((r) => r.source === "real" && r.originalStopLoss == null).length;
   if (realNoOriginal > 0) {
@@ -485,6 +645,32 @@ export function buildExportSnapshot(
   }
   if (records.length === 0) {
     warnings.push("No trades match the selected period and source. The package documents an empty selection - it does not substitute a different range.");
+  }
+
+  /* Daily Replay subset: exactly the attempts / strategies / versions
+   * / events / evidence the selected DR trades touch. */
+  let dailyReplay: ExportDrSubset | null = null;
+  if (drCount > 0) {
+    const attemptIds = new Set(records.filter((r) => r.isDailyReplay && r.attemptId).map((r) => r.attemptId!));
+    const attempts = (input.drAttempts ?? []).filter((a) => attemptIds.has(a.id));
+    const versionIds = new Set<string>();
+    for (const a of attempts) if (a.strategyVersionId) versionIds.add(a.strategyVersionId);
+    for (const r of records) if (r.strategyVersionId) versionIds.add(r.strategyVersionId);
+    const versions = (input.strategyVersions ?? []).filter((v) => versionIds.has(v.id));
+    const strategyIds = new Set(versions.map((v) => v.strategyId));
+    const strategies = (input.strategies ?? []).filter((s) => strategyIds.has(s.id));
+    const events = (input.drEvents ?? []).filter((e) => attemptIds.has(e.attemptId));
+    const evidence = new Map<string, DrTradeEvidence>();
+    for (const r of records) {
+      const e = input.drEvidence?.get(r.tradeKey);
+      if (e) evidence.set(r.tradeKey, e);
+    }
+    const eventTradeKeys = new Map<string, Map<number, string | null>>();
+    for (const id of attemptIds) {
+      const m = input.drEventTradeKeys?.get(id);
+      if (m) eventTradeKeys.set(id, m);
+    }
+    dailyReplay = { attempts, strategies, versions, events, evidence, eventTradeKeys };
   }
 
   return {
@@ -503,8 +689,10 @@ export function buildExportSnapshot(
       open: openTrades.length,
       real: records.filter((r) => r.source === "real").length,
       simulator: simCount,
+      dailyReplay: drCount,
       wins, losses, breakevens: closedTrades.length - wins - losses,
     },
+    dailyReplay,
     warnings,
   };
 }
@@ -634,10 +822,14 @@ export interface ScreenshotCoverage {
   realTrades: number;
   realTradesWithScreenshots: number;
   screenshotFiles: number;
-  /** Export IDs of real trades with no screenshot in the package. */
+  /** Export IDs of screenshot-eligible trades (real + Daily Replay)
+   *  with no screenshot in the package. */
   tradesMissingScreenshots: string[];
-  /** Simulator trades never have screenshots (real trades only). */
+  /** Trade Lab simulator trades never have screenshots. Daily Replay
+   *  trades DO (journal-attached screenshots, like real trades). */
   simulatorTrades: number;
+  /** Daily Replay trades in the selection (screenshot-eligible). */
+  dailyReplayTrades: number;
   note: string;
 }
 
@@ -661,7 +853,9 @@ export function buildScreenshotManifest(
 ): ScreenshotManifestEntry[] {
   const entries: ScreenshotManifestEntry[] = [];
   for (const rec of snapshot.trades) {
-    if (rec.source !== "real") continue;
+    // Real trades and Daily Replay trades can carry journal-attached
+    // screenshots; Trade Lab simulator trades remain excluded.
+    if (rec.source !== "real" && !rec.isDailyReplay) continue;
     const paths = [...new Set(listed.get(rec.tradeKey) ?? [])].sort();
     paths.forEach((storagePath, i) => {
       const fileName = screenshotFileName(rec.exportId, storagePath, i + 1);
@@ -687,26 +881,30 @@ export function summarizeScreenshotCoverage(
   screenshotsRequested: boolean,
 ): ScreenshotCoverage {
   const realTrades = snapshot.trades.filter((r) => r.source === "real");
+  const drTrades = snapshot.trades.filter((r) => r.isDailyReplay);
+  const eligible = [...realTrades, ...drTrades];
+  const realIds = new Set(realTrades.map((r) => r.exportId));
   const withShots = new Set(manifest.filter((e) => e.status === "included" || e.status === "listed").map((e) => e.tradeId));
-  const missing = realTrades.filter((r) => !withShots.has(r.exportId)).map((r) => r.exportId);
+  const missing = eligible.filter((r) => !withShots.has(r.exportId)).map((r) => r.exportId);
   const files = manifest.filter((e) => e.status === "included").length;
   let note: string;
   if (!screenshotsRequested) {
     note = "Screenshots were not included in this package (the option was turned off). No images were fabricated or substituted.";
-  } else if (realTrades.length === 0) {
-    note = "No real-market trades in this selection - screenshots exist only for real-market trades, so none were available.";
+  } else if (eligible.length === 0) {
+    note = "No real-market or Daily Replay trades in this selection - screenshots exist only for real-market and Daily Replay trades, so none were available.";
   } else if (files === 0 && manifest.length === 0) {
     note = "No screenshots were available for the selected trades. Nothing was fabricated to fill the gap.";
   } else {
-    note = `${files} screenshot file${files === 1 ? "" : "s"} included across ${withShots.size} real trade${withShots.size === 1 ? "" : "s"}; ${missing.length} real trade${missing.length === 1 ? "" : "s"} had no screenshot.`;
+    note = `${files} screenshot file${files === 1 ? "" : "s"} included across ${withShots.size} trade${withShots.size === 1 ? "" : "s"}; ${missing.length} trade${missing.length === 1 ? "" : "s"} had no screenshot.`;
   }
   return {
     screenshotsRequested,
     realTrades: realTrades.length,
-    realTradesWithScreenshots: withShots.size,
+    realTradesWithScreenshots: [...withShots].filter((id) => realIds.has(id)).length,
     screenshotFiles: files,
     tradesMissingScreenshots: missing,
-    simulatorTrades: snapshot.counts.simulator,
+    simulatorTrades: snapshot.counts.simulator - snapshot.counts.dailyReplay,
+    dailyReplayTrades: drTrades.length,
     note,
   };
 }
@@ -727,6 +925,9 @@ export const CSV_COLUMNS = [
   "exec_grade", "followed_plan", "confidence", "emotional_tags", "mistakes",
   "entry_reasoning", "exit_reasoning", "notes", "lessons", "would_take_again",
   "screenshot_files",
+  // Schema 2.0 appends — the original 46 columns above keep their
+  // order and meaning; these four are Daily Replay linkage.
+  "daily_replay_attempt_id", "strategy_name", "strategy_version", "strategy_version_id",
 ] as const;
 
 /** CSV number: fixed decimals, trailing zeros trimmed; null → "". */
@@ -780,7 +981,7 @@ export function buildTradesCsv(snapshot: ExportSnapshot, manifest: ScreenshotMan
     const cells: string[] = [
       rec.exportId,
       rec.symbol,
-      rec.source === "real" ? "Real Market" : "Simulator",
+      rec.source === "real" ? "Real Market" : rec.isDailyReplay ? "Daily Replay / Backtest" : "Simulator",
       rec.tradeDate,
       rec.direction,
       rec.status,
@@ -824,10 +1025,115 @@ export function buildTradesCsv(snapshot: ExportSnapshot, manifest: ScreenshotMan
       rec.lessons ?? "",
       rec.wouldTakeAgain == null ? "" : rec.wouldTakeAgain ? "yes" : "no",
       (shotsByTrade.get(rec.exportId) ?? []).join("; "),
+      rec.attemptId ?? "",
+      rec.strategyName ?? rec.strategy ?? "",
+      rec.strategyVersion != null ? String(rec.strategyVersion) : "",
+      rec.strategyVersionId ?? "",
     ];
     rows.push(cells.map(csvEscape).join(","));
   }
   return rows.join("\r\n") + "\r\n";
+}
+
+/* ================= decision_timeline.csv + strategy.json (2.0) ======== */
+
+/** Deterministic JSON: object keys sorted recursively, so the same
+ *  stored payload serializes byte-identically on every export. */
+export function stableJsonStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(stableJsonStringify).join(",")}]`;
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableJsonStringify(obj[k])}`).join(",")}}`;
+}
+
+export const DECISION_TIMELINE_COLUMNS = [
+  "trade_id", "attempt_id", "event_id", "seq", "type",
+  "market_time", "wall_time", "candle_index", "description", "payload_json",
+] as const;
+
+/**
+ * decision_timeline.csv — the selected attempts' Decision Timeline
+ * events, one row per event, attributed to the trade whose position
+ * cycle contains the event (empty trade_id for attempt-level events
+ * and for cycles still open at completion). Both clocks are exported
+ * as separate columns and never mixed: market_time is the historical
+ * candle time (Eastern session), wall_time is when the trader acted.
+ * payload_json is the event payload verbatim (stable key order), so
+ * nothing the recorder captured is lost in this rendering.
+ */
+export function buildDecisionTimelineCsv(snapshot: ExportSnapshot): string {
+  const rows: string[] = [DECISION_TIMELINE_COLUMNS.join(",")];
+  const dr = snapshot.dailyReplay;
+  if (!dr) return rows.join("\r\n") + "\r\n";
+  const exportIdByKey = new Map(snapshot.trades.map((r) => [r.tradeKey, r.exportId]));
+  const attempts = [...dr.attempts].sort((a, b) =>
+    (a.createdAt ?? "").localeCompare(b.createdAt ?? "") || a.id.localeCompare(b.id));
+  for (const attempt of attempts) {
+    const events = dr.events
+      .filter((e) => e.attemptId === attempt.id)
+      .sort((a, b) => a.event.seq - b.event.seq);
+    const assignment = dr.eventTradeKeys.get(attempt.id);
+    for (const { id, event } of events) {
+      const tradeKey = assignment?.get(event.seq) ?? null;
+      const cells = [
+        tradeKey ? (exportIdByKey.get(tradeKey) ?? "") : "",
+        attempt.id,
+        id,
+        String(event.seq),
+        event.type,
+        event.marketTs != null ? new Date(event.marketTs).toISOString() : "",
+        new Date(event.wallTs).toISOString(),
+        event.marketIdx != null ? String(event.marketIdx) : "",
+        describeDrEvent(event),
+        stableJsonStringify(event.payload),
+      ];
+      rows.push(cells.map(csvEscape).join(","));
+    }
+  }
+  return rows.join("\r\n") + "\r\n";
+}
+
+/**
+ * strategy.json — the strategies and immutable versions REFERENCED by
+ * the selected attempts (never the trader's whole library), each
+ * version carrying the attempts that were bound to it. These are the
+ * recorded rules as written before the attempts ran; an AI reviewer
+ * compares execution against them — it must never rewrite them.
+ */
+export function buildStrategyJson(snapshot: ExportSnapshot): Record<string, unknown> | null {
+  const dr = snapshot.dailyReplay;
+  if (!dr) return null;
+  const versionById = new Map(dr.versions.map((v) => [v.id, v]));
+  const doc = {
+    schemaVersion: snapshot.schemaVersion,
+    note: "Strategy versions are immutable records of the rules in force when each attempt was locked. If analysis suggests a rule change, it is a hypothesis for a NEW version - never an edit to these.",
+    strategies: dr.strategies.map((s) => ({
+      id: s.id,
+      name: s.name,
+      notes: s.notes,
+      archived: s.archivedAt != null,
+      archivedAt: s.archivedAt,
+      versions: dr.versions
+        .filter((v) => v.strategyId === s.id)
+        .sort((a, b) => a.version - b.version)
+        .map((v) => ({
+          id: v.id,
+          version: v.version,
+          setupType: v.setupType,
+          entryRules: v.entryRules,
+          stopRules: v.stopRules,
+          targetRules: v.targetRules,
+          exitRules: v.exitRules,
+          marketFilters: v.marketFilters,
+          notes: v.notes,
+          createdAt: v.createdAt,
+          attemptIds: dr.attempts.filter((a) => a.strategyVersionId === v.id).map((a) => a.id),
+        })),
+    })),
+    unversionedAttemptIds: dr.attempts.filter((a) => !a.strategyVersionId || !versionById.has(a.strategyVersionId)).map((a) => a.id),
+  };
+  return sanitizeJsonValue(doc) as Record<string, unknown>;
 }
 
 /* ================= analytics.json ======================================= */
@@ -857,10 +1163,17 @@ export const METRIC_DEFINITIONS: Record<string, string> = {
 export interface MetricsUnavailableEntry { key: string; label: string; reason: string }
 
 export function metricsUnavailableList(snapshot: ExportSnapshot): MetricsUnavailableEntry[] {
+  const hasTradeLabSim = snapshot.trades.some((r) => r.source === "simulator" && !r.isDailyReplay);
+  const drTrades = snapshot.trades.filter((r) => r.isDailyReplay);
+  const drWithoutR = drTrades.filter((r) => r.rMultiple == null);
   const list: MetricsUnavailableEntry[] = [
     { key: "maeMfe", label: "MAE / MFE (max adverse / favorable excursion)", reason: "Not computed anywhere in the platform - it would require per-trade candle history, which real-market trades do not have." },
     { key: "slippage", label: "Slippage", reason: "The platform has no execution-slippage model; no value is recorded per fill." },
-    { key: "simulatorOriginalPlan", label: "Original planned stop/target for simulator trades", reason: "Simulator trades do not persist a planned stop/target, so their R and plan-adherence cannot be calculated. Exported as unavailable, never reconstructed." },
+    // Scoped to Trade Lab simulator trades: Daily Replay trades DO
+    // carry an original plan (from the recorded risk snapshot), so
+    // this entry appears only when Trade Lab trades are selected.
+    ...(hasTradeLabSim ? [{ key: "simulatorOriginalPlan", label: "Original planned stop/target for Trade Lab simulator trades", reason: "Trade Lab simulator trades do not persist a planned stop/target, so their R and plan-adherence cannot be calculated. Exported as unavailable, never reconstructed. (Daily Replay trades are different: their original plan comes from the risk snapshot recorded at entry.)" }] : []),
+    ...(drWithoutR.length > 0 ? [{ key: "dailyReplayRiskUnavailable", label: `R for ${drWithoutR.length} Daily Replay trade${drWithoutR.length === 1 ? "" : "s"}`, reason: "These Daily Replay trades have no valid risk snapshot recorded at entry (see risk_basis per trade in trades.csv), so their initial risk and R are unavailable. Never reconstructed." }] : []),
     { key: "simulatorFees", label: "Simulator fees", reason: "The simulator engine has no fee model. Simulator fees are unknown (empty in trades.csv), not zero." },
     { key: "entryOrderType", label: "Entry order type (market/limit) for real trades", reason: "Not recorded for real-market trades." },
     { key: "psychologyGuardEvents", label: "Psychology Guard events per trade", reason: "Guard lockouts are not stored as trade-linked records. Recorded emotional tags, mistakes and plan adherence ARE exported." },
@@ -880,6 +1193,7 @@ export function metricsUnavailableList(snapshot: ExportSnapshot): MetricsUnavail
 const ALL_DIMENSIONS: BreakdownDimension[] = [
   "setup", "hodClass", "symbol", "mistake", "emotion", "plan",
   "source", "session", "timeOfDay", "hold", "side", "keyLevel", "interaction",
+  "strategy", "strategyVersion",
 ];
 
 function breakdownForJson(trades: AnalyticsTrade[], dim: BreakdownDimension) {
@@ -948,14 +1262,24 @@ function overallBlock(snapshot: ExportSnapshot) {
   };
 }
 
-function perSourceBlock(snapshot: ExportSnapshot, src: "real" | "simulator") {
-  const trades = snapshot.analyticsTrades.filter((t) => t.source === src);
-  const closedRecs = snapshot.closedTrades.filter((r) => r.source === src);
+function perSourceBlock(snapshot: ExportSnapshot, src: "real" | "simulator" | "daily_replay") {
+  // Daily Replay trades are simulator-CLASS records, but their
+  // subtotal is always computed separately — the "simulator" subtotal
+  // covers Trade Lab trades only, so the three subtotals partition
+  // the selection exactly.
+  const match = (t: { source: string; sessionSource: string | null; attemptId: string | null; isDailyReplay?: boolean }) =>
+    src === "daily_replay"
+      ? isDailyReplayTrade({ source: t.source as "simulator" | "real", sessionSource: t.sessionSource, attemptId: t.attemptId })
+      : src === "simulator"
+        ? t.source === "simulator" && !isDailyReplayTrade({ source: t.source as "simulator" | "real", sessionSource: t.sessionSource, attemptId: t.attemptId })
+        : t.source === "real";
+  const trades = snapshot.analyticsTrades.filter(match);
+  const closedRecs = snapshot.closedTrades.filter(match);
   const m = calcMetrics(closedRecs.map((r) => ({ realizedPnl: r.realizedPnl })));
   const risk = riskMetrics(trades);
   return {
     closedTrades: closedRecs.length,
-    openTrades: snapshot.openTrades.filter((r) => r.source === src).length,
+    openTrades: snapshot.openTrades.filter(match).length,
     netRealizedPnl: m.netPnl,
     expectancy: m.expectancy,
     profitFactor: m.profitFactor,
@@ -977,6 +1301,59 @@ function dayOfWeekBlock(snapshot: ExportSnapshot) {
     map.set(day, e);
   }
   return WEEKDAYS.filter((d) => map.has(d)).map((d) => ({ day: d, ...map.get(d)! }));
+}
+
+/**
+ * The analytics.json Daily Replay block: per-attempt results for the
+ * attempts the selection touches, with the strategy version each
+ * attempt was bound to at lock time. Sample sizes are stated, never
+ * dressed up — an attempt count is evidence quantity, not proof.
+ */
+function dailyReplayBlock(snapshot: ExportSnapshot): Record<string, unknown> {
+  const dr = snapshot.dailyReplay;
+  if (!dr) return { available: false, reason: "No Daily Replay trades in this selection." };
+  const recs = snapshot.trades.filter((r) => r.isDailyReplay);
+  const versionById = new Map(dr.versions.map((v) => [v.id, v]));
+  const strategyById = new Map(dr.strategies.map((s) => [s.id, s]));
+  const attempts = dr.attempts.map((a) => {
+    const trades = recs.filter((r) => r.attemptId === a.id);
+    const version = a.strategyVersionId ? versionById.get(a.strategyVersionId) : undefined;
+    const strategy = version ? strategyById.get(version.strategyId) : undefined;
+    const rs = trades.map((t) => t.rMultiple).filter((r): r is number => r != null && isFinite(r));
+    const lifecycle = dr.events.some((e) => e.attemptId === a.id && e.event.type === "session_resumed")
+      ? "completed-after-resume" : "completed";
+    return {
+      attemptId: a.id,
+      sessionLinked: a.sessionId != null,
+      ticker: a.ticker,
+      tradeDate: a.tradeDate,
+      status: a.status,
+      lifecycle,
+      strategy: strategy && version
+        ? {
+            strategyId: strategy.id, name: strategy.name,
+            versionId: version.id, version: version.version,
+            label: strategyVersionLabel(strategy.name, version.version),
+            setupType: version.setupType,
+            archived: strategy.archivedAt != null,
+          }
+        : null,
+      trades: trades.length,
+      tradeIds: trades.map((t) => t.exportId),
+      realizedPnl: trades.reduce((s, t) => s + t.realizedPnl, 0),
+      tradesWithR: rs.length,
+      avgR: rs.length > 0 ? rs.reduce((s, r) => s + r, 0) / rs.length : null,
+    };
+  });
+  return {
+    available: true,
+    note: "Daily Replay is a historical simulation (backtest): results describe what would have happened on the recorded historical days, are not live trading results, and are not a guarantee of future performance. Only completed attempts with closed trades appear here - abandoned attempts and positions left open are not performance evidence.",
+    attemptsInSelection: attempts.length,
+    strategiesReferenced: [...new Set(attempts.map((a) => a.strategy?.strategyId).filter(Boolean))].length,
+    tradesWithRiskSnapshot: recs.filter((r) => r.initialRisk != null).length,
+    tradesWithoutRiskSnapshot: recs.filter((r) => r.initialRisk == null).length,
+    attempts,
+  };
 }
 
 /**
@@ -1008,7 +1385,8 @@ export function buildAnalyticsJson(
       schemaVersion: snapshot.schemaVersion,
       generatedAt: snapshot.generatedAt,
       period: { mode: snapshot.periodMode, start: snapshot.range.start, end: snapshot.range.end, inclusive: true },
-      timezone: "Trade dates are the journal's stored local date strings (YYYY-MM-DD) and are compared as strings, exactly like the journal UI. Session and time-of-day buckets interpret entry timestamps in America/New_York.",
+      timezone: "Trade dates are the journal's stored local date strings (YYYY-MM-DD) and are compared as strings, exactly like the journal UI. Session and time-of-day buckets interpret entry timestamps in America/New_York."
+        + (snapshot.dailyReplay ? " Daily Replay decision_timeline.csv carries TWO clocks that are never mixed: market_time is the historical candle time (Eastern), wall_time is the real time the trader acted." : ""),
       source: snapshot.source,
       sourceLabel: sourceLabel(snapshot.source),
       counts: snapshot.counts,
@@ -1016,11 +1394,17 @@ export function buildAnalyticsJson(
         "journal unified trade list (simulator position cycles from saved replay sessions; real trades from journal_real_trades + journal_real_fills)",
         "journal_trade_meta annotations (Trade DNA, key levels, original plan)",
         "Supabase Storage bucket journal-screenshots (owner-scoped, RLS)",
+        ...(snapshot.dailyReplay ? [
+          "daily_replay_attempts + daily_replay_events (the append-only Decision Timeline: original plan and R derive from risk_snapshot events recorded at entry, never reconstructed)",
+          "strategies + strategy_versions (immutable strategy definitions; attempts are bound to a version at lock time)",
+          "All Daily Replay rows are read through the owner's own signed-in session - owner RLS is the only access path (the app has no API routes for this data).",
+        ] : []),
       ],
       metricsIncluded: [
-        "overall performance", "breakdowns (setup, HOD class, symbol, mistake, emotion, plan, source, session, time of day, hold time, side, key level, interaction)",
+        "overall performance", "breakdowns (setup, HOD class, symbol, mistake, emotion, plan, source, session, time of day, hold time, side, key level, interaction, strategy, strategy version)",
         "risk metrics (drawdown, streaks, R distribution, average risk)", "daily P&L", "performance by day of week",
         "entry/exit and partial-exit summary", "Edge Finder (edgeInsights)", "per-source subtotals when All Trades is selected",
+        ...(snapshot.dailyReplay ? ["Daily Replay block (attempts, bound strategies, per-attempt results)"] : []),
       ],
       metricsUnavailable: metricsUnavailableList(snapshot),
       missingDataSummary: missing,
@@ -1043,11 +1427,13 @@ export function buildAnalyticsJson(
     perSource: snapshot.source === "all"
       ? {
           mixedSource: true,
-          note: "Real Market and Simulator results are kept separate below. The combined overall block mixes both sources and must be read as mixed-source data. In the combined block, gross profit / gross loss are sums of winning / losing trades' realized (net) P&L on the basis defined under grossProfit / grossLoss in metadata.calculationDefinitions: real-trade P&L is net of recorded fees, while simulator P&L is fee-free because the simulator has no fee model.",
+          note: "Real Market, Simulator and Daily Replay results are kept separate below. The combined overall block mixes all sources and must be read as mixed-source data. In the combined block, gross profit / gross loss are sums of winning / losing trades' realized (net) P&L on the basis defined under grossProfit / grossLoss in metadata.calculationDefinitions: real-trade P&L is net of recorded fees, while simulator and Daily Replay P&L is fee-free because neither has a fee model.",
           real: perSourceBlock(snapshot, "real"),
           simulator: perSourceBlock(snapshot, "simulator"),
+          ...(snapshot.counts.dailyReplay > 0 ? { dailyReplay: perSourceBlock(snapshot, "daily_replay") } : {}),
         }
       : null,
+    dailyReplay: dailyReplayBlock(snapshot),
     breakdowns: Object.fromEntries(ALL_DIMENSIONS.map((d) => [d, breakdownForJson(at, d)])),
     dailyPnl: dailyPnl(at),
     performanceByDayOfWeek: dayOfWeekBlock(snapshot),
@@ -1068,19 +1454,19 @@ export function buildAnalyticsJson(
       note: "Overtrading/revenge patterns are only reported from recorded tags and counts - a mental state is never inferred from P&L alone.",
     },
     edgeFinder: edgeInsights(at),
-    simulator: snapshot.counts.simulator > 0
+    simulator: snapshot.counts.simulator - snapshot.counts.dailyReplay > 0
       ? {
           available: true,
-          trades: snapshot.counts.simulator,
-          sessions: new Set(snapshot.trades.filter((r) => r.source === "simulator").map((r) => r.tradeKey.slice(0, r.tradeKey.lastIndexOf(":")))).size,
-          netRealizedPnl: snapshot.closedTrades.filter((r) => r.source === "simulator").reduce((s, r) => s + r.realizedPnl, 0),
-          note: "Simulator results are simulated replay outcomes, kept separate from real-market results everywhere in this package.",
+          trades: snapshot.counts.simulator - snapshot.counts.dailyReplay,
+          sessions: new Set(snapshot.trades.filter((r) => r.source === "simulator" && !r.isDailyReplay).map((r) => r.tradeKey.slice(0, r.tradeKey.lastIndexOf(":")))).size,
+          netRealizedPnl: snapshot.closedTrades.filter((r) => r.source === "simulator" && !r.isDailyReplay).reduce((s, r) => s + r.realizedPnl, 0),
+          note: "Simulator results are simulated replay outcomes, kept separate from real-market results everywhere in this package. Daily Replay trades have their own block (dailyReplay) and are not counted here.",
         }
-      : { available: false, reason: "No simulator trades in this selection." },
+      : { available: false, reason: "No Trade Lab simulator trades in this selection." },
     tradesIndex: snapshot.trades.map((r) => ({
       tradeId: r.exportId,
       symbol: r.symbol,
-      source: r.source === "real" ? "Real Market" : "Simulator",
+      source: r.source === "real" ? "Real Market" : r.isDailyReplay ? "Daily Replay / Backtest" : "Simulator",
       tradeDate: r.tradeDate,
       status: r.status,
       screenshots: manifest.filter((e) => e.tradeId === r.exportId && e.status === "included").map((e) => e.fileName),
@@ -1099,6 +1485,9 @@ function money(n: number | null | undefined): string {
 
 export interface PromptContext {
   pdfIncluded: boolean;
+  /** Whether decision_timeline.csv is actually in this package (the
+   *  panel toggle) — the prompt lists only files that exist. */
+  timelineIncluded?: boolean;
 }
 
 /**
@@ -1113,11 +1502,16 @@ export function buildChatGptPrompt(
 ): string {
   const overall = overallBlock(snapshot);
   const unavailable = metricsUnavailableList(snapshot);
+  const hasDr = snapshot.dailyReplay != null;
   const files = [
     "trades.csv - one row per trade (raw evidence)",
     "analytics.json - Grow Green Lab's calculated metrics, breakdowns and Edge Finder output",
     ...(ctx.pdfIncluded ? ["Trading_Report.pdf - the visual summary report"] : []),
     "README.txt - package guide, column definitions and methodology",
+    ...(hasDr ? [
+      ...(ctx.timelineIncluded === false ? [] : ["decision_timeline.csv - the Daily Replay Decision Timeline: every recorded decision event for the included attempts, with both market time (historical, Eastern) and wall-clock time (when the trader acted)"]),
+      "strategy.json - the immutable strategy versions the included attempts were bound to, exactly as recorded before they ran",
+    ] : []),
     ...(coverage.screenshotFiles > 0 ? [`screenshots/ - ${coverage.screenshotFiles} trade screenshot(s), named by stable trade ID`] : []),
   ];
   return `You are analyzing my trading performance using a Grow Green Lab AI Edge Analysis package.
@@ -1129,7 +1523,7 @@ Do not assume that every supplied metric is correct without checking definitions
 PACKAGE FACTS (generated by Grow Green Lab - treat these as the evidence boundary)
 - Date range: ${formatRangeText(snapshot.range, snapshot.periodMode)}
 - Trade source: ${sourceLabel(snapshot.source)}
-- Trades included: ${snapshot.counts.total} total (${snapshot.counts.closed} closed, ${snapshot.counts.open} open) - ${snapshot.counts.real} Real Market, ${snapshot.counts.simulator} Simulator
+- Trades included: ${snapshot.counts.total} total (${snapshot.counts.closed} closed, ${snapshot.counts.open} open) - ${snapshot.counts.real} Real Market, ${snapshot.counts.simulator - snapshot.counts.dailyReplay} Simulator, ${snapshot.counts.dailyReplay} Daily Replay / Backtest
 - Closed-trade results: net realized P&L ${money(overall.netRealizedPnl)}, win rate ${overall.winRate == null ? "n/a" : overall.winRate.toFixed(1) + "%"}, expectancy ${money(overall.expectancy)} per trade, average R ${overall.avgR == null ? "n/a (no recorded stops)" : overall.avgR.toFixed(2) + "R over " + overall.tradesWithR + " trades with a recorded stop"}
 - Screenshots: ${coverage.note}
 - Files in this package:
@@ -1153,6 +1547,17 @@ Follow these rules:
 13. Prioritize a small number of high-impact, testable improvements.
 14. Propose measurable experiments with explicit hypotheses, entry rules, exit rules, risk limits, and success criteria.
 15. Explain what additional evidence would be needed to validate each hypothesis.
+${hasDr ? `
+DAILY REPLAY & STRATEGY EVIDENCE (this package includes Daily Replay backtest trades, decision_timeline.csv and strategy.json):
+
+16. Evaluate the QUALITY and QUANTITY of the evidence behind every conclusion: state the sample size (attempts and trades per strategy version) next to each claim. A version tested on a handful of attempts is a small sample, not a proven edge.
+17. Separate STRATEGY quality from EXECUTION quality: compare each trade against its bound strategy version's recorded rules (strategy.json) and its Decision Timeline (decision_timeline.csv). A sound strategy executed poorly and a weak strategy executed well are different findings - say which you found, with trade IDs.
+18. Address overfitting, survivorship and selection limits explicitly: only completed attempts and closed trades are exported (abandoned attempts and open positions are not performance evidence), the trader chose which days and tickers to replay, and the results cover only the market regimes present on those historical days.
+19. Present every proposed rule change as a HYPOTHESIS, and attach to each hypothesis a SEPARATE validation test: what would be replayed, on what data, over how many attempts, and what result would confirm or refute it.
+20. Do not claim statistical significance without an adequate sample and a stated basis. When the evidence cannot support a conclusion, say so plainly instead of filling the gap.
+21. NEVER modify, rewrite or "improve" a strategy version: versions are immutable records. Propose changes only as a NEW version the trader can create and test - your output must not present an edited version as if it were the recorded one.
+22. Daily Replay results are historical simulations (backtests), not live trading results and not a guarantee of future performance. In decision_timeline.csv, market_time is the historical candle time (Eastern) and wall_time is when the trader actually acted - never mix the two clocks.
+` : ""}
 
 Organize your response as:
 
@@ -1182,12 +1587,14 @@ export interface ReadmeContext {
   pdfIncluded: boolean;
   pdfFailureNote: string | null;
   zipFileName: string;
+  /** Whether decision_timeline.csv is actually in this package. */
+  timelineIncluded?: boolean;
 }
 
 const CSV_COLUMN_DOCS: [string, string][] = [
   ["trade_id", "Stable trade identifier (TRADE-<id>). The same trade always exports under the same ID; screenshot files and analytics tradeIds use it."],
   ["symbol", "Ticker symbol."],
-  ["source", "Real Market or Simulator - from the journal's authoritative source field, never inferred."],
+  ["source", "Real Market, Simulator, or Daily Replay / Backtest - from the journal's authoritative source fields (session source + attempt link), never inferred."],
   ["trade_date", "Trade date (YYYY-MM-DD) as stored in the journal. Range filtering compares these date strings."],
   ["direction", "long or short."],
   ["status", "closed or open. Open trades are listed for completeness and excluded from performance analytics."],
@@ -1203,13 +1610,13 @@ const CSV_COLUMN_DOCS: [string, string][] = [
   ["total_shares_exited", "Total exited quantity (FIFO-matched for real trades)."],
   ["exit_fills", "Individual exit fills as qty@price pnl=+X.XX (ISO time) - pnl is that exit's gross FIFO realized P&L (before fees) for real trades, and the simulator engine's recorded per-fill realized P&L for simulator trades."],
   ["exit_reason", "Recorded exit reasoning from Trade Review (same value as exit_reasoning). Empty when not recorded."],
-  ["stop_loss_current / target_current", "The trade's currently recorded stop loss / target (real trades). Empty for simulator trades and when never set."],
-  ["original_stop_loss / original_target", "The ORIGINAL planned stop/target, preserved set-once by the journal (plan changes never overwrite these). Empty when no plan was ever recorded - never reconstructed."],
-  ["plan_change_count / plan_history", "Number of recorded stop/target changes and the change log (field: from -> to @ timestamp)."],
-  ["initial_risk_usd", "Initial risk in dollars: |average entry - original planned stop (or recorded stop when no original exists)| x entry quantity. Empty when no stop is recorded."],
+  ["stop_loss_current / target_current", "The trade's stop loss / target in force at close (real trades; for Daily Replay trades, the levels in force when the position closed, from the attempt's recorded bracket events). Empty for Trade Lab simulator trades and when never set."],
+  ["original_stop_loss / original_target", "The ORIGINAL planned stop/target: for real trades, preserved set-once by the journal (plan changes never overwrite these); for Daily Replay trades, the levels captured by the risk snapshot recorded at the first entry fill. Empty when no plan was ever recorded - never reconstructed."],
+  ["plan_change_count / plan_history", "Number of recorded stop/target changes and the change log (field: from -> to @ timestamp). For Daily Replay trades these are the recorded bracket adjustments made while the position was open."],
+  ["initial_risk_usd", "Initial risk in dollars. Real trades: |average entry - original planned stop (or recorded stop when no original exists)| x entry quantity. Daily Replay trades: the planned risk recorded by the risk snapshot at the first entry fill (first-fill quantity basis - see risk_basis). Empty when no valid risk figure was recorded."],
   ["r_multiple", "Net realized P&L / initial risk. Empty when initial risk is unavailable - a missing R is never exported as 0."],
   ["risk_basis", "Plain-language statement of exactly how this trade's R was (or could not be) calculated."],
-  ["fees_usd", "Total recorded fees (real trades, summed from fills). EMPTY for simulator trades: the simulator has no fee model, so fees are unknown - not zero."],
+  ["fees_usd", "Total recorded fees (real trades, summed from fills). EMPTY for simulator and Daily Replay trades: neither has a fee model, so fees are unknown - not zero."],
   ["gross_realized_pnl_usd", "Gross realized P&L before fees (real trades). Empty for simulator trades (no fee split exists)."],
   ["net_realized_pnl_usd", "Net realized P&L - the figure all analytics use. For simulator trades this is the engine-reported P&L."],
   ["key_levels", "Recorded key levels as price Type [interaction] \"notes\", semicolon-separated."],
@@ -1220,6 +1627,10 @@ const CSV_COLUMN_DOCS: [string, string][] = [
   ["entry_reasoning / exit_reasoning / notes / lessons", "The trader's own recorded words from Trade Review."],
   ["would_take_again", "Recorded yes/no from Trade Review. Empty when not recorded."],
   ["screenshot_files", "Screenshot file names included in this package for this trade (see screenshots/ and screenshots-manifest.json). Empty when the trade has no included screenshot."],
+  ["daily_replay_attempt_id", "Schema 2.0: the Daily Replay attempt that produced this trade. Empty for real and Trade Lab simulator trades. Joins to decision_timeline.csv (attempt_id) and strategy.json."],
+  ["strategy_name", "Schema 2.0: name of the strategy the trade's attempt was bound to at lock time. For real trades this is the trade's recorded strategy text. Empty when no strategy was recorded."],
+  ["strategy_version", "Schema 2.0: the immutable strategy VERSION number the attempt was bound to (e.g. 2 means version 2). Empty when the attempt recorded no strategy version."],
+  ["strategy_version_id", "Schema 2.0: stable ID of that strategy version - joins to strategy.json. Empty when no version was bound."],
 ];
 
 export function buildReadme(
@@ -1229,6 +1640,7 @@ export function buildReadme(
   ctx: ReadmeContext,
 ): string {
   const unavailable = metricsUnavailableList(snapshot);
+  const hasDr = snapshot.dailyReplay != null;
   const includedFiles = [
     "trades.csv",
     "analytics.json",
@@ -1236,6 +1648,7 @@ export function buildReadme(
     "ChatGPT_Prompt.txt",
     "README.txt (this file)",
     "screenshots-manifest.json",
+    ...(hasDr ? [...(ctx.timelineIncluded === false ? [] : ["decision_timeline.csv"]), "strategy.json"] : []),
     ...(coverage.screenshotFiles > 0 ? [`screenshots/ (${coverage.screenshotFiles} image file${coverage.screenshotFiles === 1 ? "" : "s"})`] : []),
   ];
   const lines: string[] = [
@@ -1253,7 +1666,7 @@ export function buildReadme(
     `- Date range: ${formatRangeText(snapshot.range, snapshot.periodMode)}`,
     "- Timezone: trade dates are the journal's stored date strings; session/time-of-day analytics use America/New_York.",
     `- Trade source: ${sourceLabel(snapshot.source)}`,
-    `- Trades: ${snapshot.counts.total} total (${snapshot.counts.closed} closed, ${snapshot.counts.open} open) - ${snapshot.counts.real} Real Market, ${snapshot.counts.simulator} Simulator`,
+    `- Trades: ${snapshot.counts.total} total (${snapshot.counts.closed} closed, ${snapshot.counts.open} open) - ${snapshot.counts.real} Real Market, ${snapshot.counts.simulator - snapshot.counts.dailyReplay} Simulator, ${snapshot.counts.dailyReplay} Daily Replay / Backtest`,
     `- Screenshots: ${coverage.note}`,
     ...(ctx.pdfFailureNote ? [`- PDF: ${ctx.pdfFailureNote}`] : []),
     ...(snapshot.source === "all" ? ["- MIXED SOURCE: this package contains both Real Market and Simulator trades. Per-source results are kept separate in analytics.json (perSource); combined figures are labeled mixed-source."] : []),
@@ -1261,12 +1674,29 @@ export function buildReadme(
     "FILE INVENTORY",
     ...includedFiles.map((f) => `- ${f}`),
     "",
+    "SCHEMA 2.0 - WHAT CHANGED (COMPATIBILITY)",
+    "Schema 2.0 extends the 1.0 package additively; nothing a 1.0 reader relies on was removed or redefined:",
+    "- trades.csv keeps its original 46 columns first, in the same order, with four Daily Replay columns appended (daily_replay_attempt_id, strategy_name, strategy_version, strategy_version_id). The source column can now also read \"Daily Replay / Backtest\".",
+    "- analytics.json gains a dailyReplay block (per-attempt results and bound strategies) and two new breakdown dimensions (strategy, strategyVersion). counts gains a dailyReplay field (a subset of simulator, its coarse class).",
+    "- decision_timeline.csv and strategy.json are new files, present only when Daily Replay trades are in the selection.",
+    "- Daily Replay trades can now carry screenshots (journal-attached, like real trades) and recorded original plans (from the risk snapshot at entry). Trade Lab simulator trades are unchanged: no screenshots, no original plan, R unavailable.",
+    ...(hasDr ? [
+      "",
+      "DAILY REPLAY IN THIS PACKAGE",
+      "Daily Replay trades are BACKTESTS: historical simulations over recorded market days. They are not live trading results and not a guarantee of future performance.",
+      "- Identity: every Daily Replay trade carries its attempt ID (trades.csv daily_replay_attempt_id) and, when one was bound at lock time, its strategy name + immutable version. Attempts locked without a strategy honestly show none.",
+      "- Original plan + R: derived ONLY from the risk snapshot recorded at the first entry fill of each position (plus the bracket adjustments recorded while it was open). Trades whose cycle has no valid snapshot export R as unavailable - it is never reconstructed after the fact.",
+      "- Fees: Daily Replay has no fee or slippage model. fees_usd is empty (unknown), never zero.",
+      "- decision_timeline.csv: one row per recorded event for the included attempts. trade_id attributes an event to the trade whose position cycle contains it (empty for attempt-level events and for a position still open at completion). market_time is the historical candle time (Eastern); wall_time is the real time the action happened. The two clocks are never mixed. payload_json is the recorded payload verbatim.",
+      "- strategy.json: only the strategies/versions the included attempts reference, with the attempt IDs bound to each version. Versions are immutable - a suggested rule change is a hypothesis for a NEW version, never an edit.",
+    ] : []),
+    "",
     "TRADES.CSV - COLUMN DEFINITIONS",
     "One row per trade. Missing values are EMPTY fields - the platform never substitutes zero for missing data and never invents values.",
     ...CSV_COLUMN_DOCS.map(([c, d]) => `- ${c}: ${d}`),
     "",
     "ANALYTICS.JSON - SCHEMA AND METRIC DEFINITIONS",
-    "Top-level sections: metadata (selection, counts, definitions, missing-data summary, screenshot manifest, Edge Finder configuration), overall, perSource (only when All Trades is selected), breakdowns (13 dimensions), dailyPnl, performanceByDayOfWeek, entryExit, riskPsychology, edgeFinder, simulator, tradesIndex.",
+    "Top-level sections: metadata (selection, counts, definitions, missing-data summary, screenshot manifest, Edge Finder configuration), overall, perSource (only when All Trades is selected), dailyReplay (per-attempt results; unavailable flag when no Daily Replay trades are selected), breakdowns (15 dimensions), dailyPnl, performanceByDayOfWeek, entryExit, riskPsychology, edgeFinder, simulator, tradesIndex.",
     "All metrics are computed by the same functions the journal Analytics tab uses (lib/journalAnalytics.ts + lib/journal.ts), on the same trade set, so the export and the UI agree.",
     ...Object.entries(METRIC_DEFINITIONS).map(([k, v]) => `- ${k}: ${v}`),
     "Non-finite values: JSON cannot represent unbounded numbers. An unbounded metric (e.g. profit factor with winners and no losers) is serialized as null with a sibling \"<metric>Unbounded\": true flag.",

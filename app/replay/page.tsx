@@ -24,6 +24,7 @@ import {
   drDatasetKey,
   premarketWarningGate,
   premarketOverlayVisible,
+  normalizeReloadedSource,
   type SealedTransport,
 } from "../../lib/dailyReplay";
 import {
@@ -39,6 +40,11 @@ import {
   reconstructDrAttempt,
   shouldOfferDrResume,
 } from "../../lib/dailyReplayResume";
+import {
+  STRATEGY_SETUP_TYPES, mapAttemptRow, mapStrategyRow, mapStrategyVersionRow,
+  resolveVersionContext, setupTypeLabel, strategyVersionLabel,
+  type DrAttemptLink, type Strategy, type StrategySetupType, type StrategyVersion,
+} from "../../lib/strategies";
 import {
   DrOrderTracker,
   newDrOrderId,
@@ -89,6 +95,10 @@ interface DrInfo {
   tradeDate: string;
   startIndex: number;
   total: number;
+  /** Strategy version bound at lock time (null = none recorded). */
+  strategyVersionId: string | null;
+  /** "Name · vN" for display; null when unbound or unresolved. */
+  strategyLabel: string | null;
 }
 
 const DR_EMPTY_BRACKETS = {
@@ -107,11 +117,24 @@ function createDrTransport(
   supabase: ReturnType<typeof createClient>
 ): SealedTransport {
   return {
-    async createAttempt(datasetId, startIndex) {
-      const { data, error } = await supabase.rpc("dr_create_attempt", {
+    async createAttempt(datasetId, startIndex, strategyVersionId) {
+      // The strategy parameter exists only once the strategies
+      // migration is applied. Where the extended signature is missing
+      // (PostgREST PGRST202), retry with the original two arguments —
+      // the attempt then simply records no strategy. Any other error
+      // (e.g. a foreign strategy version) propagates untouched.
+      let res = await supabase.rpc("dr_create_attempt", {
         p_dataset_id: datasetId,
         p_start_index: startIndex,
+        ...(strategyVersionId ? { p_strategy_version_id: strategyVersionId } : {}),
       });
+      if (res.error && strategyVersionId && (res.error as { code?: string }).code === "PGRST202") {
+        res = await supabase.rpc("dr_create_attempt", {
+          p_dataset_id: datasetId,
+          p_start_index: startIndex,
+        });
+      }
+      const { data, error } = res;
       if (error) throw error;
       const d = data as { attempt_id: string; position: number; candles: Candle[] };
       return { attemptId: d.attempt_id, position: d.position, candles: d.candles };
@@ -165,6 +188,249 @@ function isDrStorageMissing(e: unknown): boolean {
 
 const DR_STORAGE_MISSING_MSG =
   "Daily Replay storage is not enabled on this deployment yet.";
+
+/** True when an RPC error means THIS function does not exist on the
+ *  deployment (its migration not applied) — as opposed to the
+ *  function existing and rejecting the call, which must propagate. */
+function isMissingDrFunction(e: unknown, fnName: string): boolean {
+  if (!e || typeof e !== "object") return false;
+  const err = e as { code?: string; message?: string };
+  const msg = (err.message ?? "").toLowerCase();
+  if (!msg.includes(fnName.toLowerCase())) return false;
+  return (
+    err.code === "PGRST202" ||
+    msg.includes("could not find the function") ||
+    msg.includes("does not exist")
+  );
+}
+
+/* ---------------- Daily Replay strategies panel ----------------
+ * Create strategies + immutable versions, archive strategies, and
+ * review strategies -> versions -> their attempts. Versions are
+ * created ONLY through dr_allocate_strategy_version (atomic numbering)
+ * and are never edited or deleted — changing the rules means making
+ * the next version. Copy never calls a saved strategy "validated":
+ * a strategy is a recorded set of rules, nothing more. */
+function DrStrategyPanel(props: {
+  strategies: Strategy[];
+  versions: StrategyVersion[];
+  attempts: DrAttemptLink[];
+  available: boolean | null;
+  onChanged: () => void;
+}) {
+  const { strategies, versions, attempts, available, onChanged } = props;
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
+  const [name, setName] = useState("");
+  const [setup, setSetup] = useState<StrategySetupType>("hod_breakout");
+  const [entryRules, setEntryRules] = useState("");
+  const [stopRules, setStopRules] = useState("");
+  const [targetRules, setTargetRules] = useState("");
+  const [exitRules, setExitRules] = useState("");
+  const [versionFor, setVersionFor] = useState<string>("");
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  if (available === null) return null;
+  if (available === false) {
+    return (
+      <div className="card" style={{ padding: 14, marginTop: 12 }}>
+        <b style={{ fontSize: 13.5 }}>Trading Strategies</b>
+        <p className="hint" style={{ margin: "6px 0 0" }}>
+          Strategy tracking is not enabled on this deployment yet (its database update has not been
+          applied). Daily Replay works as before — attempts simply record no strategy until it is enabled.
+        </p>
+      </div>
+    );
+  }
+
+  const createStrategy = async () => {
+    if (!name.trim() || busy) return;
+    setBusy(true); setMsg(null);
+    try {
+      const supabase = createClient();
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error("Please sign in to save strategies.");
+      const { data: s, error } = await supabase
+        .from("strategies")
+        .insert({ user_id: user.id, name: name.trim() })
+        .select("id")
+        .single();
+      if (error || !s) throw error ?? new Error("Could not create the strategy.");
+      const { error: vErr } = await supabase.rpc("dr_allocate_strategy_version", {
+        p_strategy_id: s.id,
+        p_setup_type: setup,
+        p_entry_rules: entryRules.trim() || null,
+        p_stop_rules: stopRules.trim() || null,
+        p_target_rules: targetRules.trim() || null,
+        p_exit_rules: exitRules.trim() || null,
+        p_market_filters: {},
+        p_notes: null,
+      });
+      if (vErr) throw vErr;
+      setName(""); setEntryRules(""); setStopRules(""); setTargetRules(""); setExitRules("");
+      setShowCreate(false);
+      setMsg("Strategy saved with version 1. It becomes available in the strategy picker when you lock a Daily Replay.");
+      onChanged();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "Could not save the strategy.");
+    } finally { setBusy(false); }
+  };
+
+  const createVersion = async (strategyId: string) => {
+    if (busy) return;
+    setBusy(true); setMsg(null);
+    try {
+      const supabase = createClient();
+      const { data, error } = await supabase.rpc("dr_allocate_strategy_version", {
+        p_strategy_id: strategyId,
+        p_setup_type: setup,
+        p_entry_rules: entryRules.trim() || null,
+        p_stop_rules: stopRules.trim() || null,
+        p_target_rules: targetRules.trim() || null,
+        p_exit_rules: exitRules.trim() || null,
+        p_market_filters: {},
+        p_notes: null,
+      });
+      if (error) throw error;
+      const v = data as { version?: number } | null;
+      setMsg(`Version ${v?.version ?? ""} created. Existing attempts keep the version they were locked under — versions are never edited.`);
+      setVersionFor("");
+      onChanged();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "Could not create the version.");
+    } finally { setBusy(false); }
+  };
+
+  const archiveStrategy = async (s: Strategy) => {
+    if (busy) return;
+    setBusy(true); setMsg(null);
+    try {
+      const supabase = createClient();
+      const { error } = await supabase
+        .from("strategies")
+        .update({ archived_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+        .eq("id", s.id);
+      if (error) throw error;
+      setMsg(`"${s.name}" archived. It stays attached to its historical attempts and can no longer be picked for new ones.`);
+      onChanged();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "Could not archive the strategy.");
+    } finally { setBusy(false); }
+  };
+
+  const rulesFields = (
+    <>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 8 }}>
+        <label style={{ fontSize: 12 }}>Setup type
+          <select className="input" value={setup} onChange={(e) => setSetup(e.target.value as StrategySetupType)} style={{ width: "100%" }}>
+            {STRATEGY_SETUP_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+          </select>
+        </label>
+        <label style={{ fontSize: 12 }}>Entry rules
+          <textarea className="input" rows={2} value={entryRules} onChange={(e) => setEntryRules(e.target.value)} style={{ width: "100%" }} placeholder="When do you enter?" />
+        </label>
+        <label style={{ fontSize: 12 }}>Stop rules
+          <textarea className="input" rows={2} value={stopRules} onChange={(e) => setStopRules(e.target.value)} style={{ width: "100%" }} placeholder="Where is the stop?" />
+        </label>
+        <label style={{ fontSize: 12 }}>Target rules
+          <textarea className="input" rows={2} value={targetRules} onChange={(e) => setTargetRules(e.target.value)} style={{ width: "100%" }} placeholder="Where do you take profit?" />
+        </label>
+        <label style={{ fontSize: 12 }}>Exit rules
+          <textarea className="input" rows={2} value={exitRules} onChange={(e) => setExitRules(e.target.value)} style={{ width: "100%" }} placeholder="How do you exit otherwise?" />
+        </label>
+      </div>
+    </>
+  );
+
+  return (
+    <div className="card" style={{ padding: 14, marginTop: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <b style={{ fontSize: 13.5 }}>Trading Strategies</b>
+        <span className="hint">Record a strategy, lock Daily Replay attempts under one of its versions, and review the results per version in your journal.</span>
+        <button className="btn" style={{ marginLeft: "auto" }} onClick={() => setShowCreate((s) => !s)}>
+          {showCreate ? "Close" : "New strategy"}
+        </button>
+      </div>
+      {msg && <div className="hint" style={{ marginTop: 8, color: "var(--foreground)" }}>{msg}</div>}
+      {showCreate && (
+        <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
+          <label style={{ fontSize: 12 }}>Strategy name
+            <input className="input" value={name} onChange={(e) => setName(e.target.value)} style={{ width: "100%" }} placeholder="e.g. HOD Breakout" />
+          </label>
+          {rulesFields}
+          <div>
+            <button className="btn primary" onClick={createStrategy} disabled={busy || !name.trim()}>
+              {busy ? "Saving…" : "Save strategy (creates version 1)"}
+            </button>
+          </div>
+        </div>
+      )}
+      {strategies.length === 0 && !showCreate && (
+        <p className="hint" style={{ margin: "8px 0 0" }}>No strategies yet. Attempts locked without a strategy stay unclassified — nothing is assigned after the fact.</p>
+      )}
+      <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
+        {strategies.map((s) => {
+          const sVersions = versions.filter((v) => v.strategyId === s.id).sort((a, b) => a.version - b.version);
+          const isOpen = expanded === s.id;
+          return (
+            <div key={s.id} style={{ border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8, padding: "10px 12px" }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <button className="btn" style={{ padding: "2px 10px" }} onClick={() => setExpanded(isOpen ? null : s.id)}>
+                  {isOpen ? "▾" : "▸"} {s.name}
+                </button>
+                <span className="hint">{sVersions.length} version{sVersions.length === 1 ? "" : "s"}</span>
+                {s.archivedAt
+                  ? <span className="hint">archived</span>
+                  : <button className="btn" style={{ padding: "2px 10px", fontSize: 12 }} disabled={busy} onClick={() => archiveStrategy(s)}>Archive</button>}
+                {!s.archivedAt && (
+                  <button className="btn" style={{ padding: "2px 10px", fontSize: 12 }} disabled={busy}
+                    onClick={() => setVersionFor(versionFor === s.id ? "" : s.id)}>
+                    New version
+                  </button>
+                )}
+              </div>
+              {versionFor === s.id && (
+                <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
+                  {rulesFields}
+                  <div>
+                    <button className="btn primary" onClick={() => createVersion(s.id)} disabled={busy}>
+                      {busy ? "Saving…" : `Save as version ${sVersions.length > 0 ? Math.max(...sVersions.map((v) => v.version)) + 1 : 1}`}
+                    </button>
+                    <span className="hint" style={{ marginLeft: 8 }}>The previous version stays exactly as recorded.</span>
+                  </div>
+                </div>
+              )}
+              {isOpen && (
+                <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
+                  {sVersions.map((v) => {
+                    const vAttempts = attempts.filter((a) => a.strategyVersionId === v.id);
+                    return (
+                      <div key={v.id} style={{ fontSize: 12.5, borderTop: "1px solid rgba(255,255,255,0.05)", paddingTop: 8 }}>
+                        <b>{strategyVersionLabel(s.name, v.version)}</b> · {setupTypeLabel(v.setupType)}
+                        {v.entryRules && <div className="hint">Entry: {v.entryRules}</div>}
+                        {v.stopRules && <div className="hint">Stop: {v.stopRules}</div>}
+                        {v.targetRules && <div className="hint">Target: {v.targetRules}</div>}
+                        {v.exitRules && <div className="hint">Exit: {v.exitRules}</div>}
+                        <div className="hint" style={{ marginTop: 3 }}>
+                          {vAttempts.length === 0 ? "No attempts recorded under this version yet." : vAttempts.map((a) => (
+                            <span key={a.id} style={{ marginRight: 10 }}>
+                              Attempt {a.id.slice(0, 8)} · {a.status}{a.sessionId ? <> · <a href="/journal">view trades in Journal</a></> : ""}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 function ReplayPageInner() {
   const searchParams = useSearchParams();
@@ -357,6 +623,44 @@ function ReplayPageInner() {
   drInfoRef.current = drInfo;
   const [drFinal, setDrFinal] = useState<{ realized: number; equity: number } | null>(null);
   const [drSaveMsg, setDrSaveMsg] = useState<string | null>(null);
+  /* ---- Daily Replay strategies (prepared migration) ----
+   * Loaded best-effort when the page mounts for a signed-in user.
+   * `drStrategiesAvailable === false` means the strategies tables do
+   * not exist on this deployment yet (migration not applied): the
+   * strategy UI disables itself with an honest notice and every other
+   * Daily Replay behavior is unchanged. */
+  const [drStrategies, setDrStrategies] = useState<Strategy[]>([]);
+  const [drStrategyVersions, setDrStrategyVersions] = useState<StrategyVersion[]>([]);
+  const [drStrategiesAvailable, setDrStrategiesAvailable] = useState<boolean | null>(null);
+  /** Version id selected for the NEXT lock ("" = no strategy). */
+  const [drStrategySel, setDrStrategySel] = useState<string>("");
+  /** Attempts list for the strategies review surface. */
+  const [drAttemptsList, setDrAttemptsList] = useState<DrAttemptLink[]>([]);
+
+  const loadDrStrategies = useCallback(async () => {
+    if (!isSupabaseConfigured()) { setDrStrategiesAvailable(false); return; }
+    try {
+      const supabase = createClient();
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) { setDrStrategiesAvailable(false); return; }
+      const [sRes, vRes, aRes] = await Promise.all([
+        supabase.from("strategies").select("*").order("created_at", { ascending: true }).limit(200),
+        supabase.from("strategy_versions").select("*").order("version", { ascending: true }).limit(1000),
+        supabase.from("daily_replay_attempts").select("id,session_id,strategy_version_id,status,start_index,created_at,finished_at").order("created_at", { ascending: false }).limit(200),
+      ]);
+      if (sRes.error || vRes.error) throw sRes.error ?? vRes.error;
+      setDrStrategies((sRes.data ?? []).map((r) => mapStrategyRow(r as Record<string, unknown>)));
+      setDrStrategyVersions((vRes.data ?? []).map((r) => mapStrategyVersionRow(r as Record<string, unknown>)));
+      if (!aRes.error && aRes.data) {
+        setDrAttemptsList(aRes.data.map((r) => mapAttemptRow(r as Record<string, unknown>)));
+      }
+      setDrStrategiesAvailable(true);
+    } catch {
+      setDrStrategiesAvailable(false);
+    }
+  }, []);
+
+  useEffect(() => { void loadDrStrategies(); }, [loadDrStrategies]);
   const drFeedRef = useRef<SealedCandleFeed | null>(null);
   /* Preview -> workspace framing handoff: the preview chart reports
    * its visible range (and the bar spacing derived from it) on every
@@ -654,10 +958,16 @@ function ReplayPageInner() {
       });
       if (upErr) throw upErr;
       // 3) Create the sealed attempt; the feed ingests ONLY the
-      //    server-released prefix [0..start].
+      //    server-released prefix [0..start]. The selected strategy
+      //    version is bound NOW, server-side — it can never be
+      //    attached or changed later.
+      const boundVersionId = drStrategiesAvailable && drStrategySel ? drStrategySel : null;
+      const boundCtx = boundVersionId
+        ? resolveVersionContext(boundVersionId, drStrategies, drStrategyVersions)
+        : null;
       const feed = new SealedCandleFeed(createDrTransport(supabase));
       feed.setTotal(pv.candles.length);
-      await feed.create(ds.id, pv.selected);
+      await feed.create(ds.id, pv.selected, boundVersionId);
       const info: DrInfo = {
         attemptId: feed.attemptId!,
         datasetId: ds.id,
@@ -665,6 +975,8 @@ function ReplayPageInner() {
         tradeDate: pv.meta.tradeDate,
         startIndex: pv.selected,
         total: pv.candles.length,
+        strategyVersionId: boundVersionId,
+        strategyLabel: boundCtx?.label ?? null,
       };
       // Decision Timeline starts here: attempt_created is event #1.
       const startCandle = feed.candles[pv.selected];
@@ -692,6 +1004,8 @@ function ReplayPageInner() {
           startIndex: info.startIndex,
           startEtTime: startCandle ? formatEtTime(startCandle.t) : "",
           startingBalance: DAILY_REPLAY_STARTING_BALANCE,
+          strategyVersionId: info.strategyVersionId,
+          strategyLabel: info.strategyLabel,
         },
         {
           marketIdx: info.startIndex,
@@ -761,7 +1075,7 @@ function ReplayPageInner() {
     } finally {
       setDrBusy(false);
     }
-  }, [drPreview, bump]);
+  }, [drPreview, bump, drStrategiesAvailable, drStrategySel, drStrategies, drStrategyVersions]);
 
   // Step button for Daily Replay: release the next candle first when
   // the engine sits at the sealed end — exactly one candle, through
@@ -986,6 +1300,21 @@ function ReplayPageInner() {
         setPlannedSL(recon.restoredPlannedBrackets.sl);
         setPlannedTP(recon.restoredPlannedBrackets.tp);
       }
+      // Strategy binding (best-effort): the column exists only once
+      // the strategies migration is applied; a failed probe simply
+      // leaves the resumed attempt's strategy unshown.
+      let resumedVersionId: string | null = null;
+      try {
+        const { data: sv } = await supabase
+          .from("daily_replay_attempts")
+          .select("strategy_version_id")
+          .eq("id", offer.attemptId)
+          .maybeSingle();
+        resumedVersionId = (sv?.strategy_version_id as string | null) ?? null;
+      } catch { /* column not present yet */ }
+      const resumedCtx = resumedVersionId
+        ? resolveVersionContext(resumedVersionId, drStrategies, drStrategyVersions)
+        : null;
       const info: DrInfo = {
         attemptId: offer.attemptId,
         datasetId: att.dataset_id as string,
@@ -993,6 +1322,8 @@ function ReplayPageInner() {
         tradeDate: offer.tradeDate,
         startIndex: att.start_index as number,
         total: offer.total,
+        strategyVersionId: resumedVersionId,
+        strategyLabel: resumedCtx?.label ?? null,
       };
       stopTimer();
       setEnded(false);
@@ -1033,7 +1364,7 @@ function ReplayPageInner() {
     } finally {
       setDrResuming(false);
     }
-  }, [drResume, drResuming, bump, stopTimer]);
+  }, [drResume, drResuming, bump, stopTimer, drStrategies, drStrategyVersions]);
 
   // Load a saved session (?session=<id>)
   useEffect(() => {
@@ -1077,7 +1408,7 @@ function ReplayPageInner() {
         }
         engineRef.current = eng;
         setCandles(cs);
-        setMeta({ ticker: s.ticker, tradeDate: s.trade_date, source: s.source, startIndex: s.start_index ?? 0 });
+        setMeta({ ticker: s.ticker, tradeDate: s.trade_date, source: normalizeReloadedSource(s.source as string), startIndex: s.start_index ?? 0 });
         bump();
       } catch (e) {
         setSaveMsg(e instanceof Error ? e.message : "Failed to load session.");
@@ -1716,42 +2047,65 @@ function ReplayPageInner() {
         setDrSaveMsg("Replay complete. (Not signed in — session was not saved.)");
         return;
       }
-      const { data: s, error } = await supabase
-        .from("replay_sessions")
-        .insert({
-          user_id: user.id,
-          ticker: info.ticker,
-          trade_date: info.tradeDate,
-          source: "twelvedata",
-          candles: feed.candles,
-          start_index: info.startIndex,
-          final_cash: eng.cash,
-          realized_pnl: eng.realizedPnl,
-        })
-        .select("id")
-        .single();
-      if (error || !s) throw error ?? new Error("Daily Replay session save failed.");
-      if (eng.fills.length > 0) {
-        const { error: tErr } = await supabase.from("session_trades").insert(
-          eng.fills.map((f) => ({
-            session_id: s.id,
-            user_id: user.id,
-            side: f.side,
-            qty: f.qty,
-            price: f.price,
-            candle_index: f.candleIndex,
-            candle_time: new Date(f.time).toISOString(),
-            realized_pnl: f.realizedPnl,
-            note: f.note ?? null,
-          }))
-        );
-        if (tErr) throw tErr;
-      }
-      const { error: fErr } = await supabase.rpc("dr_finish_attempt", {
+      // Completion is ONE server-side transaction (strategies
+      // migration): dr_complete_attempt locks the attempt row, and a
+      // retry or concurrent second call returns the EXISTING session
+      // id without inserting — an attempt can never produce two
+      // journal sessions. The session saves with source
+      // 'daily_replay'; ticker/date are read server-side from the
+      // attempt's own dataset.
+      const fillsPayload = eng.fills.map((f) => ({
+        side: f.side,
+        qty: f.qty,
+        price: f.price,
+        candle_index: f.candleIndex,
+        candle_time: new Date(f.time).toISOString(),
+        realized_pnl: f.realizedPnl,
+        note: f.note ?? null,
+      }));
+      const { data: completedId, error: cErr } = await supabase.rpc("dr_complete_attempt", {
         p_attempt_id: info.attemptId,
-        p_session_id: s.id,
+        p_candles: feed.candles,
+        p_start_index: info.startIndex,
+        p_final_cash: eng.cash,
+        p_realized_pnl: eng.realizedPnl,
+        p_fills: fillsPayload,
       });
-      if (fErr) throw fErr;
+      if (cErr && !isMissingDrFunction(cErr, "dr_complete_attempt")) throw cErr;
+      if (cErr) {
+        // The strategies migration is not applied on this deployment
+        // yet: complete exactly as before it existed (direct inserts
+        // + dr_finish_attempt, source 'twelvedata'). Nothing about
+        // today's behavior changes until the migration lands.
+        const { data: s, error } = await supabase
+          .from("replay_sessions")
+          .insert({
+            user_id: user.id,
+            ticker: info.ticker,
+            trade_date: info.tradeDate,
+            source: "twelvedata",
+            candles: feed.candles,
+            start_index: info.startIndex,
+            final_cash: eng.cash,
+            realized_pnl: eng.realizedPnl,
+          })
+          .select("id")
+          .single();
+        if (error || !s) throw error ?? new Error("Daily Replay session save failed.");
+        if (eng.fills.length > 0) {
+          const { error: tErr } = await supabase.from("session_trades").insert(
+            fillsPayload.map((f) => ({ ...f, session_id: s.id, user_id: user.id }))
+          );
+          if (tErr) throw tErr;
+        }
+        const { error: fErr } = await supabase.rpc("dr_finish_attempt", {
+          p_attempt_id: info.attemptId,
+          p_session_id: s.id,
+        });
+        if (fErr) throw fErr;
+      } else if (!completedId) {
+        throw new Error("Daily Replay completion returned no session.");
+      }
       // The attempt is finished server-side: the resume hint is spent.
       try { localStorage.removeItem(DAILY_REPLAY_STATE_KEY); } catch { /* ignore */ }
       await flushDrEvents();
@@ -1837,7 +2191,12 @@ function ReplayPageInner() {
         data: { user },
       } = await supabase.auth.getUser();
       if (!user) return;
-      const { error } = await supabase.from("daily_replay_events").insert(
+      // Upsert with ignore-duplicates on the (attempt_id, seq) unique
+      // constraint: a batch retried after an uncertain failure (rows
+      // landed, response lost) used to die with 23505 and wedge every
+      // later flush at the same offset — now the already-landed rows
+      // are simply skipped and the rest still insert.
+      const { error } = await supabase.from("daily_replay_events").upsert(
         pending.map((e) => ({
           attempt_id: info.attemptId,
           user_id: user.id,
@@ -1847,7 +2206,8 @@ function ReplayPageInner() {
           market_idx: e.marketIdx,
           market_ts: e.marketTs,
           payload: e.payload,
-        }))
+        })),
+        { onConflict: "attempt_id,seq", ignoreDuplicates: true }
       );
       if (error) throw error;
       drFlushedRef.current += pending.length;
@@ -2207,6 +2567,32 @@ function ReplayPageInner() {
               </div>
             );
           })()}
+          {/* Strategy picker: the chosen version is BOUND to the
+              attempt when it is created at lock time, server-side,
+              and can never be attached or changed afterwards. */}
+          <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap", alignItems: "center" }}>
+            <span style={{ fontSize: 12.5, color: "var(--muted)" }}>Strategy for this attempt:</span>
+            {drStrategiesAvailable ? (
+              <select
+                className="input"
+                style={{ width: "auto" }}
+                value={drStrategySel}
+                onChange={(e) => setDrStrategySel(e.target.value)}
+                aria-label="Strategy version for this attempt"
+              >
+                <option value="">No strategy (unclassified)</option>
+                {drStrategies.filter((s) => !s.archivedAt).map((s) => (
+                  <optgroup key={s.id} label={s.name}>
+                    {drStrategyVersions.filter((v) => v.strategyId === s.id).sort((a, b) => b.version - a.version).map((v) => (
+                      <option key={v.id} value={v.id}>{strategyVersionLabel(s.name, v.version)} — {setupTypeLabel(v.setupType)}</option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+            ) : (
+              <span className="hint">Strategy tracking is not enabled on this deployment yet — this attempt will record no strategy.</span>
+            )}
+          </div>
           <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
             <button
               className="btn primary big"
@@ -2248,6 +2634,15 @@ function ReplayPageInner() {
                 <div>
                   Starting balance: <b>{formatMoney(DAILY_REPLAY_STARTING_BALANCE)}</b>{" "}
                   (separate Daily Replay account — your Trade Lab balance is untouched)
+                </div>
+                <div>
+                  Strategy:{" "}
+                  <b>
+                    {drStrategiesAvailable && drStrategySel
+                      ? (resolveVersionContext(drStrategySel, drStrategies, drStrategyVersions)?.label ?? "Selected strategy")
+                      : "None — this attempt stays unclassified"}
+                  </b>{" "}
+                  (recorded on the attempt at lock; it cannot be changed later)
                 </div>
                 <div style={{ color: "var(--muted)" }}>
                   Once locked, the starting point cannot be changed for this attempt,
@@ -2315,6 +2710,13 @@ function ReplayPageInner() {
             </div>
           )}
           <DataSourcePanel candles={candles} meta={meta} onLoad={handleLoad} onPreview={handleDrPreview} />
+          <DrStrategyPanel
+            strategies={drStrategies}
+            versions={drStrategyVersions}
+            attempts={drAttemptsList}
+            available={drStrategiesAvailable}
+            onChanged={() => { void loadDrStrategies(); }}
+          />
           {saveMsg && <div className="err" style={{ marginTop: 12 }}>{saveMsg}</div>}
         </div>
       )}
@@ -2338,6 +2740,9 @@ function ReplayPageInner() {
               <span>
                 {drInfo.ticker} · {drInfo.tradeDate} · started{" "}
                 {formatEtTime(eng.candles[drInfo.startIndex]?.t ?? 0)} ET
+              </span>
+              <span title="The strategy version this attempt was locked under">
+                Strategy: <b>{drInfo.strategyLabel ?? "None recorded"}</b>
               </span>
               <span>
                 Candle {Math.min(eng.index + 1, drInfo.total)} of {drInfo.total}
