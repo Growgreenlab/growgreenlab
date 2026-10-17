@@ -527,9 +527,19 @@ export class ReplayEngine {
  * Deterministic intra-candle tick path: a Brownian bridge pinned to the
  * open and close, so the price fluctuates naturally like a live tape —
  * drifting, pulling back, and breathing around the open→close line.
- * The path is clamped to the candle's true [low, high], pinned to touch
- * the true high and low once (no visual snap at finalize), and volume
+ * The path is clamped to the candle's true [low, high], and volume
  * accumulates in bursts proportional to price movement, as in real markets.
+ *
+ * The true high/low are attained via smooth EXCURSIONS, not teleports:
+ * each extreme gets a raised-cosine (Hann) bump centered at a random
+ * interior tick, sized to exactly the bridge's deficit at that tick, so
+ * price WALKS to the extreme and back over ~2W ticks instead of jumping
+ * there in one tick (the old single-point pin moved up to a full range
+ * in a single tick — the wick appeared fully grown in one frame). The
+ * bump's max slope is amp·π/(2W); W is derived from the deficit so the
+ * excursion's own slope stays ≤ ~range/25, and the bumps vanish at both
+ * ends so the open/close pins are never disturbed. The two bumps are
+ * kept non-overlapping (an overlap would eat into the other's peak).
  */
 function makeTicks(c: Candle, n: number = TICKS_PER_CANDLE): { ticks: number[]; volFrac: number[] } {
   const rand = mulberry32(hashSeed(c.t, c.o, c.h, c.l, c.c, c.v));
@@ -553,11 +563,70 @@ function makeTicks(c: Candle, n: number = TICKS_PER_CANDLE): { ticks: number[]; 
   pts[0] = c.o;
   pts[n - 1] = c.c;
   if (c.h > c.l && n > 4) {
-    const iH = 1 + Math.floor(rand() * (n - 2));
-    let iL = 1 + Math.floor(rand() * (n - 2));
-    if (iL === iH) iL = iL >= n - 2 ? 1 : iL + 1;
-    pts[iH] = c.h;
-    pts[iL] = c.l;
+    // Excursion centers stay interior so the bumps (half-width ≤ maxW)
+    // are exactly zero at both ends and never disturb the open/close.
+    const edge = Math.min(48, Math.floor(n / 4));
+    const cLo = edge;
+    const cHi = n - 1 - edge;
+    const span = Math.max(1, cHi - cLo);
+    const maxW = Math.max(6, Math.min(44, Math.floor((span - 2) / 2)));
+    // Width from deficit: slope of a Hann bump peaks at amp·π/(2W), so
+    // W = ceil(40·amp/range) caps the excursion slope at ~range/25.
+    const widthFor = (amp: number) =>
+      Math.max(6, Math.min(maxW, Math.ceil(40 * (amp / range))));
+    const drawCenter = () => cLo + Math.floor(rand() * (span + 1));
+    const iH = drawCenter();
+    let iL = drawCenter();
+    // Deficits are read off the untouched bridge at the centers; the
+    // bumps must not overlap, or each would shave the other's peak.
+    const dH = c.h - pts[iH];
+    let dL = pts[iL] - c.l;
+    let wH = widthFor(dH);
+    let wL = widthFor(dL);
+    let tries = 0;
+    while (Math.abs(iH - iL) < wH + wL + 2 && tries < 8) {
+      iL = drawCenter();
+      dL = pts[iL] - c.l;
+      wL = widthFor(dL);
+      tries++;
+    }
+    if (Math.abs(iH - iL) < wH + wL + 2) {
+      // Deterministic fallback: park the low excursion at whichever
+      // interior end is farther from iH, then — for short paths where
+      // even that cannot separate max-width bumps — shrink both widths
+      // proportionally until the supports are disjoint. Amplitudes are
+      // never touched, so both extremes are still attained exactly;
+      // only the excursion slope steepens in this rare case.
+      iL = iH - cLo < cHi - iH ? cHi : cLo;
+      dL = pts[iL] - c.l;
+      wL = widthFor(dL);
+      const dist = Math.abs(iH - iL);
+      if (dist < wH + wL + 2) {
+        const avail = Math.max(4, dist - 2);
+        wH = Math.max(2, Math.floor((wH / (wH + wL)) * avail));
+        wL = Math.max(2, avail - wH);
+      }
+    }
+    const bump = (center: number, width: number, amp: number, sign: 1 | -1) => {
+      if (amp <= 0) return;
+      const from = Math.max(0, center - width);
+      const to = Math.min(n - 1, center + width);
+      for (let k = from; k <= to; k++) {
+        const u = (k - center) / width;
+        pts[k] += sign * amp * 0.5 * (1 + Math.cos(Math.PI * u));
+      }
+    };
+    bump(iH, wH, dH, +1);
+    bump(iL, wL, dL, -1);
+    // Bumps can push bridge points past the true range; clamping is a
+    // contraction (never steepens a step) and the centers still land
+    // exactly on the true high/low.
+    for (let k = 0; k < n; k++) {
+      if (pts[k] > c.h) pts[k] = c.h;
+      if (pts[k] < c.l) pts[k] = c.l;
+    }
+    pts[0] = c.o;
+    pts[n - 1] = c.c;
   }
 
   // volume follows price activity: bursts on moves, quiet on drifts
