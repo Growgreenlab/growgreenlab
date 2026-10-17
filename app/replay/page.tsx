@@ -22,6 +22,7 @@ import {
   highlightBandFor,
   drDatasetKey,
   premarketWarningGate,
+  premarketOverlayVisible,
   type SealedTransport,
 } from "../../lib/dailyReplay";
 import {
@@ -2453,8 +2454,14 @@ function ReplayPageInner() {
                     </button>
                   ))}
                 </div>
-                {/* Honest premarket notice — shown only when verified premarket data is unavailable */}
-                {meta?.premarketUnavailable && !premarketNoticeDismissed && (
+                {/* Honest premarket notice — shown only when verified premarket data is unavailable.
+                    Standard-replay surface only: Daily Replay attempts (active/done, incl.
+                    resumed) never render it — the preview gate already informed the user. */}
+                {premarketOverlayVisible({
+                  phase: drPhase,
+                  premarketUnavailable: meta?.premarketUnavailable ?? false,
+                  dismissed: premarketNoticeDismissed,
+                }) && (
                   <div
                     style={{
                       position: "absolute",

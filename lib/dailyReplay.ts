@@ -370,6 +370,31 @@ export function premarketWarningGate(input: {
   return { showWarning, blockSelection: showWarning };
 }
 
+/**
+ * Visibility of the in-replay (chart-overlay) PREMARKET DATA
+ * UNAVAILABLE notice. That overlay is a STANDARD-replay surface: it
+ * shows while a standard session whose premarket data is unavailable
+ * is running, until the user dismisses it.
+ *
+ * Daily Replay has exactly one premarket surface — the load-time
+ * preview gate above (premarketWarningGate). Once a DR attempt exists
+ * (phase "active" or "done"; resumed attempts re-enter "active"), the
+ * user has already seen the warning, dismissed it to unlock selection,
+ * and confirmed the start, so the overlay NEVER renders in those
+ * phases — regardless of the overlay's own dismissal state, which is
+ * a separate standard-replay state the preview gate never touches.
+ * Phases "off" (standard replay) and "preview" (no attempt yet)
+ * follow the standard rule unchanged.
+ */
+export function premarketOverlayVisible(input: {
+  phase: "off" | "preview" | "active" | "done";
+  premarketUnavailable: boolean;
+  dismissed: boolean;
+}): boolean {
+  if (input.phase === "active" || input.phase === "done") return false;
+  return input.premarketUnavailable && !input.dismissed;
+}
+
 /* ------------------------------------------------------------------ */
 /* 2. Market-session calendar                                          */
 /* ------------------------------------------------------------------ */

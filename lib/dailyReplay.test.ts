@@ -14,6 +14,7 @@ import {
   resolveHighlightBar,
   type HighlightDisplayBar,
   premarketWarningGate,
+  premarketOverlayVisible,
   drDatasetKey,
   SealedCandleFeed,
   DAILY_REPLAY_STARTING_BALANCE,
@@ -246,6 +247,41 @@ const FRI = "2026-10-16"; // a Friday
   check("gate: new dataset re-evaluates → shown again", otherKey.showWarning && otherKey.blockSelection);
   const avail = premarketWarningGate({ premarketAvailable: true, datasetKey: key, dismissedKey: null });
   check("gate: premarket available → never shown, never blocked", !avail.showWarning && !avail.blockSelection);
+}
+
+/* ------------- in-replay premarket overlay visibility -------------
+ * The chart-overlay notice is a STANDARD-replay surface. This helper
+ * governs ONLY that overlay; the Daily Replay preview warning is
+ * premarketWarningGate's job (tested above) and is out of scope here.
+ * The bug being pinned: in a DR attempt the overlay kept rendering at
+ * Candle 78/390 because its dismissal state is separate from the
+ * preview gate's — the user had already been informed and confirmed. */
+{
+  // Standard replay ("off"): unchanged behavior.
+  check("overlay: standard + unavailable + not dismissed → show",
+    premarketOverlayVisible({ phase: "off", premarketUnavailable: true, dismissed: false }) === true);
+  check("overlay: standard + unavailable + dismissed → hide",
+    premarketOverlayVisible({ phase: "off", premarketUnavailable: true, dismissed: true }) === false);
+  check("overlay: standard + available → hide",
+    premarketOverlayVisible({ phase: "off", premarketUnavailable: false, dismissed: false }) === false);
+  // DR preview (no attempt yet): the underlying standard rule applies;
+  // the DR warning itself lives in the preview gate, not this overlay.
+  check("overlay: preview + unavailable + not dismissed → standard rule (show)",
+    premarketOverlayVisible({ phase: "preview", premarketUnavailable: true, dismissed: false }) === true);
+  // DR attempt phases: NEVER shown, even with the overlay's own
+  // dismissal state untouched (the reported Candle 78/390 case).
+  check("overlay: DR active + unavailable + not dismissed → hide (bug case)",
+    premarketOverlayVisible({ phase: "active", premarketUnavailable: true, dismissed: false }) === false);
+  check("overlay: DR active after resume + unavailable → hide",
+    premarketOverlayVisible({ phase: "active", premarketUnavailable: true, dismissed: false }) === false);
+  check("overlay: DR active + unavailable + dismissed → hide",
+    premarketOverlayVisible({ phase: "active", premarketUnavailable: true, dismissed: true }) === false);
+  check("overlay: DR done + unavailable + not dismissed → hide",
+    premarketOverlayVisible({ phase: "done", premarketUnavailable: true, dismissed: false }) === false);
+  // Premarket available: hidden in every phase.
+  const phases = ["off", "preview", "active", "done"] as const;
+  check("overlay: premarket available → hide in every phase",
+    phases.every((phase) => !premarketOverlayVisible({ phase, premarketUnavailable: false, dismissed: false })));
 }
 
 /* ---------------- market-session calendar ---------------- */
