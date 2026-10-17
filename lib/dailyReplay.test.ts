@@ -11,6 +11,8 @@ import {
   validateDataset,
   marketSessionStatus,
   highlightBandFor,
+  resolveHighlightBar,
+  type HighlightDisplayBar,
   premarketWarningGate,
   drDatasetKey,
   SealedCandleFeed,
@@ -179,6 +181,55 @@ const FRI = "2026-10-16"; // a Friday
   const cs = [...makeCandles(FRI, "09:30", 2), ...makeCandles(FRI, "09:35", 1)]; // 09:30, 09:31, 09:35
   check("highlight: span to next candle uses real spacing", highlightBandFor(cs, 1)?.spanSec === 240);
   check("highlight: last candle uses previous spacing", highlightBandFor(cs, 2)?.spanSec === 240);
+}
+
+/* ------------- highlight glow: displayed-bar resolution ------------- */
+{
+  const cs = makeCandles(FRI, "09:30", 10); // 09:30..09:39, 1-minute spacing
+  const bars1m: HighlightDisplayBar[] = cs.map((c) => ({
+    timeSec: Math.floor(c.t / 1000),
+    high: c.h,
+    low: c.l,
+  }));
+  const t = (i: number) => Math.floor(cs[i].t / 1000);
+
+  // 1m view: the target resolves to exactly its own candle.
+  const exact = resolveHighlightBar(bars1m, t(3));
+  check("glow: 1m target resolves to its exact bar",
+    exact !== null && exact.barTime === t(3) && exact.spanSec === 60);
+  check("glow: resolved bar carries the candle's high/low",
+    exact !== null && exact.high === cs[3].h && exact.low === cs[3].l);
+  // A target at the next bar's first second belongs to that bar.
+  check("glow: target at a bar start resolves to that bar",
+    resolveHighlightBar(bars1m, t(4))?.barTime === t(4));
+  // Inside the last bar (before its end) still resolves; at/after its
+  // end does not — nothing is displayed there.
+  check("glow: target inside the last bar resolves",
+    resolveHighlightBar(bars1m, t(9) + 30)?.barTime === t(9));
+  check("glow: target at/after the last bar's end → null",
+    resolveHighlightBar(bars1m, t(9) + 60) === null);
+  check("glow: target before the first bar → null",
+    resolveHighlightBar(bars1m, t(0) - 60) === null);
+  check("glow: empty bars → null", resolveHighlightBar([], t(0)) === null);
+  check("glow: non-finite target → null",
+    resolveHighlightBar(bars1m, Number.NaN) === null);
+
+  // Aggregated 5m view: two displayed bars aggregated from the same
+  // 1m candles (prices rise with i, so extremes are the group edges).
+  const agg = (from: number, to: number): HighlightDisplayBar => ({
+    timeSec: t(from),
+    high: Math.max(...cs.slice(from, to).map((c) => c.h)),
+    low: Math.min(...cs.slice(from, to).map((c) => c.l)),
+  });
+  const bars5m = [agg(0, 5), agg(5, 10)];
+  // A locked 09:57 candle falls inside the second aggregated bar.
+  const inside = resolveHighlightBar(bars5m, t(7));
+  check("glow: aggregated bar containing the target minute resolves",
+    inside !== null && inside.barTime === t(5) && inside.spanSec === 300);
+  check("glow: aggregated bar carries the group's high/low",
+    inside !== null && inside.high === cs[9].h && inside.low === cs[5].l);
+  check("glow: target in the first aggregated bar resolves to it",
+    resolveHighlightBar(bars5m, t(2))?.barTime === t(0));
 }
 
 /* ---------------- premarket warning gate ---------------- */

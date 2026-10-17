@@ -284,6 +284,57 @@ export function highlightBandFor(
   return { timeSec: Math.floor(c.t / 1000), spanSec: spanMs / 1000 };
 }
 
+/** One bar as actually DISPLAYED on the chart (after any timeframe
+ *  aggregation the parent applied): its own timestamp in epoch
+ *  seconds plus its price extent. */
+export interface HighlightDisplayBar {
+  timeSec: number;
+  high: number;
+  low: number;
+}
+
+export interface ResolvedHighlightBar {
+  /** The displayed bar containing the target time, epoch seconds. */
+  barTime: number;
+  high: number;
+  low: number;
+  /** The bar's own span in seconds (distance to the next displayed
+   *  bar; the previous bar's spacing for the last one; 60 if alone). */
+  spanSec: number;
+}
+
+/**
+ * Resolve the DISPLAYED bar that contains `targetTimeSec` — the bar
+ * with barTime <= target < barTime + spanSec. On a 1-minute view that
+ * is exactly the target candle; on an aggregated timeframe it is the
+ * visible aggregated bar the target minute falls inside, so a glow
+ * outline can hug the candle the user actually sees. Returns null
+ * when the target precedes the first displayed bar or falls at/after
+ * the end of the last displayed bar. Purely presentational.
+ */
+export function resolveHighlightBar(
+  bars: HighlightDisplayBar[],
+  targetTimeSec: number,
+): ResolvedHighlightBar | null {
+  if (bars.length === 0 || !Number.isFinite(targetTimeSec)) return null;
+  // Candidate: the last bar starting at or before the target.
+  let i = -1;
+  for (let k = 0; k < bars.length; k++) {
+    if (bars[k].timeSec <= targetTimeSec) i = k;
+    else break;
+  }
+  if (i < 0) return null; // target before the first displayed bar
+  const bar = bars[i];
+  let spanSec = 60;
+  if (i + 1 < bars.length) spanSec = bars[i + 1].timeSec - bar.timeSec;
+  else if (i > 0) spanSec = bar.timeSec - bars[i - 1].timeSec;
+  if (!(spanSec > 0)) spanSec = 60;
+  // At/after the candidate bar's end (only reachable for the last bar,
+  // whose end no later bar delimits): the target is not displayed.
+  if (targetTimeSec >= bar.timeSec + spanSec) return null;
+  return { barTime: bar.timeSec, high: bar.high, low: bar.low, spanSec };
+}
+
 /** Stable identity of one loaded dataset, for per-dataset UI state
  *  (e.g. "the premarket warning was dismissed for THIS dataset"). */
 export function drDatasetKey(

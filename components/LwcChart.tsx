@@ -28,6 +28,7 @@ import {
 import type { CanvasRenderingTarget2D } from "fancy-canvas";
 import type { Candle } from "../lib/types";
 import { planBarPush, type BarPushState } from "../lib/chartPush";
+import { resolveHighlightBar, type HighlightDisplayBar } from "../lib/dailyReplay";
 import { diag } from "../lib/diag";
 import { normalizePrice, formatPrice } from "../lib/price";
 import type { Drawing, DrawingTool, DrawingType, DrawingInteractionState } from "../lib/drawings";
@@ -41,43 +42,86 @@ const UP_VOL = "rgba(46,189,133,0.45)";
 const DOWN_VOL = "rgba(246,70,93,0.45)";
 
 /* ---------- Single-candle highlight (optional; Daily Replay) ----------
- * A series primitive painting a restrained emerald band behind exactly
- * one candle: a soft translucent fill over that candle's time slot,
- * with a subtle emerald rule on each edge as the outline. Coordinates
- * are recomputed from TIMES via the chart's time scale on every draw,
- * so the band stays glued to its candle across pan/zoom with no pixel
- * bookkeeping, and it never touches axes or scales. The band renders
- * in the pane background (z-order bottom), so the candle's own body
- * and wick colors stay fully visible on top. The primitive exists only
- * while a parent passes a highlight target — every other parent is
+ * A series primitive marking exactly one candle two ways:
+ *  1. a faint translucent emerald band behind that candle's time slot
+ *     (pane background, z-order bottom) as time-slot context;
+ *  2. a GLOW outline hugging the displayed candle itself (foreground,
+ *     z-order top): a bright emerald rounded-rect stroke, expanded
+ *     ~2px past the bar's [high..low] extent and its body-slot width,
+ *     drawn with a canvas shadow in the same emerald so the candle
+ *     visibly glows. The stroke only touches the candle's border
+ *     region — body and wick stay fully visible.
+ * The outlined bar is the DISPLAYED bar containing the target time
+ * (lib/dailyReplay's resolveHighlightBar): on a 1-minute view that is
+ * the target candle itself; on an aggregated timeframe it is the
+ * visible aggregated candle the target minute falls inside.
+ * All geometry is recomputed from TIMES and PRICES via the chart's
+ * time scale and the series' price scale on every draw — no pixel
+ * state — so both marks stay glued to their candle across pan/zoom,
+ * and neither touches axes or scales. The primitive exists only while
+ * a parent passes a highlight target — every other parent is
  * completely unaffected. */
-const HIGHLIGHT_FILL = "rgba(46,189,133,0.13)";
-const HIGHLIGHT_EDGE = "rgba(46,189,133,0.55)";
+const HIGHLIGHT_FILL = "rgba(46,189,133,0.07)";
+const HIGHLIGHT_GLOW = "#2ebd85"; // the chart's UP emerald
+const HIGHLIGHT_GLOW_BLUR = 14;
+const HIGHLIGHT_GLOW_WIDTH = 2;
+const HIGHLIGHT_EXPAND_PX = 2;
+
+function roundedRectPath(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number,
+) {
+  const rr = Math.max(0, Math.min(r, w / 2, h / 2));
+  ctx.moveTo(x + rr, y);
+  ctx.lineTo(x + w - rr, y);
+  ctx.arcTo(x + w, y, x + w, y + rr, rr);
+  ctx.lineTo(x + w, y + h - rr);
+  ctx.arcTo(x + w, y + h, x + w - rr, y + h, rr);
+  ctx.lineTo(x + rr, y + h);
+  ctx.arcTo(x, y + h, x, y + h - rr, rr);
+  ctx.lineTo(x, y + rr);
+  ctx.arcTo(x, y, x + rr, y, rr);
+  ctx.closePath();
+}
 
 class CandleHighlightPrimitive implements ISeriesPrimitive {
   private chart: IChartApi | null = null;
+  private series: ISeriesApi<"Candlestick"> | null = null;
   private requestUpdate: (() => void) | null = null;
   private timeSec: number | null = null;
   private spanSec = 60;
+  private bars: HighlightDisplayBar[] = [];
   private readonly views: IPrimitivePaneView[];
 
   constructor() {
-    const renderer: IPrimitivePaneRenderer = {
+    const bandRenderer: IPrimitivePaneRenderer = {
       draw: () => {
         /* painted in the background pass instead */
       },
-      drawBackground: (target) => this.paint(target),
+      drawBackground: (target) => this.paintBand(target),
     };
-    this.views = [{ zOrder: () => "bottom", renderer: () => renderer }];
+    const glowRenderer: IPrimitivePaneRenderer = {
+      draw: (target) => this.paintGlow(target),
+    };
+    this.views = [
+      { zOrder: () => "bottom", renderer: () => bandRenderer },
+      { zOrder: () => "top", renderer: () => glowRenderer },
+    ];
   }
 
   attached(param: SeriesAttachedParameter) {
     this.chart = param.chart;
+    this.series = param.series as ISeriesApi<"Candlestick">;
     this.requestUpdate = param.requestUpdate;
   }
 
   detached() {
     this.chart = null;
+    this.series = null;
     this.requestUpdate = null;
   }
 
@@ -91,7 +135,14 @@ class CandleHighlightPrimitive implements ISeriesPrimitive {
     this.requestUpdate?.();
   }
 
-  private paint(target: CanvasRenderingTarget2D) {
+  /** The bars currently on the series (post-aggregation), for
+   *  resolving which displayed candle the glow outline hugs. */
+  setBars(bars: HighlightDisplayBar[]) {
+    this.bars = bars;
+    this.requestUpdate?.();
+  }
+
+  private paintBand(target: CanvasRenderingTarget2D) {
     const chart = this.chart;
     const t0 = this.timeSec;
     if (!chart || t0 == null) return;
@@ -111,9 +162,53 @@ class CandleHighlightPrimitive implements ISeriesPrimitive {
       if (x2 == null || x2 <= x1) return;
       context.fillStyle = HIGHLIGHT_FILL;
       context.fillRect(x1, 0, x2 - x1, mediaSize.height);
-      context.fillStyle = HIGHLIGHT_EDGE;
-      context.fillRect(x1, 0, 1.5, mediaSize.height);
-      context.fillRect(x2 - 1.5, 0, 1.5, mediaSize.height);
+    });
+  }
+
+  private paintGlow(target: CanvasRenderingTarget2D) {
+    const chart = this.chart;
+    const series = this.series;
+    const t0 = this.timeSec;
+    if (!chart || !series || t0 == null) return;
+    const bar = resolveHighlightBar(this.bars, t0);
+    if (!bar) return; // no displayed bar contains the target time
+    const ts = chart.timeScale();
+    target.useMediaCoordinateSpace(({ context, mediaSize }) => {
+      const xCenter: number | null = ts.timeToCoordinate(bar.barTime as UTCTimestamp);
+      if (xCenter == null) return; // the bar is off-screen
+      let xNext: number | null = ts.timeToCoordinate((bar.barTime + bar.spanSec) as UTCTimestamp);
+      if (xNext == null) {
+        // Bar end is past the last bar: estimate one bar's spacing
+        // from the visible logical range, as the band does.
+        const range = ts.getVisibleLogicalRange();
+        if (!range || range.to <= range.from) return;
+        xNext = xCenter + mediaSize.width / (range.to - range.from);
+      }
+      const spacing = xNext - xCenter;
+      if (!(spacing > 0)) return;
+      const yHigh = series.priceToCoordinate(bar.high);
+      const yLow = series.priceToCoordinate(bar.low);
+      if (yHigh == null || yLow == null) return;
+      // Horizontal expansion past the body slot: ~2px, capped at 40%
+      // of the bar spacing per side so narrow mobile slots keep the
+      // outline from swallowing neighboring candles.
+      const expandX = Math.min(HIGHLIGHT_EXPAND_PX, spacing * 0.4);
+      const left = xCenter - spacing / 2 - expandX;
+      const width = spacing + expandX * 2;
+      const top = Math.min(yHigh, yLow) - HIGHLIGHT_EXPAND_PX;
+      const height = Math.abs(yLow - yHigh) + HIGHLIGHT_EXPAND_PX * 2;
+      context.save();
+      context.beginPath();
+      roundedRectPath(context, left, top, width, height, 4);
+      context.strokeStyle = HIGHLIGHT_GLOW;
+      context.lineWidth = HIGHLIGHT_GLOW_WIDTH;
+      context.shadowColor = HIGHLIGHT_GLOW;
+      context.shadowBlur = HIGHLIGHT_GLOW_BLUR;
+      // Two passes: the second stroke deepens the shadow glow so the
+      // outline stays unmistakable at phone widths.
+      context.stroke();
+      context.stroke();
+      context.restore();
     });
   }
 }
@@ -151,10 +246,12 @@ interface Props {
    *  click. Used by Daily Replay's full-day preview to pick the starting
    *  candle. Omit = no behavior (all existing parents). */
   onCandleClick?: (timeSec: number) => void;
-  /** Optional: epoch-seconds timestamp of ONE candle to mark with a
-   *  subtle emerald highlight band (Daily Replay's selected/locked
-   *  starting candle). Omit or null = no highlight (all existing
-   *  parents). Purely presentational — never affects data or scales. */
+  /** Optional: epoch-seconds timestamp of ONE candle to mark (Daily
+   *  Replay's selected/locked starting candle): a faint emerald band
+   *  behind its time slot plus a glowing emerald outline hugging the
+   *  displayed candle containing that time. Omit or null = no
+   *  highlight (all existing parents). Purely presentational — never
+   *  affects data or scales. */
   highlightTimeSec?: number | null;
   /** Highlight band width in seconds (one candle interval, from
    *  lib/dailyReplay's highlightBandFor). Defaults to 60. */
@@ -552,7 +649,9 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
   // Single-candle highlight primitive (Daily Replay only): attach
   // lazily on first target, retarget in place while one is set, and
   // detach when the target clears — parents that never pass a target
-  // never create it.
+  // never create it. The displayed bars are re-fed whenever the data
+  // changes so the glow outline hugs the bar currently on screen
+  // (including while the highlighted candle is still forming).
   const highlightRef = useRef<CandleHighlightPrimitive | null>(null);
   useEffect(() => {
     const cs = candleSeriesRef.current;
@@ -568,8 +667,18 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       highlightRef.current = new CandleHighlightPrimitive();
       cs.attachPrimitive(highlightRef.current);
     }
+    const n = Math.max(0, Math.min(revealedCount, candles.length));
+    const bars: HighlightDisplayBar[] = [];
+    for (let i = 0; i < n; i++) {
+      bars.push({
+        timeSec: Math.floor(candles[i].t / 1000),
+        high: candles[i].h,
+        low: candles[i].l,
+      });
+    }
     highlightRef.current.setTarget(highlightTimeSec, highlightSpanSec ?? 60);
-  }, [highlightTimeSec, highlightSpanSec]);
+    highlightRef.current.setBars(bars);
+  }, [highlightTimeSec, highlightSpanSec, candles, revealedCount]);
 
   // Bracket line dragging: hit-test on pointerdown, drag the price line,
   // commit on pointerup. Disables chart pan/zoom while a line is dragged.
