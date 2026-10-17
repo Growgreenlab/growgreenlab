@@ -161,7 +161,7 @@ export async function buildTradingReportPdf(
   para(`Period: ${formatRangeText(snapshot.range, snapshot.periodMode)}`);
   para(`Trade source: ${sourceLabel(snapshot.source)}`);
   para(`Generated: ${snapshot.generatedAt}`);
-  para(`Trades: ${snapshot.counts.total} total (${snapshot.counts.closed} closed, ${snapshot.counts.open} open) - ${snapshot.counts.real} Real Market, ${snapshot.counts.simulator} Simulator`);
+  para(`Trades: ${snapshot.counts.total} total (${snapshot.counts.closed} closed, ${snapshot.counts.open} open) - ${snapshot.counts.real} Real Market, ${snapshot.counts.simulator - snapshot.counts.dailyReplay} Simulator${snapshot.counts.dailyReplay > 0 ? `, ${snapshot.counts.dailyReplay} Daily Replay / Backtest (historical simulation - not live performance)` : ""}`);
   para("This report is a descriptive summary of your recorded journal evidence. It is not financial advice and not a promise of profitability.", 9, GRAY);
 
   /* ---- executive summary ---- */
@@ -170,7 +170,7 @@ export async function buildTradingReportPdf(
     para("No closed trades in this selection, so there is no performance evidence to summarize. Open trades (if any) are listed in trades.csv; analytics cover closed trades only.");
   } else {
     para(`Net realized P&L ${money(overall.netRealizedPnl)} across ${overall.closedTrades} closed trades (${overall.wins} wins, ${overall.losses} losses, ${overall.breakevens} breakeven). Win rate ${pct(overall.winRate)} (breakevens excluded from the denominator). Expectancy ${money(overall.expectancy)} per trade. Profit factor ${overall.profitFactorUnbounded ? "unbounded (winners with no losing trades)" : overall.profitFactor == null ? "n/a" : Number(overall.profitFactor).toFixed(2)}. Average R ${rFmt(overall.avgR)} over ${overall.tradesWithR} trades with a recorded stop. Maximum drawdown ${money(overall.maxDrawdownUSD)}${overall.maxDrawdownPct != null ? ` (${overall.maxDrawdownPct.toFixed(1)}% of the preceding cumulative P&L peak)` : ""}.`);
-    if (snapshot.source === "all") para("This selection mixes Real Market and Simulator trades. Per-source subtotals are in analytics.json (perSource); do not read combined figures as real-money performance.", 9, GRAY);
+    if (snapshot.source === "all") para(`This selection mixes ${snapshot.counts.dailyReplay > 0 ? "Real Market, Simulator and Daily Replay" : "Real Market and Simulator"} trades. Per-source subtotals are in analytics.json (perSource); do not read combined figures as real-money performance.`, 9, GRAY);
   }
 
   /* ---- overall stats ---- */

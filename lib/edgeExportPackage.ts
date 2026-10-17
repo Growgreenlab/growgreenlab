@@ -22,8 +22,9 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { BUCKET, listScreenshots } from "./journalAttachments";
 import {
-  buildAnalyticsJson, buildChatGptPrompt, buildReadme, buildScreenshotManifest,
-  buildTradesCsv, publicScreenshotManifestEntry, summarizeScreenshotCoverage,
+  buildAnalyticsJson, buildChatGptPrompt, buildDecisionTimelineCsv, buildReadme,
+  buildScreenshotManifest, buildStrategyJson, buildTradesCsv,
+  publicScreenshotManifestEntry, summarizeScreenshotCoverage,
   type ExportSnapshot, type ScreenshotManifestEntry,
 } from "./edgeExport";
 import type { PdfScreenshotImage } from "./edgeExportPdf";
@@ -33,6 +34,9 @@ export type ExportProgressFn = (stage: string, pct?: number) => void;
 export interface GeneratePackageOptions {
   includeScreenshots: boolean;
   includePdf: boolean;
+  /** Include decision_timeline.csv (default true when the snapshot
+   *  has Daily Replay trades; the file is only ever produced then). */
+  includeDecisionTimeline?: boolean;
 }
 
 export interface PackageSummary {
@@ -66,10 +70,12 @@ async function mapPool<T>(items: T[], limit: number, fn: (item: T, index: number
 }
 
 /**
- * List screenshot storage paths for every real trade in the snapshot
- * (bounded concurrency). Returns tradeKey → storage paths. Listing uses
- * the caller's own session; storage policies restrict it to the user's
- * own folder, so another user's screenshots can never be listed.
+ * List screenshot storage paths for every screenshot-eligible trade in
+ * the snapshot — real trades and Daily Replay trades (bounded
+ * concurrency). Trade Lab simulator trades remain excluded. Returns
+ * tradeKey → storage paths. Listing uses the caller's own session;
+ * storage policies restrict it to the user's own folder, so another
+ * user's screenshots can never be listed.
  */
 export async function listExportScreenshots(
   client: SupabaseClient,
@@ -77,7 +83,7 @@ export async function listExportScreenshots(
   snapshot: ExportSnapshot,
   onProgress?: ExportProgressFn,
 ): Promise<Map<string, string[]>> {
-  const realKeys = snapshot.trades.filter((r) => r.source === "real").map((r) => r.tradeKey);
+  const realKeys = snapshot.trades.filter((r) => r.source === "real" || r.isDailyReplay).map((r) => r.tradeKey);
   const out = new Map<string, string[]>();
   let done = 0;
   await mapPool(realKeys, 4, async (tradeKey) => {
@@ -128,6 +134,11 @@ export async function generateEdgePackage(
   }
   const coverage = summarizeScreenshotCoverage(snapshot, manifest, options.includeScreenshots);
 
+  /* ---- Daily Replay artifacts (schema 2.0, DR selections only) ---- */
+  const strategyJson = buildStrategyJson(snapshot);
+  const includeTimeline = options.includeDecisionTimeline !== false && snapshot.dailyReplay != null;
+  const timelineCsv = includeTimeline ? buildDecisionTimelineCsv(snapshot) : null;
+
   /* ---- text artifacts (all from the same snapshot + final manifest) ---- */
   onProgress?.("Building analytics", undefined);
   const analytics = buildAnalyticsJson(snapshot, manifest, coverage);
@@ -159,8 +170,8 @@ export async function generateEdgePackage(
   }
   const pdfIncluded = pdfBytes != null;
 
-  const promptText = buildChatGptPrompt(snapshot, coverage, { pdfIncluded });
-  const readme = buildReadme(snapshot, coverage, manifest, { pdfIncluded, pdfFailureNote, zipFileName });
+  const promptText = buildChatGptPrompt(snapshot, coverage, { pdfIncluded, timelineIncluded: includeTimeline });
+  const readme = buildReadme(snapshot, coverage, manifest, { pdfIncluded, pdfFailureNote, zipFileName, timelineIncluded: includeTimeline });
   // Privacy: the downloadable manifest contains ONLY the public
   // projection — raw storage paths (account UUID, internal object ids)
   // and internal trade keys are never serialized into the ZIP.
@@ -179,6 +190,8 @@ export async function generateEdgePackage(
   zip.file("ChatGPT_Prompt.txt", promptText);
   zip.file("README.txt", readme);
   zip.file("screenshots-manifest.json", manifestJson);
+  if (timelineCsv) zip.file("decision_timeline.csv", timelineCsv);
+  if (strategyJson) zip.file("strategy.json", JSON.stringify(strategyJson, null, 2));
   if (options.includeScreenshots) {
     const folder = zip.folder("screenshots");
     if (shotBytes.size > 0) {
@@ -196,6 +209,8 @@ export async function generateEdgePackage(
     "trades.csv", "analytics.json",
     ...(pdfIncluded ? ["Trading_Report.pdf"] : []),
     "ChatGPT_Prompt.txt", "README.txt", "screenshots-manifest.json",
+    ...(timelineCsv ? ["decision_timeline.csv"] : []),
+    ...(strategyJson ? ["strategy.json"] : []),
     ...(shotBytes.size > 0 ? [...shotBytes.keys()] : []),
   ];
 

@@ -22,6 +22,7 @@ import {
   DAILY_REPLAY_STATE_KEY,
   encodeDrResumeHint,
   decodeDrResumeHint,
+  normalizeReloadedSource,
   type SealedTransport,
   type CreateAttemptResult,
   type AdvanceResult,
@@ -1058,6 +1059,36 @@ async function strictSealingTests() {
   }
 }
 
+/* ============ strategy binding + source normalization (2.0) ============ */
+async function strategyBindingTests() {
+  console.log("\n-- strategy binding at lock + reload normalization --");
+  check("normalize: daily_replay loads as twelvedata", normalizeReloadedSource("daily_replay") === "twelvedata");
+  check("normalize: twelvedata unchanged", normalizeReloadedSource("twelvedata") === "twelvedata");
+  check("normalize: sample unchanged", normalizeReloadedSource("sample") === "sample");
+  check("normalize: csv unchanged", normalizeReloadedSource("csv") === "csv");
+
+  // The feed must hand the bound version id to the transport verbatim —
+  // binding happens at creation, server-side, never later.
+  const store = new FakeStore();
+  const owner = "owner-1";
+  const dsId = store.addDataset(owner, DAY);
+  const seen: (string | null | undefined)[] = [];
+  const recording: SealedTransport = {
+    async createAttempt(datasetId: string, startIndex: number, strategyVersionId?: string | null) {
+      seen.push(strategyVersionId);
+      return new FakeTransport(store, owner).createAttempt(datasetId, startIndex);
+    },
+    advance: (id: string, steps: number) => new FakeTransport(store, owner).advance(id, steps),
+    getRevealed: (id: string) => new FakeTransport(store, owner).getRevealed(id),
+  };
+  const feed = new SealedCandleFeed(recording);
+  await feed.create(dsId, 2, "ver-123");
+  check("feed.create passes the strategy version id through", seen[0] === "ver-123");
+  const feed2 = new SealedCandleFeed(recording);
+  await feed2.create(dsId, 2);
+  check("feed.create without a strategy passes null", seen[1] === null);
+}
+
 (async () => {
   await sealingTests();
   await engineGrowthTests();
@@ -1066,6 +1097,7 @@ async function strictSealingTests() {
   twelveDataTests();
   eventsTests();
   balanceTests();
+  await strategyBindingTests();
   console.log(`\n=== DAILY REPLAY RESULT: ${passed} passed, ${failed} failed ===`);
   process.exit(failed > 0 ? 1 : 0);
 })();

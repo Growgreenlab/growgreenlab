@@ -16,6 +16,7 @@ import {
   buildExportSnapshot, formatRangeText, resolveExportRange, sourceLabel, todayLocalStr,
   type ExportPeriodMode, type ExportSnapshot, type ExportSnapshotInput, type ExportSource,
 } from "../lib/edgeExport";
+
 import { generateEdgePackage, listExportScreenshots, type PackageResult } from "../lib/edgeExportPackage";
 
 const MAX_AUTO_SCREENSHOT_TRADES = 60;
@@ -32,6 +33,12 @@ export default function EdgeExportPanel({ input }: { input: ExportSnapshotInput 
   const [source, setSource] = useState<ExportSource>("all");
   const [includeScreenshots, setIncludeScreenshots] = useState(true);
   const [includePdf, setIncludePdf] = useState(true);
+  // Daily Replay narrowing (export-panel-only, per the approved design):
+  // strategy / version / single attempt + the Decision Timeline toggle.
+  const [strategySel, setStrategySel] = useState("");
+  const [versionSel, setVersionSel] = useState("");
+  const [attemptSel, setAttemptSel] = useState("");
+  const [includeTimeline, setIncludeTimeline] = useState(true);
 
   const [shotInfo, setShotInfo] = useState<{ state: "idle" | "loading" | "done" | "skipped" | "error"; files: number; tradesWith: number }>({ state: "idle", files: 0, tradesWith: 0 });
   const [busy, setBusy] = useState<string | null>(null);
@@ -51,17 +58,24 @@ export default function EdgeExportPanel({ input }: { input: ExportSnapshotInput 
 
   const snapshot: ExportSnapshot | null = useMemo(() => {
     if (!rangeResult.range) return null;
-    return buildExportSnapshot(input, { range: rangeResult.range, mode, source });
-  }, [input, rangeResult.range, mode, source]);
+    return buildExportSnapshot(input, {
+      range: rangeResult.range, mode, source,
+      strategyId: strategySel || null,
+      strategyVersionId: versionSel || null,
+      attemptId: attemptSel || null,
+    });
+  }, [input, rangeResult.range, mode, source, strategySel, versionSel, attemptSel]);
 
+  // Screenshot-eligible trades: real + Daily Replay (Trade Lab sim excluded).
   const realInRange = useMemo(
-    () => snapshot?.trades.filter((t) => t.source === "real").length ?? 0,
+    () => snapshot?.trades.filter((t) => t.source === "real" || t.isDailyReplay).length ?? 0,
     [snapshot],
   );
   const realKeysSig = useMemo(
-    () => (snapshot?.trades.filter((t) => t.source === "real").map((t) => t.tradeKey).join("|")) ?? "",
+    () => (snapshot?.trades.filter((t) => t.source === "real" || t.isDailyReplay).map((t) => t.tradeKey).join("|")) ?? "",
     [snapshot],
   );
+  const hasDrOptions = (input.drAttempts?.length ?? 0) > 0 || (input.strategies?.length ?? 0) > 0;
 
   // Lazily count available screenshots for the current selection (listing
   // only — bytes are fetched at generation time). Bounded: skipped for
@@ -109,7 +123,7 @@ export default function EdgeExportPanel({ input }: { input: ExportSnapshotInput 
       const supabase = createClient();
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Please sign in to generate an export — screenshots are read under your own session.");
-      const res = await generateEdgePackage(supabase, user.id, snapshot, { includeScreenshots, includePdf }, (stage, pct) => {
+      const res = await generateEdgePackage(supabase, user.id, snapshot, { includeScreenshots, includePdf, includeDecisionTimeline: includeTimeline }, (stage, pct) => {
         setBusy(pct != null ? `${stage} — ${Math.round(pct)}%` : stage);
       });
       const url = URL.createObjectURL(res.blob);
@@ -142,8 +156,9 @@ export default function EdgeExportPanel({ input }: { input: ExportSnapshotInput 
 
   const warnings: string[] = [];
   if (snapshot) {
-    if (snapshot.counts.simulator > 0) warnings.push("Simulator trades have no screenshots and no recorded original stop/target — those fields export as unavailable, never invented.");
-    if (realInRange > 0 && shotInfo.state === "done" && shotInfo.files === 0) warnings.push("No screenshots are attached to the real trades in this selection — the package will state that plainly instead of fabricating images.");
+    if (snapshot.counts.simulator - snapshot.counts.dailyReplay > 0) warnings.push("Trade Lab simulator trades have no screenshots and no recorded original stop/target — those fields export as unavailable, never invented.");
+    if (snapshot.counts.dailyReplay > 0) warnings.push("Daily Replay trades are historical backtests. Their original plan and R come only from the risk snapshot recorded at entry; trades without one export R as unavailable.");
+    if (realInRange > 0 && shotInfo.state === "done" && shotInfo.files === 0) warnings.push("No screenshots are attached to the eligible trades in this selection — the package will state that plainly instead of fabricating images.");
     if (snapshot.counts.total === 0) warnings.push("No trades match this period and source. You can still generate the package — it will document an empty selection rather than silently widening the range.");
   }
 
@@ -179,19 +194,49 @@ export default function EdgeExportPanel({ input }: { input: ExportSnapshotInput 
       {/* source */}
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginTop: 10 }}>
         <span style={{ fontSize: 12, color: "var(--muted)", width: 64 }}>Source:</span>
-        {([["all", "All Trades"], ["real", "Real Market"], ["simulator", "Simulator"]] as [ExportSource, string][]).map(([s, label]) => (
+        {([["all", "All Trades"], ["real", "Real Market"], ["simulator", "Simulator"], ["daily_replay", "Daily Replay"]] as [ExportSource, string][]).map(([s, label]) => (
           <button key={s} style={pill(source === s)} onClick={() => setSource(s)}>{label}</button>
         ))}
         <span className="hint">{sourceLabel(source)}</span>
       </div>
 
+      {/* Daily Replay narrowing: strategy / version / attempt */}
+      {hasDrOptions && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginTop: 10 }}>
+          <span style={{ fontSize: 12, color: "var(--muted)", width: 64 }}>Strategy:</span>
+          <select className="input" style={{ width: "auto", fontSize: 12, padding: "4px 8px" }} value={strategySel}
+            onChange={(e) => { setStrategySel(e.target.value); setVersionSel(""); }} aria-label="Export strategy">
+            <option value="">All strategies</option>
+            {(input.strategies ?? []).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+          <select className="input" style={{ width: "auto", fontSize: 12, padding: "4px 8px" }} value={versionSel}
+            onChange={(e) => setVersionSel(e.target.value)} aria-label="Export strategy version">
+            <option value="">All versions</option>
+            {(input.strategyVersions ?? [])
+              .filter((v) => !strategySel || v.strategyId === strategySel)
+              .map((v) => {
+                const s = (input.strategies ?? []).find((x) => x.id === v.strategyId);
+                return <option key={v.id} value={v.id}>{s?.name ?? "Strategy"} · v{v.version}</option>;
+              })}
+          </select>
+          <select className="input" style={{ width: "auto", fontSize: 12, padding: "4px 8px" }} value={attemptSel}
+            onChange={(e) => setAttemptSel(e.target.value)} aria-label="Export attempt">
+            <option value="">All attempts</option>
+            {(input.drAttempts ?? []).map((a) => (
+              <option key={a.id} value={a.id}>{a.ticker ?? "Attempt"} · {a.tradeDate ?? ""} · {a.id.slice(0, 8)}</option>
+            ))}
+          </select>
+          <span className="hint">Narrows Daily Replay trades only.</span>
+        </div>
+      )}
+
       {/* counts */}
       {snapshot && (
         <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginTop: 12, fontSize: 12.5 }}>
           <span>Eligible trades: <b className="num">{snapshot.counts.total}</b> <span className="hint">({snapshot.counts.closed} closed, {snapshot.counts.open} open)</span></span>
-          <span className="hint">Real {snapshot.counts.real} · Simulator {snapshot.counts.simulator}</span>
+          <span className="hint">Real {snapshot.counts.real} · Simulator {snapshot.counts.simulator - snapshot.counts.dailyReplay} · Daily Replay {snapshot.counts.dailyReplay}</span>
           <span className="hint">
-            Screenshots: {!includeScreenshots ? "off" : realInRange === 0 ? "none (real trades only)" : shotInfo.state === "loading" ? "checking…" : shotInfo.state === "done" ? `${shotInfo.files} file${shotInfo.files === 1 ? "" : "s"} across ${shotInfo.tradesWith} trade${shotInfo.tradesWith === 1 ? "" : "s"}` : shotInfo.state === "skipped" ? `checked when you generate (selection exceeds the ${MAX_AUTO_SCREENSHOT_TRADES}-trade auto-count cap)` : "unknown — will be checked when you generate"}
+            Screenshots: {!includeScreenshots ? "off" : realInRange === 0 ? "none (no eligible trades)" : shotInfo.state === "loading" ? "checking…" : shotInfo.state === "done" ? `${shotInfo.files} file${shotInfo.files === 1 ? "" : "s"} across ${shotInfo.tradesWith} trade${shotInfo.tradesWith === 1 ? "" : "s"}` : shotInfo.state === "skipped" ? `checked when you generate (selection exceeds the ${MAX_AUTO_SCREENSHOT_TRADES}-trade auto-count cap)` : "unknown — will be checked when you generate"}
           </span>
           <span className="hint">Trades missing screenshots: {includeScreenshots && shotInfo.state === "done" ? Math.max(0, realInRange - shotInfo.tradesWith) : "—"}</span>
         </div>
@@ -213,9 +258,15 @@ export default function EdgeExportPanel({ input }: { input: ExportSnapshotInput 
           <input type="checkbox" checked={includePdf} onChange={(e) => setIncludePdf(e.target.checked)} />
           Include visual PDF report
         </label>
+        {snapshot?.dailyReplay && (
+          <label style={{ display: "flex", gap: 7, alignItems: "center", cursor: "pointer" }}>
+            <input type="checkbox" checked={includeTimeline} onChange={(e) => setIncludeTimeline(e.target.checked)} />
+            Include Decision Timeline (decision_timeline.csv)
+          </label>
+        )}
       </div>
       <p className="hint" style={{ margin: "8px 0 0", fontSize: 11.5 }}>
-        Package contents: trades.csv · analytics.json{includePdf ? " · Trading_Report.pdf" : ""} · ChatGPT_Prompt.txt · README.txt · screenshots-manifest.json{includeScreenshots ? " · screenshots/" : ""}
+        Package contents: trades.csv · analytics.json{includePdf ? " · Trading_Report.pdf" : ""} · ChatGPT_Prompt.txt · README.txt · screenshots-manifest.json{includeScreenshots ? " · screenshots/" : ""}{snapshot?.dailyReplay ? `${includeTimeline ? " · decision_timeline.csv" : ""} · strategy.json` : ""}
       </p>
 
       {warnings.length > 0 && (

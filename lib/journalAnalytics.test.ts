@@ -27,7 +27,9 @@ function T(p: Partial<AnalyticsTrade>): AnalyticsTrade {
     realizedPnl: 0, rMultiple: null, isOpen: false,
     setupTag: null, hodClass: null, followedPlan: null,
     emotionalTags: [], mistakes: [], entryTime: null, exitTime: null,
-    stopLoss: null, initialRisk: null, keyLevelType: null, keyLevelInteraction: null, ...p,
+    stopLoss: null, initialRisk: null, keyLevelType: null, keyLevelInteraction: null,
+    sessionSource: null, attemptId: null,
+    strategyId: null, strategyVersionId: null, strategyName: null, strategyVersionLabel: null, ...p,
   };
 }
 
@@ -258,6 +260,51 @@ check("J fmtPnl(delta) = +$41.24", fmtPnl(trendJ.netPnlDelta!) === "+$41.24");
   ], "interaction");
   check("interaction dim: Retest row groups both", iRows.length === 1 && iRows[0].trades.length === 2 && iRows[0].netPnl === 12);
 }
+
+/* ============ Set DR: Daily Replay source + strategy dimensions ============
+ * DR1 +100 (sessionSource daily_replay, strategy HOD v1, R 2)
+ * DR2 −50  (attempt-linked only — pre-marking completion, R 1→ −1)
+ * SIM +30  (plain Trade Lab sim, twelvedata session, no attempt)
+ * REAL +200 (real trade, free-text strategy NOT mapped into dimensions)
+ * Source rows must be: Simulator {SIM}, Daily Replay {DR1, DR2}, Real {REAL}
+ * Strategy rows: "HOD Breakout" {DR1, DR2}, "Not recorded" {SIM, REAL}
+ * Version rows: "HOD Breakout · v1" {DR1}, "HOD Breakout · v2" {DR2}, NR {SIM, REAL}
+ */
+const DR: AnalyticsTrade[] = [
+  T({ source: "simulator", sessionSource: "daily_replay", attemptId: "att-1", realizedPnl: 100, rMultiple: 2,
+      strategyId: "s1", strategyVersionId: "v1", strategyName: "HOD Breakout", strategyVersionLabel: "HOD Breakout · v1" }),
+  T({ source: "simulator", sessionSource: "twelvedata", attemptId: "att-2", realizedPnl: -50, rMultiple: -1,
+      strategyId: "s1", strategyVersionId: "v2", strategyName: "HOD Breakout", strategyVersionLabel: "HOD Breakout · v2" }),
+  T({ source: "simulator", sessionSource: "twelvedata", attemptId: null, realizedPnl: 30, rMultiple: null }),
+  T({ source: "real", sessionSource: null, attemptId: null, realizedPnl: 200, rMultiple: 1.5 }),
+];
+const srcDR = breakdown(DR, "source");
+check("DR source breakdown has exactly 3 rows", srcDR.length === 3);
+check("DR source order is Simulator, Daily Replay, Real Market",
+  srcDR.map((r) => r.label).join("|") === "Simulator|Daily Replay|Real Market");
+const drRow = srcDR.find((r) => r.label === "Daily Replay")!;
+check("DR bucket holds both DR trades (marked + attempt-linked)", drRow.count === 2 && drRow.netPnl === 50);
+check("DR bucket R population: avgR = (2 + -1)/2 = 0.5", drRow.avgR === 0.5);
+check("Simulator bucket holds ONLY the Trade Lab sim", srcDR[0].count === 1 && srcDR[0].netPnl === 30);
+check("source rows reconcile to totals", srcDR.reduce((s, r) => s + r.netPnl, 0) === calcMetrics(DR).netPnl);
+
+const stratDR = breakdown(DR, "strategy");
+const drHodRow = stratDR.find((r) => r.label === "HOD Breakout")!;
+const drNrRow = stratDR.find((r) => r.label === "Not recorded")!;
+check("strategy dimension: HOD row holds the 2 DR trades", drHodRow.count === 2 && drHodRow.netPnl === 50);
+check("strategy dimension: real trade's free-text strategy is NOT mapped in", drNrRow.count === 2 && drNrRow.netPnl === 230);
+check("strategy rows reconcile", stratDR.reduce((s, r) => s + r.netPnl, 0) === calcMetrics(DR).netPnl);
+
+const verDR = breakdown(DR, "strategyVersion");
+check("version dimension rows", verDR.length === 3 && verDR.some((r) => r.label === "HOD Breakout · v1" && r.netPnl === 100)
+  && verDR.some((r) => r.label === "HOD Breakout · v2" && r.netPnl === -50)
+  && verDR.some((r) => r.label === "Not recorded" && r.count === 2));
+check("version rows reconcile", verDR.reduce((s, r) => s + r.netPnl, 0) === calcMetrics(DR).netPnl);
+
+/* Null-R behavior is unchanged for DR trades without a snapshot:
+ * a DR trade with rMultiple null counts in totals but not in avgR. */
+const DRnullR = breakdown([T({ source: "simulator", sessionSource: "daily_replay", attemptId: "att-9", realizedPnl: 10, rMultiple: null })], "source");
+check("DR trade without R: counted, avgR null", DRnullR[0].count === 1 && DRnullR[0].avgR === null && DRnullR[0].netPnl === 10);
 
 console.log(`journalAnalytics tests: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

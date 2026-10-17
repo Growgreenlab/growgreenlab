@@ -58,12 +58,43 @@ export interface AnalyticsTrade {
   keyLevelInteraction: string | null;
   /** |entry − stop| × qty in dollars, when known (real trades). */
   initialRisk: number | null;
+  /**
+   * The SIMULATOR session's raw source ('sample' | 'twelvedata' |
+   * 'csv' | 'daily_replay'); null for real trades. 'daily_replay'
+   * (or a non-null attemptId, for attempts completed before source
+   * marking) is what makes a simulator-class trade a Daily Replay
+   * backtest — the coarse `source` stays "simulator" so every
+   * existing aggregate is untouched.
+   */
+  sessionSource: string | null;
+  /** Owning Daily Replay attempt id; null unless this is a DR trade. */
+  attemptId: string | null;
+  /** Strategy context of the bound attempt (lib/strategies.ts). Used
+   *  ONLY as the strategy / strategyVersion breakdown labels — never
+   *  mapped from the free-text strategy field real trades carry. */
+  strategyId: string | null;
+  strategyVersionId: string | null;
+  strategyName: string | null;
+  /** "Name · vN" for the strategy-version breakdown. */
+  strategyVersionLabel: string | null;
 }
 
 export type BreakdownDimension =
   | "setup" | "hodClass" | "symbol" | "mistake" | "emotion" | "plan"
   | "source" | "session" | "timeOfDay" | "hold" | "side"
-  | "keyLevel" | "interaction";
+  | "keyLevel" | "interaction" | "strategy" | "strategyVersion";
+
+/**
+ * The one Daily Replay predicate: a simulator-class trade whose
+ * session was saved by Daily Replay (source 'daily_replay'), or which
+ * is linked to a Daily Replay attempt (attempts completed before
+ * source marking saved as 'twelvedata' but still carry the link).
+ */
+export function isDailyReplayTrade(
+  t: Pick<AnalyticsTrade, "source" | "sessionSource" | "attemptId">,
+): boolean {
+  return t.source === "simulator" && (t.sessionSource === "daily_replay" || t.attemptId != null);
+}
 
 export interface BreakdownRow {
   key: string;
@@ -159,7 +190,7 @@ const ORDINAL_ORDER: Partial<Record<BreakdownDimension, string[]>> = {
   timeOfDay: ["Premarket", "Open (9:30–10:30)", "Morning (10:30–12:00)", "Midday (12:00–14:00)", "Afternoon (14:00–16:00)", "After hours", "Not recorded"],
   hold: ["<1m", "1–5m", "5–15m", "15–60m", "1h+", "Not recorded"],
   side: ["Long", "Short"],
-  source: ["Simulator", "Real Market"],
+  source: ["Simulator", "Daily Replay", "Real Market"],
 };
 
 /** Bucket labels for a trade under a dimension. Multi-tag dimensions
@@ -174,7 +205,14 @@ function bucketLabels(t: AnalyticsTrade, dim: BreakdownDimension): string[] {
     case "mistake": return [...t.mistakes];
     case "emotion": return [...t.emotionalTags];
     case "plan": return [t.followedPlan == null ? "Not recorded" : t.followedPlan ? "Followed plan" : "Did not follow"];
-    case "source": return [t.source === "real" ? "Real Market" : "Simulator"];
+    case "source":
+      // Daily Replay is EXPLICIT — keyed off the session's raw source
+      // or the attempt link, never a fallthrough into "Simulator".
+      return [t.source === "real" ? "Real Market"
+        : (t.sessionSource === "daily_replay" || t.attemptId) ? "Daily Replay"
+        : "Simulator"];
+    case "strategy": return [t.strategyName ?? "Not recorded"];
+    case "strategyVersion": return [t.strategyVersionLabel ?? "Not recorded"];
     case "session": return [sessionBucket(t)];
     case "timeOfDay": return [timeOfDayBucket(t)];
     case "hold": return [holdBucket(t)];

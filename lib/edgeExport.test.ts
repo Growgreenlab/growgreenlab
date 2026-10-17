@@ -9,11 +9,16 @@
  */
 import { calcRealTrade, groupFillsIntoTrades, type GroupedTrade, type RawFill, type RealFill } from "./journal";
 import { riskMetrics } from "./journalAnalytics";
+import { deriveDrEvidence } from "./drTradeEvidence";
+import type { DrEvent, DrEventType } from "./dailyReplayEvents";
+import { mapStrategyRow, mapStrategyVersionRow } from "./strategies";
 import {
-  buildAnalyticsJson, buildExportSnapshot, buildReadme, buildScreenshotManifest, buildTradesCsv,
+  buildAnalyticsJson, buildChatGptPrompt, buildDecisionTimelineCsv, buildExportSnapshot, buildReadme,
+  buildScreenshotManifest, buildStrategyJson, buildTradesCsv, CSV_COLUMNS,
   cumulativePnlSeries, exportIdForTradeKey, resolveExportRange, summarizeScreenshotCoverage,
   tradeLevelDrawdownSeries, ROUNDING_NOTE,
-  type ExportMetaInput, type ExportRealTradeInput, type ExportSnapshotInput, type ExportUnifiedInput,
+  type ExportDrAttemptInput, type ExportDrEventInput, type ExportMetaInput,
+  type ExportRealTradeInput, type ExportSnapshotInput, type ExportUnifiedInput,
 } from "./edgeExport";
 
 let passed = 0, failed = 0;
@@ -238,7 +243,7 @@ const RANGE = { start: "2026-10-01", end: "2026-10-31" };
   check("json perSource present for All", doc.perSource?.mixedSource === true);
   approx("json perSource real net = -7", doc.perSource.real.netRealizedPnl, -7);
   approx("json perSource sim net = 50", doc.perSource.simulator.netRealizedPnl, 50);
-  check("json breakdowns has 13 dims", Object.keys(doc.breakdowns).length === 13);
+  check("json breakdowns has 15 dims", Object.keys(doc.breakdowns).length === 15);
   const setupRows = doc.breakdowns.setup as any[];
   const hodRow = setupRows.find((r) => r.label === "HOD breakout");
   check("json setup breakdown sums to closed count", setupRows.reduce((s, r) => s + r.count, 0) === 4 && !!hodRow);
@@ -257,7 +262,7 @@ const RANGE = { start: "2026-10-01", end: "2026-10-31" };
   const str = JSON.stringify(doc);
   check("json string contains no Infinity/NaN tokens", !/Infinity|NaN/.test(str));
   const parsed = JSON.parse(str);
-  check("json round-trips through JSON.parse", parsed.metadata.schemaVersion === "1.0");
+  check("json round-trips through JSON.parse", parsed.metadata.schemaVersion === "2.0");
 }
 
 /* ================= screenshot manifest + coverage ================= */
@@ -449,6 +454,169 @@ const RANGE = { start: "2026-10-01", end: "2026-10-31" };
   const readme = buildReadme(snap, summarizeScreenshotCoverage(snap, manifest, true), manifest, { pdfIncluded: true, pdfFailureNote: null, zipFileName: "x.zip" });
   check("privacy: README states paths are intentionally excluded", readme.includes("intentionally NOT included"));
   check("privacy: README leaks no UUID / object name", !readme.includes(FAKE_UUID) && !readme.includes("cafef00d-internal"));
+}
+
+/* ================= schema 2.0: Daily Replay strategies ================= */
+{
+  const DR_SESSION = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+  const DR_SESSION2 = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+  const ATT1 = "a1111111-1111-4111-8111-111111111111";
+  const ATT2 = "a2222222-2222-4222-8222-222222222222";
+  const STRAT = "51111111-1111-4111-8111-111111111111";
+  const VER2 = "52122222-2222-4222-8222-222222222222";
+
+  const drGrouped = groupFillsIntoTrades([
+    sf("d1f1", DR_SESSION, "buy", 100, 10.00, 5, 0, "2026-10-15T13:35:00.000Z"),
+    sf("d1f2", DR_SESSION, "sell", 100, 11.00, 9, 100, "2026-10-15T13:39:00.000Z"),
+  ], { id: DR_SESSION, ticker: "DRCO", trade_date: "2026-10-15", source: "daily_replay" });
+  const dr2Grouped = groupFillsIntoTrades([
+    sf("d2f1", DR_SESSION2, "buy", 50, 4.00, 3, 0, "2026-10-15T14:03:00.000Z"),
+    sf("d2f2", DR_SESSION2, "sell", 50, 3.60, 7, -20, "2026-10-15T14:07:00.000Z"),
+  ], { id: DR_SESSION2, ticker: "DRTWO", trade_date: "2026-10-15", source: "daily_replay" });
+
+  let dseq = 0;
+  const dev = (type: DrEventType, payload: Record<string, unknown> = {}, idx = 0): DrEvent =>
+    ({ seq: ++dseq, type, wallTs: 1760600000000 + dseq * 5000, marketIdx: idx, marketTs: 1760544000000 + idx * 60000, payload });
+  const att1Events: DrEvent[] = [
+    dev("attempt_created", { ticker: "DRCO" }), dev("session_started"),
+    dev("order_filled", { side: "buy", qty: 100, price: 10, candleIndex: 5 }, 5),
+    dev("risk_snapshot", { entry: 10, qty: 100, stopLoss: 9.5, takeProfit: 11, plannedRisk: 50, rewardRisk: 2 }, 5),
+    dev("order_filled", { side: "sell", qty: 100, price: 11, candleIndex: 9 }, 9),
+    dev("position_closed", { qty: 100, price: 11, realizedPnl: 100, sessionRealized: 100, reason: "target", unrealizedPnl: 0 }, 9),
+    dev("session_completed", {}, 10),
+  ];
+  const derived1 = deriveDrEvidence({ attemptId: ATT1, trades: drGrouped, events: att1Events });
+  const evidence = new Map(derived1.byTradeKey);
+  // ATT2's trade has NO risk snapshot -> evidence with nulls (honest).
+  const derived2 = deriveDrEvidence({
+    attemptId: ATT2, trades: dr2Grouped,
+    events: [
+      { seq: 1, type: "order_filled", wallTs: 1760600100000, marketIdx: 3, marketTs: 1760544180000, payload: { side: "buy", qty: 50, price: 4, candleIndex: 3 } },
+      { seq: 2, type: "order_filled", wallTs: 1760600200000, marketIdx: 7, marketTs: 1760544420000, payload: { side: "sell", qty: 50, price: 3.6, candleIndex: 7 } },
+      { seq: 3, type: "position_closed", wallTs: 1760600200000, marketIdx: 7, marketTs: 1760544420000, payload: { qty: 50, price: 3.6, realizedPnl: -20, sessionRealized: -20, reason: "manual", unrealizedPnl: 0 } },
+    ],
+  });
+  for (const [k, v] of derived2.byTradeKey) evidence.set(k, v);
+
+  const strategy = mapStrategyRow({ id: STRAT, user_id: "u", name: "HOD Breakout", notes: null, archived_at: null, created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-01T00:00:00Z" });
+  const version2 = mapStrategyVersionRow({ id: VER2, strategy_id: STRAT, user_id: "u", version: 2, setup_type: "hod_breakout", entry_rules: "Break of HOD on volume", stop_rules: "Below VWAP", target_rules: "2R", exit_rules: null, market_filters: {}, notes: null, created_at: "2026-10-02T00:00:00Z" });
+  const attempts: ExportDrAttemptInput[] = [
+    { id: ATT1, sessionId: DR_SESSION, strategyVersionId: VER2, status: "finished", startIndex: 4, createdAt: "2026-10-16T16:00:00Z", finishedAt: "2026-10-16T16:30:00Z", ticker: "DRCO", tradeDate: "2026-10-15" },
+    { id: ATT2, sessionId: DR_SESSION2, strategyVersionId: null, status: "finished", startIndex: 2, createdAt: "2026-10-16T17:00:00Z", finishedAt: "2026-10-16T17:20:00Z", ticker: "DRTWO", tradeDate: "2026-10-15" },
+  ];
+  const drEvents: ExportDrEventInput[] = att1Events.map((event, i) => ({ id: `ev-${i + 1}`, attemptId: ATT1, event }));
+  const eventTradeKeys = new Map([[ATT1, derived1.eventTradeKey], [ATT2, derived2.eventTradeKey]]);
+
+  const drU = (g: GroupedTrade, att: string): ExportUnifiedInput => ({
+    ...simUnified(g), sessionSource: "daily_replay", attemptId: att,
+    rMultiple: evidence.get(g.tradeKey)?.rMultiple ?? null,
+  });
+  const drInput: ExportSnapshotInput = {
+    unified: [realUnified(r1), simUnified(s1Grouped[0]), drU(drGrouped[0], ATT1), drU(dr2Grouped[0], ATT2)],
+    metas: { [`real:${R1_ID}`]: r1Meta },
+    realTrades: [r1],
+    simTrades: [s1Grouped[0], drGrouped[0], dr2Grouped[0]],
+    drAttempts: attempts, drEvidence: evidence, drEvents, drEventTradeKeys: eventTradeKeys,
+    strategies: [strategy], strategyVersions: [version2],
+  };
+  const range2 = { start: "2026-10-01", end: "2026-10-31" };
+
+  /* --- source selection --- */
+  const drOnly = buildExportSnapshot(drInput, { range: range2, mode: "custom", source: "daily_replay" });
+  check("2.0 dr-only: exactly the 2 DR trades", drOnly.counts.total === 2 && drOnly.counts.dailyReplay === 2);
+  check("2.0 dr-only: coarse simulator count includes DR", drOnly.counts.simulator === 2);
+  const allSnap = buildExportSnapshot(drInput, { range: range2, mode: "custom", source: "all" });
+  check("2.0 all: counts partition (4 total, 1 real, 3 sim-class, 2 DR)",
+    allSnap.counts.total === 4 && allSnap.counts.real === 1 && allSnap.counts.simulator === 3 && allSnap.counts.dailyReplay === 2);
+  const simSnap = buildExportSnapshot(drInput, { range: range2, mode: "custom", source: "simulator" });
+  check("2.0 simulator source still includes DR (coarse class)", simSnap.counts.total === 3 && simSnap.counts.dailyReplay === 2);
+
+  /* --- record population --- */
+  const rec1 = drOnly.trades.find((t) => t.tradeKey === drGrouped[0].tradeKey)!;
+  check("2.0 DR record flagged", rec1.isDailyReplay === true && rec1.attemptId === ATT1);
+  approx("2.0 DR original stop from snapshot", rec1.originalStopLoss, 9.5);
+  approx("2.0 DR original target from snapshot", rec1.originalTarget, 11);
+  approx("2.0 DR initialRisk from snapshot", rec1.initialRisk, 50);
+  approx("2.0 DR R = 100/50 = 2", rec1.rMultiple, 2);
+  check("2.0 DR strategy chain resolved", rec1.strategyName === "HOD Breakout" && rec1.strategyVersion === 2 && rec1.strategyLabel === "HOD Breakout · v2" && rec1.strategyVersionId === VER2);
+  const rec2 = drOnly.trades.find((t) => t.tradeKey === dr2Grouped[0].tradeKey)!;
+  check("2.0 DR without snapshot: plan fields null, R null", rec2.originalStopLoss === null && rec2.initialRisk === null && rec2.rMultiple === null);
+  check("2.0 DR without snapshot: basis explains", rec2.riskBasis.includes("no risk snapshot"));
+  check("2.0 DR without strategy: label fields null", rec2.strategyName === null && rec2.strategyVersionId === null);
+  const tlRec = allSnap.trades.find((t) => t.tradeKey === s1Grouped[0].tradeKey)!;
+  check("2.0 Trade Lab sim untouched (nulls + old basis)", tlRec.originalStopLoss === null && tlRec.rMultiple === null && tlRec.isDailyReplay === false && tlRec.riskBasis.includes("simulator trades do not record a stop loss"));
+
+  /* --- strategy / version / attempt selection (export panel only) --- */
+  const byVersion = buildExportSnapshot(drInput, { range: range2, mode: "custom", source: "all", strategyVersionId: VER2 });
+  check("2.0 version filter: only ATT1's trade", byVersion.counts.total === 1 && byVersion.trades[0].attemptId === ATT1);
+  const byStrategy = buildExportSnapshot(drInput, { range: range2, mode: "custom", source: "all", strategyId: STRAT });
+  check("2.0 strategy filter: only the bound attempt's trade", byStrategy.counts.total === 1);
+  const byAttempt = buildExportSnapshot(drInput, { range: range2, mode: "custom", source: "all", attemptId: ATT2 });
+  check("2.0 attempt filter: only ATT2's trade", byAttempt.counts.total === 1 && byAttempt.trades[0].attemptId === ATT2);
+
+  /* --- CSV: 51 columns, original 47 keep order --- */
+  check("2.0 CSV has 50 columns", CSV_COLUMNS.length === 50);
+  check("2.0 CSV appended columns", CSV_COLUMNS.slice(46).join("|") === "daily_replay_attempt_id|strategy_name|strategy_version|strategy_version_id");
+  const manifest0 = buildScreenshotManifest(drOnly, new Map());
+  const csvRows = parseCsv(buildTradesCsv(drOnly, manifest0));
+  check("2.0 CSV header arity 50", csvRows[0].length === 50);
+  const cIdx = (n: string) => csvRows[0].indexOf(n);
+  const drRow = csvRows.find((r) => r[cIdx("daily_replay_attempt_id")] === ATT1)!;
+  check("2.0 CSV DR source cell", drRow[cIdx("source")] === "Daily Replay / Backtest");
+  check("2.0 CSV DR strategy cells", drRow[cIdx("strategy_name")] === "HOD Breakout" && drRow[cIdx("strategy_version")] === "2" && drRow[cIdx("strategy_version_id")] === VER2);
+  check("2.0 CSV DR original stop exported", drRow[cIdx("original_stop_loss")] === "9.5" && drRow[cIdx("r_multiple")] === "2");
+
+  /* --- screenshots: DR eligible, Trade Lab excluded --- */
+  const listed = new Map([[drGrouped[0].tradeKey, ["u/dr/shot1.png"]], [s1Grouped[0].tradeKey, ["u/tl/shot.png"]]]);
+  const manAll = buildScreenshotManifest(allSnap, listed);
+  check("2.0 manifest includes DR trade screenshots", manAll.some((e) => e.tradeKey === drGrouped[0].tradeKey));
+  check("2.0 manifest still excludes Trade Lab sim", !manAll.some((e) => e.tradeKey === s1Grouped[0].tradeKey));
+  const cov = summarizeScreenshotCoverage(allSnap, manAll.map((e) => ({ ...e, status: "included" as const })), true);
+  check("2.0 coverage counts DR trades eligible", cov.dailyReplayTrades === 2 && cov.simulatorTrades === 1);
+
+  /* --- decision_timeline.csv --- */
+  const timeline = buildDecisionTimelineCsv(drOnly);
+  const tRows = parseCsv(timeline);
+  check("2.0 timeline header", tRows[0].join(",") === "trade_id,attempt_id,event_id,seq,type,market_time,wall_time,candle_index,description,payload_json");
+  check("2.0 timeline one row per event", tRows.length === 1 + att1Events.length);
+  const fillRow = tRows.find((r) => r[4] === "order_filled")!;
+  check("2.0 timeline fill attributed to the trade", fillRow[0] === rec1.exportId && fillRow[1] === ATT1 && fillRow[2] === "ev-3");
+  const lifeRow = tRows.find((r) => r[4] === "attempt_created")!;
+  check("2.0 timeline lifecycle event has empty trade_id", lifeRow[0] === "");
+  const payloadBack = JSON.parse(fillRow[9]);
+  check("2.0 timeline payload_json lossless", payloadBack.side === "buy" && payloadBack.qty === 100 && payloadBack.candleIndex === 5);
+  check("2.0 timeline deterministic (byte-identical rebuild)", buildDecisionTimelineCsv(drOnly) === timeline);
+  check("2.0 timeline carries both clocks", fillRow[5].length > 0 && fillRow[6].length > 0 && fillRow[5] !== fillRow[6]);
+
+  /* --- strategy.json --- */
+  const sj = buildStrategyJson(drOnly) as any;
+  check("2.0 strategy.json present", sj != null && Array.isArray(sj.strategies));
+  check("2.0 strategy.json version + attempts", sj.strategies[0].name === "HOD Breakout" && sj.strategies[0].versions[0].version === 2 && sj.strategies[0].versions[0].attemptIds.join() === ATT1);
+  check("2.0 strategy.json unbound attempt listed", (sj.unversionedAttemptIds as string[]).includes(ATT2));
+  check("2.0 strategy.json null without DR", buildStrategyJson(simSnap.counts.dailyReplay === 0 ? buildExportSnapshot(input, { range: RANGE, mode: "custom", source: "all" }) : drOnly) === null || simSnap.counts.dailyReplay > 0);
+
+  /* --- analytics.json DR block + subtotals --- */
+  const doc = buildAnalyticsJson(allSnap, [], summarizeScreenshotCoverage(allSnap, [], true)) as any;
+  check("2.0 analytics dailyReplay block available", doc.dailyReplay.available === true && doc.dailyReplay.attemptsInSelection === 2);
+  const att1Block = (doc.dailyReplay.attempts as any[]).find((a) => a.attemptId === ATT1);
+  check("2.0 analytics attempt block: strategy + R", att1Block.strategy.label === "HOD Breakout · v2" && att1Block.avgR === 2 && att1Block.realizedPnl === 100);
+  check("2.0 perSource partitions include dailyReplay", doc.perSource.dailyReplay.closedTrades === 2 && doc.perSource.simulator.closedTrades === 1 && doc.perSource.real.closedTrades === 1);
+  check("2.0 source breakdown has Daily Replay bucket",
+    (doc.breakdowns.source as any[]).some((r) => r.label === "Daily Replay" && r.count === 2));
+  check("2.0 strategy breakdown present", (doc.breakdowns.strategy as any[]).some((r) => r.label === "HOD Breakout" && r.count === 1));
+  check("2.0 schema version", doc.metadata.schemaVersion === "2.0" && allSnap.schemaVersion === "2.0");
+
+  /* --- prompt + README DR content --- */
+  const prompt = buildChatGptPrompt(drOnly, summarizeScreenshotCoverage(drOnly, [], true), { pdfIncluded: false });
+  check("2.0 prompt has DR directives", prompt.includes("Separate STRATEGY quality from EXECUTION quality") && prompt.includes("NEVER modify, rewrite"));
+  check("2.0 prompt lists new files", prompt.includes("decision_timeline.csv") && prompt.includes("strategy.json"));
+  check("2.0 prompt states backtest nature", prompt.includes("historical simulations (backtests)"));
+  const promptPlain = buildChatGptPrompt(buildExportSnapshot(input, { range: RANGE, mode: "custom", source: "all" }), summarizeScreenshotCoverage(drOnly, [], true), { pdfIncluded: false });
+  check("2.0 prompt without DR has no DR block", !promptPlain.includes("DAILY REPLAY & STRATEGY EVIDENCE"));
+  const readme = buildReadme(drOnly, summarizeScreenshotCoverage(drOnly, [], true), [], { pdfIncluded: false, pdfFailureNote: null, zipFileName: "x.zip" });
+  check("2.0 README documents 2.0 compatibility", readme.includes("SCHEMA 2.0 - WHAT CHANGED"));
+  check("2.0 README backtest disclaimer", readme.includes("BACKTESTS: historical simulations"));
+  check("2.0 README documents R rule", readme.includes("risk snapshot recorded at the first entry fill"));
 }
 
 console.log(`edgeExport tests: ${passed} passed, ${failed} failed`);

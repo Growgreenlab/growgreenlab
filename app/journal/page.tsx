@@ -4,14 +4,20 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
 import { groupFillsIntoTrades, calcMetrics, calcRealTrade, validateRealFills, perExitPnl, parseKeyLevels, validateKeyLevels, computePlanUpdate, KEY_LEVEL_TYPES, KEY_LEVEL_INTERACTIONS, type KeyLevel, type PlanChange, parseBrokerCsv, parseWithMapping, autoMapColumns, MAPPABLE_FIELDS, groupImportedFills, fmtPnl, fmtPct, type GroupedTrade, type RawFill, type RealFill, type RealTradeCalc, type BrokerParseResult, type ImportedTrade } from "../../lib/journal";
-import { breakdown, riskMetrics, edgeInsights, dailyPnl, type AnalyticsTrade, type BreakdownDimension, type Insight } from "../../lib/journalAnalytics";
+import { breakdown, riskMetrics, edgeInsights, dailyPnl, isDailyReplayTrade, type AnalyticsTrade, type BreakdownDimension, type Insight } from "../../lib/journalAnalytics";
 import { listScreenshots, removeScreenshots, uploadScreenshots, validateScreenshotFile } from "../../lib/journalAttachments";
 import EdgeExportPanel from "../../components/EdgeExportPanel";
-import type { ExportSnapshotInput } from "../../lib/edgeExport";
+import type { ExportSnapshotInput, ExportDrAttemptInput, ExportDrEventInput } from "../../lib/edgeExport";
+import { deriveDrEvidence, type DrAttemptEvidence, type DrTradeEvidence } from "../../lib/drTradeEvidence";
+import { describeDrEvent, type DrEvent } from "../../lib/dailyReplayEvents";
+import {
+  mapStrategyRow, mapStrategyVersionRow, mapAttemptRow, resolveVersionContext,
+  type Strategy, type StrategyVersion, type DrAttemptLink,
+} from "../../lib/strategies";
 
 type Tab = "overview" | "trades" | "review" | "calendar" | "analytics";
 type Period = "today" | "week" | "month" | "30d" | "90d" | "ytd" | "all";
-type SourceFilter = "all" | "simulator" | "real";
+type SourceFilter = "all" | "simulator" | "real" | "daily_replay";
 
 interface TradeMeta {
   trade_key: string;
@@ -65,6 +71,45 @@ interface UnifiedTrade {
   realizedPnl: number;
   isOpen: boolean;
   rMultiple: number | null;
+  /* Daily Replay linkage (simulator-class trades only) */
+  sessionSource: string | null;
+  attemptId: string | null;
+  strategyId: string | null;
+  strategyVersionId: string | null;
+  strategyName: string | null;
+  strategyLabel: string | null;
+}
+
+/** Review-tab context for a Daily Replay trade. */
+export interface DrReviewInfo {
+  attemptId: string;
+  attempt: DrAttemptLink | null;
+  strategyLabel: string | null;
+  setupType: string | null;
+  strategyArchived: boolean;
+  evidence: DrTradeEvidence | null;
+  events: ExportDrEventInput[];
+  /** Seqs of the events belonging to THIS trade's position cycle. */
+  tradeEventSeqs: number[];
+  resumed: boolean;
+  startingBalance: number | null;
+}
+
+/** Everything the journal derives about Daily Replay attempts:
+ *  the attempt rows, the strategies/versions they reference, the
+ *  recorded timeline events (raw rows + recorder-shaped events), and
+ *  the per-trade plan evidence derived from them. All optional in
+ *  practice: when the strategy migration has not been applied, the
+ *  strategies lists are empty and `strategiesAvailable` is false. */
+interface DrJournalData {
+  attempts: DrAttemptLink[];
+  strategies: Strategy[];
+  strategyVersions: StrategyVersion[];
+  strategiesAvailable: boolean;
+  evidenceByKey: Map<string, DrTradeEvidence>;
+  evidenceByAttempt: Map<string, DrAttemptEvidence>;
+  eventsByAttempt: Map<string, ExportDrEventInput[]>;
+  attemptsExport: ExportDrAttemptInput[];
 }
 
 const SETUPS = ["HOD breakout", "EMA pullback", "VWAP pullback", "Clean breakout", "Weak breakout", "Failed breakout", "Anticipation", "Other"];
@@ -107,6 +152,11 @@ export default function JournalPage() {
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [selectedCalDay, setSelectedCalDay] = useState<string | null>(null);
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
+  const [strategyFilter, setStrategyFilter] = useState<string>("");
+  const [drData, setDrData] = useState<DrJournalData>({
+    attempts: [], strategies: [], strategyVersions: [], strategiesAvailable: false,
+    evidenceByKey: new Map(), evidenceByAttempt: new Map(), eventsByAttempt: new Map(), attemptsExport: [],
+  });
   // Filters
   const [fTicker, setFTicker] = useState("");
   const [fSetup, setFSetup] = useState("");
@@ -150,6 +200,89 @@ export default function JournalPage() {
         }
       }
       setTrades(allTrades);
+
+      // ---- Daily Replay enrichment (attempts, strategies, evidence) ----
+      // Everything here is best-effort and additive: each fetch is
+      // independent, and any failure (e.g. the strategies migration not
+      // applied yet) degrades to "not recorded" displays — the journal
+      // itself never breaks.
+      try {
+        const sessionById = new Map((sessions ?? []).map((s: any) => [s.id, s]));
+        let attempts: DrAttemptLink[] = [];
+        try {
+          const { data: attRows, error: attErr } = await supabase
+            .from("daily_replay_attempts")
+            .select("id,session_id,strategy_version_id,status,start_index,created_at,finished_at")
+            .order("created_at", { ascending: false })
+            .limit(500);
+          if (!attErr && attRows) attempts = attRows.map((r: any) => mapAttemptRow(r));
+        } catch { /* attempts table unavailable — pre-DR database */ }
+        let strategies: Strategy[] = [];
+        let strategyVersions: StrategyVersion[] = [];
+        let strategiesAvailable = false;
+        try {
+          const [sRes, vRes] = await Promise.all([
+            supabase.from("strategies").select("*").limit(200),
+            supabase.from("strategy_versions").select("*").limit(1000),
+          ]);
+          if (!sRes.error && !vRes.error) {
+            strategiesAvailable = true;
+            strategies = (sRes.data ?? []).map((r: any) => mapStrategyRow(r));
+            strategyVersions = (vRes.data ?? []).map((r: any) => mapStrategyVersionRow(r));
+          }
+        } catch { /* strategies migration not applied yet */ }
+
+        const linked = attempts.filter((a) => a.sessionId && sessionById.has(a.sessionId));
+        const eventsByAttempt = new Map<string, ExportDrEventInput[]>();
+        if (linked.length > 0) {
+          try {
+            const ids = linked.map((a) => a.id);
+            const { data: evRows, error: evErr } = await supabase
+              .from("daily_replay_events")
+              .select("id,attempt_id,seq,type,wall_ts,market_idx,market_ts,payload")
+              .in("attempt_id", ids)
+              .order("seq", { ascending: true })
+              .limit(20000);
+            if (!evErr && evRows) {
+              for (const r of evRows as any[]) {
+                const event: DrEvent = {
+                  seq: Number(r.seq),
+                  type: r.type,
+                  wallTs: r.wall_ts ? new Date(r.wall_ts).getTime() : 0,
+                  marketIdx: r.market_idx != null ? Number(r.market_idx) : null,
+                  marketTs: r.market_ts != null ? Number(r.market_ts) : null,
+                  payload: (r.payload ?? {}) as Record<string, unknown>,
+                };
+                const arr = eventsByAttempt.get(r.attempt_id) ?? [];
+                arr.push({ id: r.id, attemptId: r.attempt_id, event });
+                eventsByAttempt.set(r.attempt_id, arr);
+              }
+            }
+          } catch { /* events unavailable — evidence stays unrecorded */ }
+        }
+
+        const evidenceByKey = new Map<string, DrTradeEvidence>();
+        const evidenceByAttempt = new Map<string, DrAttemptEvidence>();
+        for (const a of linked) {
+          const sessionTrades = allTrades.filter((t) => t.sessionId === a.sessionId);
+          const derived = deriveDrEvidence({
+            attemptId: a.id,
+            trades: sessionTrades,
+            events: (eventsByAttempt.get(a.id) ?? []).map((e) => e.event),
+          });
+          evidenceByAttempt.set(a.id, derived);
+          for (const [k, v] of derived.byTradeKey) evidenceByKey.set(k, v);
+        }
+        const attemptsExport: ExportDrAttemptInput[] = linked.map((a) => {
+          const s: any = a.sessionId ? sessionById.get(a.sessionId) : null;
+          return {
+            id: a.id, sessionId: a.sessionId, strategyVersionId: a.strategyVersionId,
+            status: a.status, startIndex: a.startIndex, createdAt: a.createdAt, finishedAt: a.finishedAt,
+            ticker: s?.ticker ?? null, tradeDate: s?.trade_date ?? null,
+          };
+        });
+        setDrData({ attempts, strategies, strategyVersions, strategiesAvailable, evidenceByKey, evidenceByAttempt, eventsByAttempt, attemptsExport });
+      } catch { /* DR enrichment is optional — journal continues without it */ }
 
       // Fetch annotations (shared by simulator + real trades via trade_key)
       const { data: metaRows } = await supabase.from("journal_trade_meta").select("*");
@@ -201,19 +334,38 @@ export default function JournalPage() {
 
   // Build unified trade list with source tags
   const unified: UnifiedTrade[] = useMemo(() => {
-    const sim: UnifiedTrade[] = trades.map((t) => ({
-      key: t.tradeKey,
-      source: "simulator" as const,
-      ticker: t.ticker,
-      tradeDate: t.tradeDate,
-      direction: t.direction,
-      entryPrice: t.entryPrice,
-      exitPrice: t.exitPrice,
-      qty: t.qty,
-      realizedPnl: t.realizedPnl,
-      isOpen: false,
-      rMultiple: t.rMultiple,
-    }));
+    const attemptBySession = new Map(
+      drData.attempts.filter((a) => a.sessionId).map((a) => [a.sessionId!, a]),
+    );
+    const sim: UnifiedTrade[] = trades.map((t) => {
+      const attempt = attemptBySession.get(t.sessionId) ?? null;
+      const evidence = attempt ? drData.evidenceByKey.get(t.tradeKey) : undefined;
+      const ctx = attempt?.strategyVersionId
+        ? resolveVersionContext(attempt.strategyVersionId, drData.strategies, drData.strategyVersions)
+        : null;
+      return {
+        key: t.tradeKey,
+        source: "simulator" as const,
+        ticker: t.ticker,
+        tradeDate: t.tradeDate,
+        direction: t.direction,
+        entryPrice: t.entryPrice,
+        exitPrice: t.exitPrice,
+        qty: t.qty,
+        realizedPnl: t.realizedPnl,
+        isOpen: false,
+        // Daily Replay trades take R from the recorded evidence
+        // (risk snapshot); Trade Lab trades keep the grouped value
+        // (null — no recorded stop, by design).
+        rMultiple: evidence ? evidence.rMultiple : t.rMultiple,
+        sessionSource: t.source,
+        attemptId: attempt?.id ?? null,
+        strategyId: ctx?.strategy.id ?? null,
+        strategyVersionId: attempt?.strategyVersionId ?? null,
+        strategyName: ctx?.strategy.name ?? null,
+        strategyLabel: ctx?.label ?? null,
+      };
+    });
     const rl: UnifiedTrade[] = realTrades.map((t) => ({
       key: `real:${t.id}`,
       source: "real" as const,
@@ -226,15 +378,35 @@ export default function JournalPage() {
       realizedPnl: t.calc.netRealized,
       isOpen: !t.calc.isClosed,
       rMultiple: t.calc.rMultiple,
+      sessionSource: null,
+      attemptId: null,
+      strategyId: null,
+      strategyVersionId: null,
+      strategyName: null,
+      strategyLabel: null,
     }));
     return [...sim, ...rl].sort((a, b) => b.tradeDate.localeCompare(a.tradeDate));
-  }, [trades, realTrades]);
+  }, [trades, realTrades, drData]);
 
-  // Filter by source + period + search (date-string comparison avoids TZ bugs)
+  // Filter by source + period + search (date-string comparison avoids TZ bugs).
+  // ONE filtered set: overview, trades, review, calendar, analytics and
+  // the export panel all read from this memo, so they can never disagree.
   const filtered = useMemo(() => {
     const startStr = periodStartStr(period);
     return unified.filter((t) => {
-      if (sourceFilter !== "all" && t.source !== sourceFilter) return false;
+      if (sourceFilter === "daily_replay") {
+        if (!isDailyReplayTrade(t)) return false;
+      } else if (sourceFilter !== "all" && t.source !== sourceFilter) return false;
+      if (strategyFilter) {
+        if (strategyFilter === "none") {
+          if (t.strategyVersionId != null) return false;
+        } else if (strategyFilter.startsWith("version:")) {
+          if (t.strategyVersionId !== strategyFilter.slice("version:".length)) return false;
+        } else {
+          const version = drData.strategyVersions.find((v) => v.id === t.strategyVersionId);
+          if (!version || version.strategyId !== strategyFilter) return false;
+        }
+      }
       if (startStr && t.tradeDate < startStr) return false;
       if (fTicker && !t.ticker.toLowerCase().includes(fTicker.toLowerCase())) return false;
       if (fSetup && metas[t.key]?.setup_tag !== fSetup) return false;
@@ -242,15 +414,16 @@ export default function JournalPage() {
       if (fWinLoss === "loss" && t.realizedPnl >= 0) return false;
       return true;
     });
-  }, [unified, sourceFilter, period, fTicker, fSetup, fWinLoss, metas]);
+  }, [unified, sourceFilter, strategyFilter, period, fTicker, fSetup, fWinLoss, metas, drData.strategyVersions]);
 
   // Closed trades only for metrics
   const closedFiltered = useMemo(() => filtered.filter((t) => !t.isOpen), [filtered]);
   const metrics = useMemo(() => calcMetrics(closedFiltered), [closedFiltered]);
 
   // Per-source metrics
-  const simMetrics = useMemo(() => calcMetrics(closedFiltered.filter((t) => t.source === "simulator")), [closedFiltered]);
+  const simMetrics = useMemo(() => calcMetrics(closedFiltered.filter((t) => t.source === "simulator" && !isDailyReplayTrade(t))), [closedFiltered]);
   const realMetrics = useMemo(() => calcMetrics(closedFiltered.filter((t) => t.source === "real")), [closedFiltered]);
+  const drMetrics = useMemo(() => calcMetrics(closedFiltered.filter((t) => isDailyReplayTrade(t))), [closedFiltered]);
 
   // Enriched view for Analytics: the SAME filtered closed set, joined with
   // Trade DNA annotations and the underlying records (timestamps, stop, risk).
@@ -267,6 +440,13 @@ export default function JournalPage() {
         const g = simByKey.get(t.key);
         entryTime = g?.entryTime ?? null;
         exitTime = g?.exitTime ?? null;
+        // Daily Replay trades: plan + risk come from the recorded
+        // evidence (risk snapshot), never from reconstruction.
+        const evidence = drData.evidenceByKey.get(t.key);
+        if (evidence) {
+          stopLoss = evidence.stopLoss;
+          initialRisk = evidence.initialRisk;
+        }
       } else {
         const rt = realById.get(t.key);
         if (rt) {
@@ -291,9 +471,15 @@ export default function JournalPage() {
         entryTime, exitTime, stopLoss, initialRisk,
         keyLevelType: parseKeyLevels(meta?.key_levels)[0]?.type ?? null,
         keyLevelInteraction: parseKeyLevels(meta?.key_levels)[0]?.interaction ?? null,
+        sessionSource: t.sessionSource,
+        attemptId: t.attemptId,
+        strategyId: t.strategyId,
+        strategyVersionId: t.strategyVersionId,
+        strategyName: t.strategyName,
+        strategyVersionLabel: t.strategyLabel,
       };
     });
-  }, [closedFiltered, trades, realTrades, metas]);
+  }, [closedFiltered, trades, realTrades, metas, drData]);
   const analyticsRisk = useMemo(() => riskMetrics(analyticsTrades), [analyticsTrades]);
 
   // Cumulative P&L for chart (simple SVG)
@@ -311,16 +497,55 @@ export default function JournalPage() {
   const selectedMeta = selectedKey ? metas[selectedKey] : null;
   const isRealSelected = selectedKey?.startsWith("real:") ?? false;
 
+  // Daily Replay review context for the selected trade (null unless
+  // the trade came from a Daily Replay attempt).
+  const selectedDrInfo: DrReviewInfo | null = useMemo(() => {
+    if (!selectedKey || isRealSelected) return null;
+    const u = unified.find((t) => t.key === selectedKey);
+    if (!u || !isDailyReplayTrade(u) || !u.attemptId) return null;
+    const attempt = drData.attempts.find((a) => a.id === u.attemptId) ?? null;
+    const attemptEvidence = drData.evidenceByAttempt.get(u.attemptId) ?? null;
+    const evidence = drData.evidenceByKey.get(selectedKey) ?? null;
+    const ctx = u.strategyVersionId
+      ? resolveVersionContext(u.strategyVersionId, drData.strategies, drData.strategyVersions)
+      : null;
+    const events = drData.eventsByAttempt.get(u.attemptId) ?? [];
+    const created = events.find((e) => e.event.type === "attempt_created");
+    const startingBalance = typeof created?.event.payload.startingBalance === "number"
+      ? (created.event.payload.startingBalance as number) : null;
+    const tradeEventSeqs = attemptEvidence
+      ? [...attemptEvidence.eventTradeKey.entries()].filter(([, k]) => k === selectedKey).map(([seq]) => seq)
+      : [];
+    return {
+      attemptId: u.attemptId,
+      attempt,
+      strategyLabel: u.strategyLabel,
+      setupType: ctx?.version.setupType ?? null,
+      strategyArchived: ctx?.strategy.archivedAt != null,
+      evidence,
+      events,
+      tradeEventSeqs,
+      resumed: attemptEvidence?.resumed ?? false,
+      startingBalance,
+    };
+  }, [selectedKey, isRealSelected, unified, drData]);
+
   // Period-agnostic counts for the CURRENT source filter — the Overview
   // empty states key off these (not the both-sources total), so a user
   // with simulator trades still gets the real-market empty state + the
   // Add Real Trade action when they have no real trades.
+  const matchesSourceFilter = (t: UnifiedTrade) =>
+    sourceFilter === "all" ? true
+    : sourceFilter === "daily_replay" ? isDailyReplayTrade(t)
+    : t.source === sourceFilter;
   const sourceTotalCount = useMemo(
-    () => unified.filter((t) => sourceFilter === "all" || t.source === sourceFilter).length,
+    () => unified.filter(matchesSourceFilter).length,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [unified, sourceFilter],
   );
   const sourceClosedCount = useMemo(
-    () => unified.filter((t) => (sourceFilter === "all" || t.source === sourceFilter) && !t.isOpen).length,
+    () => unified.filter((t) => matchesSourceFilter(t) && !t.isOpen).length,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [unified, sourceFilter],
   );
 
@@ -391,9 +616,9 @@ export default function JournalPage() {
       </div>
 
       {/* Source filter */}
-      <div style={{ display: "flex", gap: 6, marginBottom: 20, alignItems: "center", flexWrap: "wrap" }}>
+      <div style={{ display: "flex", gap: 6, marginBottom: 8, alignItems: "center", flexWrap: "wrap" }}>
         <span style={{ fontSize: 12, color: "var(--muted)" }}>Source:</span>
-        {([["all", "All Trades"], ["simulator", "Simulator"], ["real", "Real Market"]] as [SourceFilter, string][]).map(([s, label]) => (
+        {([["all", "All Trades"], ["simulator", "Simulator"], ["real", "Real Market"], ["daily_replay", "Daily Replay / Backtest"]] as [SourceFilter, string][]).map(([s, label]) => (
           <button key={s} onClick={() => setSourceFilter(s)}
             style={{
               padding: "4px 12px", borderRadius: 16, fontSize: 12, cursor: "pointer",
@@ -402,7 +627,30 @@ export default function JournalPage() {
               color: sourceFilter === s ? "#34d399" : "var(--muted)",
             }}>{label}</button>
         ))}
+        {(drData.strategies.length > 0 || unified.some((t) => isDailyReplayTrade(t))) && (
+          <>
+            <span style={{ fontSize: 12, color: "var(--muted)", marginLeft: 10 }}>Strategy:</span>
+            <select className="input" style={{ width: "auto", fontSize: 12, padding: "4px 8px" }} value={strategyFilter}
+              onChange={(e) => setStrategyFilter(e.target.value)} aria-label="Strategy filter">
+              <option value="">All strategies</option>
+              {drData.strategies.map((s) => (
+                <option key={s.id} value={s.id}>{s.name}{s.archivedAt ? " (archived)" : ""}</option>
+              ))}
+              {drData.strategyVersions.map((v) => {
+                const s = drData.strategies.find((x) => x.id === v.strategyId);
+                return <option key={v.id} value={`version:${v.id}`}>{s?.name ?? "Strategy"} · v{v.version} only</option>;
+              })}
+              <option value="none">No strategy recorded</option>
+            </select>
+          </>
+        )}
       </div>
+      {filtered.some((t) => isDailyReplayTrade(t)) && (
+        <p className="hint" style={{ margin: "0 0 16px", fontSize: 12 }}>
+          Daily Replay trades are historical backtests — simulated results on recorded market days, not live trading performance.
+        </p>
+      )}
+      {!filtered.some((t) => isDailyReplayTrade(t)) && <div style={{ marginBottom: 12 }} />}
 
       {notice && (
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, padding: "10px 14px", marginBottom: 16, borderRadius: 8, background: "rgba(251,191,36,0.1)", border: "1px solid rgba(251,191,36,0.4)", fontSize: 13 }}>
@@ -411,11 +659,19 @@ export default function JournalPage() {
         </div>
       )}
 
-      {tab === "overview" && <OverviewTab metrics={metrics} simMetrics={simMetrics} realMetrics={realMetrics} cumPnl={cumPnl} trades={filtered} sourceTotalCount={sourceTotalCount} sourceClosedCount={sourceClosedCount} period={period} setPeriod={setPeriod} sourceFilter={sourceFilter} avgR={analyticsRisk.avgR} maxDrawdown={analyticsRisk.maxDrawdownUSD} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} onAddRealTrade={() => { setEditingReal(null); setTab("trades"); setShowRealForm(true); }} onImportBroker={() => { setTab("trades"); setShowImport(true); }} />}
+      {tab === "overview" && <OverviewTab metrics={metrics} simMetrics={simMetrics} realMetrics={realMetrics} drMetrics={drMetrics} cumPnl={cumPnl} trades={filtered} sourceTotalCount={sourceTotalCount} sourceClosedCount={sourceClosedCount} period={period} setPeriod={setPeriod} sourceFilter={sourceFilter} avgR={analyticsRisk.avgR} maxDrawdown={analyticsRisk.maxDrawdownUSD} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} onAddRealTrade={() => { setEditingReal(null); setTab("trades"); setShowRealForm(true); }} onImportBroker={() => { setTab("trades"); setShowImport(true); }} />}
       {tab === "trades" && <TradesTab trades={filtered} metas={metas} fTicker={fTicker} setFTicker={setFTicker} fSetup={fSetup} setFSetup={setFSetup} fWinLoss={fWinLoss} setFWinLoss={setFWinLoss} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} onRealTradeSaved={handleRealTradeSaved} showRealForm={showRealForm} setShowRealForm={setShowRealForm} showImport={showImport} setShowImport={setShowImport} sourceFilter={sourceFilter} editingReal={editingReal} onEditReal={startEditReal} onDeleteReal={startDeleteReal} onCancelEdit={cancelEdit} />}
-      {tab === "review" && <ReviewTab tradeKey={selectedKey} simTrade={!isRealSelected ? (selected as GroupedTrade | null) : null} realTrade={isRealSelected ? (selected as RealTrade | null) : null} meta={selectedMeta} onSaved={load} onEditReal={startEditReal} onDeleteReal={startDeleteReal} />}
+      {tab === "review" && <ReviewTab tradeKey={selectedKey} simTrade={!isRealSelected ? (selected as GroupedTrade | null) : null} realTrade={isRealSelected ? (selected as RealTrade | null) : null} meta={selectedMeta} onSaved={load} onEditReal={startEditReal} onDeleteReal={startDeleteReal} drInfo={selectedDrInfo} />}
       {tab === "calendar" && <CalendarTab trades={closedFiltered} metas={metas} selectedDay={selectedCalDay} onSelectDay={setSelectedCalDay} onSelectTrade={(k) => { setSelectedKey(k); setTab("review"); }} />}
-      {tab === "analytics" && <AnalyticsTab trades={analyticsTrades} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} exportInput={{ unified, metas, realTrades, simTrades: trades }} />}
+      {tab === "analytics" && <AnalyticsTab trades={analyticsTrades} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} exportInput={{
+        unified, metas, realTrades, simTrades: trades,
+        drAttempts: drData.attemptsExport,
+        drEvidence: drData.evidenceByKey,
+        drEvents: [...drData.eventsByAttempt.values()].flat(),
+        drEventTradeKeys: new Map([...drData.evidenceByAttempt.entries()].map(([id, d]) => [id, d.eventTradeKey])),
+        strategies: drData.strategies,
+        strategyVersions: drData.strategyVersions,
+      }} />}
 
       {deleteTarget && (
         <div
@@ -450,22 +706,30 @@ export default function JournalPage() {
 }
 
 /* ---------------- Overview ---------------- */
-function SourceBadge({ source }: { source: "simulator" | "real" }) {
-  const isReal = source === "real";
+function SourceBadge({ source }: { source: "simulator" | "real" | "daily_replay" }) {
+  const style = source === "real"
+    ? { background: "rgba(96,165,250,0.15)", border: "1px solid rgba(96,165,250,0.4)", color: "#93c5fd" }
+    : source === "daily_replay"
+      ? { background: "rgba(167,139,250,0.15)", border: "1px solid rgba(167,139,250,0.45)", color: "#c4b5fd" }
+      : { background: "rgba(16,185,129,0.12)", border: "1px solid rgba(16,185,129,0.3)", color: "#34d399" };
   return (
-    <span style={{
-      fontSize: 10, padding: "2px 8px", borderRadius: 10, fontWeight: 600,
-      background: isReal ? "rgba(96,165,250,0.15)" : "rgba(16,185,129,0.12)",
-      border: isReal ? "1px solid rgba(96,165,250,0.4)" : "1px solid rgba(16,185,129,0.3)",
-      color: isReal ? "#93c5fd" : "#34d399",
-    }}>{isReal ? "Real Market" : "Simulator"}</span>
+    <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 10, fontWeight: 600, ...style }}>
+      {source === "real" ? "Real Market" : source === "daily_replay" ? "Daily Replay" : "Simulator"}
+    </span>
   );
 }
 
-function OverviewTab({ metrics, simMetrics, realMetrics, cumPnl, trades, sourceTotalCount, sourceClosedCount, period, setPeriod, sourceFilter, avgR, maxDrawdown, onSelect, onAddRealTrade, onImportBroker }: {
+/** The badge a unified trade earns: DR trades are marked explicitly,
+ *  never silently shown as plain "Simulator". */
+function badgeSourceOf(t: UnifiedTrade): "simulator" | "real" | "daily_replay" {
+  return t.source === "real" ? "real" : isDailyReplayTrade(t) ? "daily_replay" : "simulator";
+}
+
+function OverviewTab({ metrics, simMetrics, realMetrics, drMetrics, cumPnl, trades, sourceTotalCount, sourceClosedCount, period, setPeriod, sourceFilter, avgR, maxDrawdown, onSelect, onAddRealTrade, onImportBroker }: {
   metrics: ReturnType<typeof calcMetrics>;
   simMetrics: ReturnType<typeof calcMetrics>;
   realMetrics: ReturnType<typeof calcMetrics>;
+  drMetrics: ReturnType<typeof calcMetrics>;
   cumPnl: number[];
   trades: UnifiedTrade[];
   /** All trades (open + closed) matching the source filter, any period */
@@ -586,7 +850,7 @@ function OverviewTab({ metrics, simMetrics, realMetrics, cumPnl, trades, sourceT
             {trades.slice(0, 10).map((t) => (
               <div key={t.key} onClick={() => onSelect(t.key)}
                 style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: "1px solid rgba(255,255,255,0.06)", cursor: "pointer" }}>
-                <span><b>{t.ticker}</b> <span className="hint">{t.tradeDate} · {t.direction}</span> <SourceBadge source={t.source} />{t.isOpen && <span style={{ fontSize: 10, color: "#fbbf24", marginLeft: 6 }}>OPEN</span>}</span>
+                <span><b>{t.ticker}</b> <span className="hint">{t.tradeDate} · {t.direction}</span> <SourceBadge source={badgeSourceOf(t)} />{t.isOpen && <span style={{ fontSize: 10, color: "#fbbf24", marginLeft: 6 }}>OPEN</span>}</span>
                 <span className="num" style={{ color: t.realizedPnl > 0 ? "var(--emerald-bright)" : t.realizedPnl < 0 ? "#f6465d" : "var(--muted)", fontWeight: 600 }}>{fmtPnl(t.realizedPnl)}</span>
               </div>
             ))}
@@ -615,6 +879,18 @@ function OverviewTab({ metrics, simMetrics, realMetrics, cumPnl, trades, sourceT
                 </div>
                 <div className="hint" style={{ marginTop: 4 }}>Win rate {fmtPct(realMetrics.winRate)} · PF {realMetrics.profitFactor == null ? "—" : realMetrics.profitFactor === Infinity ? "∞" : realMetrics.profitFactor.toFixed(2)}</div>
               </div>
+              {drMetrics.totalTrades > 0 && (
+                <div className="card" style={{ padding: 16 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                    <SourceBadge source="daily_replay" />
+                    <span className="hint">{drMetrics.totalTrades} trades · backtest</span>
+                  </div>
+                  <div className="num" style={{ fontSize: 22, fontWeight: 700, color: drMetrics.netPnl > 0 ? "var(--emerald-bright)" : drMetrics.netPnl < 0 ? "#f6465d" : "var(--text)" }}>
+                    {fmtPnl(drMetrics.netPnl)}
+                  </div>
+                  <div className="hint" style={{ marginTop: 4 }}>Win rate {fmtPct(drMetrics.winRate)} · PF {drMetrics.profitFactor == null ? "—" : drMetrics.profitFactor === Infinity ? "∞" : drMetrics.profitFactor.toFixed(2)}</div>
+                </div>
+              )}
             </div>
           )}
         </>
@@ -689,7 +965,7 @@ function TradesTab({ trades, metas, fTicker, setFTicker, fSetup, setFSetup, fWin
                   style={{ borderBottom: "1px solid rgba(255,255,255,0.05)", cursor: "pointer" }}>
                   <td style={{ padding: "10px 12px" }}>{t.tradeDate}</td>
                   <td style={{ padding: "10px 12px", fontWeight: 600 }}>{t.ticker}</td>
-                  <td style={{ padding: "10px 12px" }}><SourceBadge source={t.source} /></td>
+                  <td style={{ padding: "10px 12px" }}><SourceBadge source={badgeSourceOf(t)} />{t.strategyLabel && <div className="hint" style={{ fontSize: 11, marginTop: 3 }}>{t.strategyLabel}</div>}</td>
                   <td style={{ padding: "10px 12px" }}>{t.direction}{t.isOpen && <span style={{ fontSize: 10, color: "#fbbf24", marginLeft: 4 }}>OPEN</span>}</td>
                   <td className="num" style={{ padding: "10px 12px" }}>{t.entryPrice != null ? `$${t.entryPrice.toFixed(2)}` : "—"}</td>
                   <td className="num" style={{ padding: "10px 12px" }}>{t.qty}</td>
@@ -753,7 +1029,84 @@ function ReviewScreenshots({ tradeKey }: { tradeKey: string }) {
   );
 }
 
-function ReviewTab({ tradeKey, simTrade, realTrade, meta, onSaved, onEditReal, onDeleteReal }: {
+/** Daily Replay attempt card in Trade Review: the bound strategy,
+ *  the original plan + adjustments from the recorded evidence, and
+ *  this trade's slice of the attempt's Decision Timeline. Everything
+ *  shown comes from the attempt's recorded events — nothing here is
+ *  reconstructed, and missing evidence says so plainly. */
+function DrAttemptCard({ info, tradeKeyVal }: { info: DrReviewInfo; tradeKeyVal: string }) {
+  const [showAll, setShowAll] = useState(false);
+  const ev = info.evidence;
+  const ownSeqs = new Set(info.tradeEventSeqs);
+  const ownEvents = info.events.filter((e) => ownSeqs.has(e.event.seq));
+  const shown = showAll ? info.events : ownEvents;
+  const lifecycle = info.resumed ? "Completed after resume" : "Completed";
+  return (
+    <div className="card" style={{ padding: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <h4 style={{ margin: 0 }}>Daily Replay Attempt</h4>
+        <span className="hint" style={{ fontSize: 11 }}>Historical backtest — not live performance</span>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 8, fontSize: 13 }}>
+        <div><span className="hint">Strategy</span><div>{info.strategyLabel ?? "No strategy recorded"}{info.strategyArchived ? <span className="hint"> (archived)</span> : null}</div></div>
+        <div><span className="hint">Setup type</span><div>{info.setupType ?? "—"}</div></div>
+        <div><span className="hint">Attempt</span><div>{lifecycle}</div></div>
+        {info.startingBalance != null && (
+          <div><span className="hint">Starting balance</span><div className="num">${info.startingBalance.toLocaleString()}</div></div>
+        )}
+        {info.attempt?.startIndex != null && (
+          <div><span className="hint">Locked candle</span><div className="num">#{info.attempt.startIndex}</div></div>
+        )}
+      </div>
+
+      <div style={{ marginTop: 14, borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 12 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Original Plan (recorded at entry)</div>
+        {ev?.hasSnapshot ? (
+          <>
+            <div style={{ fontSize: 13 }}>
+              <span className="hint">Original plan:</span> stop {ev.originalStopLoss != null ? `$${ev.originalStopLoss}` : "—"} · target {ev.originalTarget != null ? `$${ev.originalTarget}` : "—"}
+              {ev.initialRisk != null && <> · initial risk <span className="num">${ev.initialRisk.toFixed(2)}</span></>}
+              {ev.rMultiple != null && <> · R <span className="num">{ev.rMultiple.toFixed(2)}</span></>}
+            </div>
+            {(ev.planHistory.length > 0) && (
+              <div className="hint" style={{ marginTop: 4 }}>
+                {ev.planHistory.map((c, i) => (
+                  <div key={i}>{new Date(c.at).toLocaleString()} — {c.field === "stop_loss" ? "Stop" : "Target"} changed {c.from != null ? `$${c.from}` : "—"} → {c.to != null ? `$${c.to}` : "—"}</div>
+                ))}
+              </div>
+            )}
+            <p className="hint" style={{ marginTop: 6, fontSize: 11.5 }}>{ev.riskBasis}</p>
+          </>
+        ) : (
+          <p className="hint" style={{ margin: 0, fontSize: 12.5 }}>{ev?.riskBasis ?? "Plan evidence is unavailable for this trade."}</p>
+        )}
+      </div>
+
+      <div style={{ marginTop: 14, borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+          <div style={{ fontSize: 12, fontWeight: 600 }}>Decision Timeline</div>
+          {info.events.length > ownEvents.length && (
+            <button className="btn" style={{ padding: "2px 10px", fontSize: 11.5 }} onClick={() => setShowAll((s) => !s)}>
+              {showAll ? "This trade only" : `Full attempt (${info.events.length} events)`}
+            </button>
+          )}
+        </div>
+        {shown.length === 0 && <p className="hint" style={{ margin: 0 }}>No timeline events were recorded for this trade. The attempt history may not have been fully saved.</p>}
+        <div style={{ display: "grid", gap: 3, maxHeight: 340, overflowY: "auto" }}>
+          {shown.map(({ id, event }) => (
+            <div key={id} style={{ fontSize: 12.5, display: "flex", gap: 10, padding: "3px 0", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+              <span className="num" style={{ color: "var(--muted)", minWidth: 44 }}>{event.marketIdx != null ? `#${event.marketIdx}` : "—"}</span>
+              <span>{describeDrEvent(event)}</span>
+            </div>
+          ))}
+        </div>
+        <p className="hint" style={{ marginTop: 6, fontSize: 11.5 }}>Timeline times are the historical market times of the replayed day. Trade key: {tradeKeyVal}</p>
+      </div>
+    </div>
+  );
+}
+
+function ReviewTab({ tradeKey, simTrade, realTrade, meta, onSaved, onEditReal, onDeleteReal, drInfo }: {
   tradeKey: string | null;
   simTrade: GroupedTrade | null;
   realTrade: RealTrade | null;
@@ -761,6 +1114,7 @@ function ReviewTab({ tradeKey, simTrade, realTrade, meta, onSaved, onEditReal, o
   onSaved: () => void;
   onEditReal?: (k: string) => void;
   onDeleteReal?: (k: string) => void;
+  drInfo?: DrReviewInfo | null;
 }) {
   const [form, setForm] = useState<Partial<TradeMeta>>({});
   const [saving, setSaving] = useState(false);
@@ -850,7 +1204,7 @@ function ReviewTab({ tradeKey, simTrade, realTrade, meta, onSaved, onEditReal, o
     <div style={{ display: "grid", gap: 16, maxWidth: 720 }}>
       <div className="card" style={{ padding: 16 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-          <h3 style={{ margin: 0 }}>{displayTicker} <span className="hint">· {displayDate} · {displayDir}</span> <SourceBadge source={isReal ? "real" : "simulator"} /></h3>
+          <h3 style={{ margin: 0 }}>{displayTicker} <span className="hint">· {displayDate} · {displayDir}</span> <SourceBadge source={isReal ? "real" : drInfo ? "daily_replay" : "simulator"} />{drInfo?.strategyLabel && <span className="hint" style={{ fontSize: 12, marginLeft: 6 }}>{drInfo.strategyLabel}</span>}</h3>
           <span className="num" style={{ fontSize: 22, fontWeight: 700, color: displayPnl > 0 ? "var(--emerald-bright)" : displayPnl < 0 ? "#f6465d" : "var(--muted)" }}>
             {fmtPnl(displayPnl)}
           </span>
@@ -916,7 +1270,9 @@ function ReviewTab({ tradeKey, simTrade, realTrade, meta, onSaved, onEditReal, o
         )}
       </div>
 
-      {isReal && <ReviewScreenshots tradeKey={tradeKeyVal} />}
+      {(isReal || drInfo) && <ReviewScreenshots tradeKey={tradeKeyVal} />}
+
+      {drInfo && <DrAttemptCard info={drInfo} tradeKeyVal={tradeKeyVal} />}
 
       <div className="card" style={{ padding: 16 }}>
         <h4 style={{ margin: "0 0 12px" }}>Trade DNA</h4>
@@ -1822,7 +2178,7 @@ function CalendarTab({ trades, metas, selectedDay, onSelectDay, onSelectTrade }:
               <span>
                 <b>{t.ticker}</b>{" "}
                 <span className="hint">{t.direction} · {metas[t.key]?.setup_tag ?? "No setup tagged"}</span>{" "}
-                <SourceBadge source={t.source} />
+                <SourceBadge source={badgeSourceOf(t)} />
               </span>
               <span style={{ display: "flex", gap: 14, alignItems: "center" }}>
                 <span className="hint num">{t.rMultiple != null ? `${t.rMultiple.toFixed(2)}R` : "—"}</span>
@@ -1853,6 +2209,8 @@ const DIMENSION_OPTIONS: { key: BreakdownDimension; label: string }[] = [
   { key: "hodClass", label: "HOD Class" },
   { key: "keyLevel", label: "Key Level" },
   { key: "interaction", label: "Trade Interaction" },
+  { key: "strategy", label: "Strategy" },
+  { key: "strategyVersion", label: "Strategy Version" },
 ];
 
 function fmtR(v: number | null): string {
