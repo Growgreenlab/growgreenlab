@@ -31,7 +31,7 @@ export const DAILY_REPLAY_STARTING_BALANCE = 100_000;
  * different from the Trade Lab balance key ("ggl-account-balance"):
  * Daily Replay code never reads or writes that key.
  */
-export const DAILY_REPLAY_STATE_KEY = "ggl-daily-replay-state";
+export const DAILY_REPLAY_STATE_KEY: string = "ggl-daily-replay-state";
 
 /* ------------------------------------------------------------------ */
 /* ET date helpers                                                     */
@@ -394,6 +394,20 @@ export class SealedCandleFeed {
     this.position = r.position;
     this.refreshFinished(r.finished);
     return added;
+  }
+
+  /**
+   * Attach this feed to an EXISTING attempt (refresh-resume) and sync
+   * the server's revealed prefix into the local array. The position
+   * remains whatever the server reports — attach can never move it,
+   * and the starting candle stays the one locked at create() time.
+   */
+  async attach(attemptId: string): Promise<void> {
+    if (this.attemptId !== null) {
+      throw new Error("SealedCandleFeed: this feed already has an attempt.");
+    }
+    this.attemptId = attemptId;
+    await this.sync();
   }
 
   /** Re-sync with the server's revealed prefix (e.g. after a reload). */

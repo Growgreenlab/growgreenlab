@@ -150,6 +150,132 @@ export class DrEventRecorder {
     return this.shadowQty;
   }
 
+  /** Current shadow average entry (from recorded fills). */
+  get positionAvg(): number {
+    return this.shadowAvg;
+  }
+
+  /** Session realized P&L as tracked from recorded fills. */
+  get sessionRealized(): number {
+    return this.shadowRealized;
+  }
+
+  /** Final bracket levels for one scope (live-tracked or restored). */
+  bracketState(scope: DrBracketScope): {
+    sl: number | null;
+    tp: number | null;
+    everSet: boolean;
+  } {
+    const t = this.trackers[scope];
+    return { sl: t.sl, tp: t.tp, everSet: t.everSet };
+  }
+
+  /**
+   * Restore a recorder from a previously persisted event stream
+   * (Daily Replay refresh-resume). Events are appended verbatim —
+   * history is never rewritten — the seq counter continues from the
+   * stream's maximum (the next record() gets max + 1), and the shadow
+   * position + bracket trackers are rebuilt by scanning, so future
+   * classifications/counters stay consistent with the original
+   * session. Only valid on a fresh recorder.
+   *
+   * Scanning mirrors how the live paths maintain state: order_filled
+   * events drive quantity/average with exact fill math (so a stream
+   * truncated between a fill and its derived event still restores
+   * quantity/average); partial_exit / position_closed carry the exact
+   * realized figures, and position_closed also resets the ACTIVE
+   * bracket tracker (the engine clears brackets on close too);
+   * session_reset restarts all trading shadow state.
+   */
+  loadExisting(events: DrEvent[]): void {
+    if (this.events.length > 0) {
+      throw new Error(
+        "DrEventRecorder.loadExisting: recorder already has events.",
+      );
+    }
+    const sorted = [...events].sort((a, b) => a.seq - b.seq);
+    for (const src of sorted) {
+      const e: DrEvent = {
+        seq: src.seq,
+        type: src.type,
+        wallTs: src.wallTs,
+        marketIdx: src.marketIdx ?? null,
+        marketTs: src.marketTs ?? null,
+        payload: { ...src.payload },
+      };
+      Object.freeze(e.payload);
+      Object.freeze(e);
+      this.events.push(e);
+      if (e.seq > this.seq) this.seq = e.seq;
+      this.scanForState(e);
+    }
+    this.listener?.();
+  }
+
+  /** Rebuild shadow position + bracket trackers from one restored event. */
+  private scanForState(e: DrEvent): void {
+    const p = e.payload;
+    switch (e.type) {
+      case "order_filled": {
+        const qty = typeof p.qty === "number" ? p.qty : 0;
+        const price = typeof p.price === "number" ? p.price : 0;
+        if (p.side === "buy" && qty > 0) {
+          const newQty = this.shadowQty + qty;
+          this.shadowAvg =
+            newQty > 0
+              ? (this.shadowAvg * this.shadowQty + price * qty) / newQty
+              : 0;
+          this.shadowQty = newQty;
+        } else if (p.side === "sell" && qty > 0) {
+          this.shadowQty = Math.max(0, this.shadowQty - qty);
+          // This fill's realized P&L arrives on the derived
+          // partial_exit / position_closed event that follows.
+        }
+        break;
+      }
+      case "partial_exit":
+        if (typeof p.qtyAfter === "number") this.shadowQty = p.qtyAfter;
+        if (typeof p.sessionRealized === "number") {
+          this.shadowRealized = p.sessionRealized;
+        }
+        break;
+      case "position_closed":
+        this.shadowQty = 0;
+        if (typeof p.sessionRealized === "number") {
+          this.shadowRealized = p.sessionRealized;
+        }
+        this.trackers.active = freshTracker();
+        break;
+      case "bracket_set": {
+        const t = this.trackers[p.scope === "planned" ? "planned" : "active"];
+        t.everSet = true;
+        t.sl = typeof p.stopLoss === "number" ? p.stopLoss : null;
+        t.tp = typeof p.takeProfit === "number" ? p.takeProfit : null;
+        break;
+      }
+      case "bracket_modified": {
+        const t = this.trackers[p.scope === "planned" ? "planned" : "active"];
+        t.everSet = true;
+        const next = typeof p.next === "number" ? p.next : null;
+        if (p.field === "stopLoss") {
+          t.sl = next;
+          t.slMoves =
+            typeof p.timesMoved === "number" ? p.timesMoved : t.slMoves + 1;
+        } else if (p.field === "takeProfit") {
+          t.tp = next;
+          t.tpMoves =
+            typeof p.timesMoved === "number" ? p.timesMoved : t.tpMoves + 1;
+        }
+        break;
+      }
+      case "session_reset":
+        this.resetTradingState();
+        break;
+      default:
+        break;
+    }
+  }
+
   /** Per-trade bracket move counters for one scope. */
   bracketMoveCounts(scope: DrBracketScope): { sl: number; tp: number } {
     const t = this.trackers[scope];

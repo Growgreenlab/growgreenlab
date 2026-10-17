@@ -17,6 +17,7 @@ import {
   DAILY_REPLAY_STARTING_BALANCE,
   DAILY_REPLAY_STATE_KEY,
   encodeDrResumeHint,
+  decodeDrResumeHint,
   type SealedTransport,
 } from "../../lib/dailyReplay";
 import {
@@ -24,9 +25,14 @@ import {
   describeDrEvent,
   formatDrClock,
   type DrEvent,
+  type DrEventType,
   type DrBracketMethod,
   type DrBracketScope,
 } from "../../lib/dailyReplayEvents";
+import {
+  reconstructDrAttempt,
+  shouldOfferDrResume,
+} from "../../lib/dailyReplayResume";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
 import { diag } from "../../lib/diag";
 import { DEFAULT_HOTKEYS, isTypingTarget } from "../../lib/hotkeys";
@@ -339,6 +345,24 @@ function ReplayPageInner() {
   const drEventsMissingRef = useRef(false);
   const drSeenFillsRef = useRef(0);
   const drPlayStartedRef = useRef(false);
+  /* Refresh-resume: an in-progress attempt found on load, verified
+   * against the attempts table (the localStorage hint alone proves
+   * nothing — the server row decides, and anything non-active clears
+   * the hint). */
+  const [drResume, setDrResume] = useState<{
+    attemptId: string;
+    ticker: string;
+    tradeDate: string;
+    startIndex: number;
+    position: number;
+    total: number;
+    startingBalance: number;
+  } | null>(null);
+  const [drResuming, setDrResuming] = useState(false);
+  /** Set when a resumed attempt's earlier trade history could not be
+   *  restored (events unreadable or empty): the timeline panel says
+   *  so plainly instead of inventing fills. */
+  const [drHistoryNote, setDrHistoryNote] = useState<string | null>(null);
 
   // Trading-workspace mode: hide the site footer so the workspace owns the screen.
   useEffect(() => {
@@ -623,6 +647,7 @@ function ReplayPageInner() {
         startIndex: info.startIndex,
         premarketUnavailable,
       });
+      setDrHistoryNote(null);
       setDrPhase("active");
       try {
         localStorage.setItem(
@@ -687,6 +712,7 @@ function ReplayPageInner() {
     drFeedRef.current = null;
     drCompletedRef.current = false;
     setDrEvents([]);
+    setDrHistoryNote(null);
     setDrInfo(null);
     setDrFinal(null);
     setDrSaveMsg(null);
@@ -698,6 +724,147 @@ function ReplayPageInner() {
     setEnded(false);
     bump();
   }, [bump, stopTimer]);
+
+  // Refresh-resume: rebuild an in-progress attempt from its server
+  // artifacts — the sealed feed (dr_get_revealed: revealed prefix +
+  // authoritative position) and the persisted Decision Timeline
+  // (fills re-applied at their exact recorded prices, mirroring the
+  // saved-session reload below). The starting candle cannot change:
+  // resume re-enters the ACTIVE phase directly; there is no path
+  // back to preview for this attempt.
+  const resumeDailyReplay = useCallback(async () => {
+    const offer = drResume;
+    if (!offer || drResuming) return;
+    setDrResuming(true);
+    setDrError(null);
+    try {
+      if (!isSupabaseConfigured()) {
+        setDrError(DR_STORAGE_MISSING_MSG);
+        return;
+      }
+      const supabase = createClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) {
+        setDrError("Please sign in to resume your Daily Replay attempt.");
+        return;
+      }
+      // Re-verify at click time: the attempt may have finished (or
+      // been finished on another device) since the offer was shown.
+      const { data: att, error: attErr } = await supabase
+        .from("daily_replay_attempts")
+        .select("id, dataset_id, start_index, position, status, starting_balance")
+        .eq("id", offer.attemptId)
+        .maybeSingle();
+      if (attErr) throw attErr;
+      if (!att || !shouldOfferDrResume(att.status)) {
+        try { localStorage.removeItem(DAILY_REPLAY_STATE_KEY); } catch { /* ignore */ }
+        setDrResume(null);
+        setDrError("That Daily Replay attempt is no longer active.");
+        return;
+      }
+      // Sealed feed: attach pulls ONLY the revealed prefix; the
+      // position in the response is authoritative.
+      const feed = new SealedCandleFeed(createDrTransport(supabase));
+      feed.setTotal(offer.total);
+      await feed.attach(offer.attemptId);
+      // Decision Timeline: the attempt's persisted events, in order.
+      // If they cannot be read (or none were ever persisted), resume
+      // the candles + position with a fresh trading state and say so
+      // in the timeline — fills are never fabricated.
+      let events: DrEvent[] = [];
+      let historyOk = true;
+      const { data: rows, error: evErr } = await supabase
+        .from("daily_replay_events")
+        .select("seq, type, wall_ts, market_idx, market_ts, payload")
+        .eq("attempt_id", offer.attemptId)
+        .order("seq", { ascending: true });
+      if (evErr) {
+        historyOk = false;
+      } else {
+        events = (rows ?? []).map((r) => ({
+          seq: r.seq as number,
+          type: r.type as DrEventType,
+          wallTs: Date.parse(r.wall_ts as string),
+          marketIdx: (r.market_idx as number | null) ?? null,
+          marketTs: r.market_ts != null ? Number(r.market_ts) : null,
+          payload: (r.payload ?? {}) as Record<string, unknown>,
+        }));
+        if (events.length === 0) historyOk = false;
+      }
+      const startingBalance =
+        Number(att.starting_balance) || DAILY_REPLAY_STARTING_BALANCE;
+      const recon = reconstructDrAttempt({
+        candles: feed.candles,
+        startingBalance,
+        startIndex: att.start_index,
+        events,
+      });
+      const { engine: eng, recorder } = recon;
+      // Wire the attempt exactly like a fresh lock does.
+      drFeedRef.current = feed;
+      drRecorderRef.current = recorder;
+      drFlushedRef.current = events.length; // everything loaded is already persisted
+      drEventsMissingRef.current = false;
+      drSeenFillsRef.current = eng.fills.length; // restored fills are already recorded
+      drPlayStartedRef.current = true; // the next Play is a resume, not a start
+      drCompletedRef.current = false;
+      recorder.setListener(() => {
+        setDrEvents(recorder.all);
+        if (recorder.length - drFlushedRef.current >= 10) {
+          void flushDrEvents();
+        }
+      });
+      setDrEvents(recorder.all);
+      if (recon.restoredPlannedBrackets) {
+        setPlannedSL(recon.restoredPlannedBrackets.sl);
+        setPlannedTP(recon.restoredPlannedBrackets.tp);
+      }
+      const info: DrInfo = {
+        attemptId: offer.attemptId,
+        datasetId: att.dataset_id as string,
+        ticker: offer.ticker,
+        tradeDate: offer.tradeDate,
+        startIndex: att.start_index as number,
+        total: offer.total,
+      };
+      stopTimer();
+      setEnded(false);
+      engineRef.current = eng;
+      savedSessionIdRef.current = null;
+      lastSavedPnlRef.current = 0;
+      setCandles(feed.candles);
+      setMeta({
+        ticker: info.ticker,
+        tradeDate: info.tradeDate,
+        source: "twelvedata",
+        startIndex: info.startIndex,
+      });
+      setDrInfo(info);
+      setDrHistoryNote(
+        historyOk
+          ? null
+          : "Earlier trade history for this attempt could not be restored, so the trade state starts fresh — your locked starting candle and every candle revealed so far are intact."
+      );
+      setDrResume(null);
+      setDrPhase("active");
+      // The reload gap is part of the history: mark it in the
+      // timeline (seq continues from the restored maximum).
+      recorder.record("session_resumed", { via: "page-reload" }, drCtx());
+      bump();
+    } catch (e) {
+      setDrError(
+        isDrStorageMissing(e)
+          ? DR_STORAGE_MISSING_MSG
+          : e instanceof Error
+            ? e.message
+            : "Could not resume Daily Replay."
+      );
+    } finally {
+      setDrResuming(false);
+    }
+  }, [drResume, drResuming, bump, stopTimer]);
 
   // Load a saved session (?session=<id>)
   useEffect(() => {
@@ -749,6 +916,71 @@ function ReplayPageInner() {
         setLoadingSession(false);
       }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Daily Replay resume detection (mount, best-effort): if the
+  // resume hint names an attempt the server still reports 'active'
+  // for this signed-in user, offer to resume it. Finished/abandoned/
+  // missing attempts clear the hint silently; an unverifiable hint
+  // (signed out, storage not enabled) is left alone and stays silent.
+  useEffect(() => {
+    if (searchParams.get("session")) return; // a saved-session load wins
+    let cancelled = false;
+    (async () => {
+      try {
+        if (!isSupabaseConfigured()) return;
+        const raw = localStorage.getItem(DAILY_REPLAY_STATE_KEY);
+        const hint = decodeDrResumeHint(raw);
+        if (!hint) {
+          if (raw) {
+            try { localStorage.removeItem(DAILY_REPLAY_STATE_KEY); } catch { /* ignore */ }
+          }
+          return;
+        }
+        const supabase = createClient();
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        if (!user || cancelled) return; // leave the hint for a signed-in visit
+        const { data: att, error } = await supabase
+          .from("daily_replay_attempts")
+          .select("id, dataset_id, start_index, position, status, starting_balance")
+          .eq("id", hint.attemptId)
+          .maybeSingle();
+        if (cancelled || error) return; // cannot verify — keep the hint, stay silent
+        if (!att || !shouldOfferDrResume(att.status)) {
+          try { localStorage.removeItem(DAILY_REPLAY_STATE_KEY); } catch { /* ignore */ }
+          return;
+        }
+        const { data: ds } = await supabase
+          .from("daily_replay_datasets")
+          .select("ticker, trade_date, candle_count")
+          .eq("id", att.dataset_id)
+          .maybeSingle();
+        if (cancelled) return;
+        if (!ds) {
+          // Attempt without its dataset can never resume.
+          try { localStorage.removeItem(DAILY_REPLAY_STATE_KEY); } catch { /* ignore */ }
+          return;
+        }
+        setDrResume({
+          attemptId: att.id as string,
+          ticker: ds.ticker as string,
+          tradeDate: ds.trade_date as string,
+          startIndex: att.start_index as number,
+          position: att.position as number,
+          total: ds.candle_count as number,
+          startingBalance:
+            Number(att.starting_balance) || DAILY_REPLAY_STARTING_BALANCE,
+        });
+      } catch {
+        /* resume is best-effort; the normal flow is unaffected */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1111,7 +1343,12 @@ function ReplayPageInner() {
         else { setEnded(false); setPlayNonce((n) => n + 1); setPlaying(true); }
       } else if (match(DEFAULT_HOTKEYS.stepForward)) {
         e.preventDefault();
-        if (!playing) { eng.step(); setEnded(eng.atEnd); bump(); }
+        if (!playing) {
+          // Daily Replay: the hotkey must release sealed candles at
+          // the held end exactly like the Step button does.
+          if (drPhaseRef.current === "active") void drStepNext();
+          else { eng.step(); setEnded(eng.atEnd); bump(); }
+        }
       } else if (match(DEFAULT_HOTKEYS.speed05)) { setSpeed(0.5); }
       else if (match(DEFAULT_HOTKEYS.speed1)) { setSpeed(1); }
       else if (match(DEFAULT_HOTKEYS.speed2)) { setSpeed(2); }
@@ -1120,7 +1357,7 @@ function ReplayPageInner() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [playing, orderQty, buyErr, sellErr, stopTimer, bump]);
+  }, [playing, orderQty, buyErr, sellErr, stopTimer, bump, drStepNext]);
 
   const placeLimitErr = (side: "buy" | "sell", qty: number, price: number): string | null => {
     const eng = engineRef.current;
@@ -1307,6 +1544,8 @@ function ReplayPageInner() {
         p_session_id: s.id,
       });
       if (fErr) throw fErr;
+      // The attempt is finished server-side: the resume hint is spent.
+      try { localStorage.removeItem(DAILY_REPLAY_STATE_KEY); } catch { /* ignore */ }
       await flushDrEvents();
       setDrSaveMsg("Saved to your journal — find it under My Sessions.");
     } catch (e) {
@@ -1642,6 +1881,49 @@ function ReplayPageInner() {
       {drPhase !== "preview" && (!eng || !candles || !meta || !snap) && (
         <div className="ws-welcome">
           {loadingSession && <div className="hint">Loading saved session…</div>}
+          {drResume && (
+            <div
+              style={{
+                display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center",
+                padding: "10px 12px", marginBottom: 12,
+                background: "rgba(16,185,129,0.08)",
+                border: "1px solid rgba(16,185,129,0.35)", borderRadius: 8,
+                fontSize: 13,
+              }}
+            >
+              <b style={{ color: "var(--emerald-bright)", letterSpacing: "0.04em" }}>
+                RESUME DAILY REPLAY
+              </b>
+              <span>
+                {drResume.ticker} · {drResume.tradeDate} — candle{" "}
+                {drResume.position + 1} of {drResume.total}. Your starting
+                candle stays locked; position, trades, and timeline are
+                restored from the server.
+              </span>
+              <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+                <button
+                  className="btn primary"
+                  onClick={() => { void resumeDailyReplay(); }}
+                  disabled={drResuming}
+                >
+                  {drResuming ? "Resuming…" : "Resume"}
+                </button>
+                <button
+                  className="btn"
+                  onClick={() => setDrResume(null)}
+                  disabled={drResuming}
+                >
+                  Not now
+                </button>
+              </span>
+            </div>
+          )}
+          {drError && (
+            <div className="err" style={{ marginBottom: 12 }}>
+              {drError}{" "}
+              <button className="btn" onClick={() => setDrError(null)}>Dismiss</button>
+            </div>
+          )}
           <DataSourcePanel candles={candles} meta={meta} onLoad={handleLoad} onPreview={handleDrPreview} />
           {saveMsg && <div className="err" style={{ marginTop: 12 }}>{saveMsg}</div>}
         </div>
@@ -2132,6 +2414,11 @@ function ReplayPageInner() {
                   </span>
                 )}
               </summary>
+              {drHistoryNote && (
+                <div style={{ marginTop: 8, color: "#fbbf24", fontSize: 12.5 }}>
+                  {drHistoryNote}
+                </div>
+              )}
               <div style={{ marginTop: 8, maxHeight: 260, overflowY: "auto", fontSize: 12.5, lineHeight: 1.9 }}>
                 {drEvents.map((e) => (
                   <div key={e.seq} style={{ display: "flex", gap: 8 }}>
