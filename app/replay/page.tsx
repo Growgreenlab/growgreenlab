@@ -10,7 +10,7 @@ import ReplayControls from "../../components/ReplayControls";
 import TradingPanel from "../../components/TradingPanel";
 import RiskCalculator from "../../components/RiskCalculator";
 import { ReplayEngine, formatMoney, formatSigned, countdownText, countdownTextFor, TICKS_PER_CANDLE, SECONDS_PER_CANDLE } from "../../lib/engine";
-import type { Candle, SessionMeta } from "../../lib/types";
+import type { Candle, Fill, SessionMeta } from "../../lib/types";
 import { TIMEFRAMES, aggregateCandles, higherTimeframeProgress, timeframeMinutes, formatEtTime, type TimeframeId } from "../../lib/marketData";
 import {
   SealedCandleFeed,
@@ -33,6 +33,12 @@ import {
   reconstructDrAttempt,
   shouldOfferDrResume,
 } from "../../lib/dailyReplayResume";
+import {
+  DrOrderTracker,
+  newDrOrderId,
+  type DrOrderRow,
+  type DrOrderUpdateOp,
+} from "../../lib/dailyReplayOrders";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
 import { diag } from "../../lib/diag";
 import { DEFAULT_HOTKEYS, isTypingTarget } from "../../lib/hotkeys";
@@ -142,9 +148,12 @@ function isDrStorageMissing(e: unknown): boolean {
     msg.includes("daily_replay_datasets") ||
     msg.includes("daily_replay_attempts") ||
     msg.includes("daily_replay_events") ||
+    msg.includes("daily_replay_orders") ||
     msg.includes("dr_create_attempt") ||
     msg.includes("dr_upload_candles") ||
-    msg.includes("dr_advance_attempt")
+    msg.includes("dr_advance_attempt") ||
+    msg.includes("dr_place_order") ||
+    msg.includes("dr_update_order")
   );
 }
 
@@ -345,6 +354,16 @@ function ReplayPageInner() {
   const drEventsMissingRef = useRef(false);
   const drSeenFillsRef = useRef(0);
   const drPlayStartedRef = useRef(false);
+  /* Persistent working orders (daily_replay_orders, v2): the tracker
+   * maps engine order ids to server rows for the on-screen attempt;
+   * store ops for one order are serialized on a per-order promise
+   * chain so a fill update can never overtake its placement insert.
+   * drOrdersMissingRef latches when the v2 migration is not applied —
+   * order persistence then stays off (device-only), never crashing,
+   * exactly how the events layer degrades pre-migration. */
+  const drOrderTrackerRef = useRef<DrOrderTracker | null>(null);
+  const drOrdersMissingRef = useRef(false);
+  const drOrderChainsRef = useRef(new Map<string, Promise<void>>());
   /* Refresh-resume: an in-progress attempt found on load, verified
    * against the attempts table (the localStorage hint alone proves
    * nothing — the server row decides, and anything non-active clears
@@ -603,6 +622,10 @@ function ReplayPageInner() {
       drEventsMissingRef.current = false;
       drSeenFillsRef.current = 0;
       drPlayStartedRef.current = false;
+      // Fresh persistent-order tracking for this attempt.
+      drOrderTrackerRef.current = new DrOrderTracker();
+      drOrdersMissingRef.current = false;
+      drOrderChainsRef.current = new Map();
       recorder.setListener(() => {
         setDrEvents(recorder.all);
         if (recorder.length - drFlushedRef.current >= 10) {
@@ -709,6 +732,9 @@ function ReplayPageInner() {
     }
     void flushDrEvents();
     drRecorderRef.current = null;
+    // The attempt (and its working orders) stays 'active' server-side
+    // for a later resume — only the local tracking is dropped.
+    drOrderTrackerRef.current = null;
     drFeedRef.current = null;
     drCompletedRef.current = false;
     setDrEvents([]);
@@ -793,6 +819,42 @@ function ReplayPageInner() {
         }));
         if (events.length === 0) historyOk = false;
       }
+      // Persistent orders: the attempt's daily_replay_orders rows are
+      // the AUTHORITATIVE working-order state (v2). Read them under
+      // the owner SELECT policy, in creation order; reconstruction
+      // re-places exactly the 'working' ones at remaining qty. If the
+      // v2 storage is missing, resume proceeds without orders (the
+      // pre-v2 behavior) and placement persistence stays latched off.
+      let orderRows: DrOrderRow[] = [];
+      drOrdersMissingRef.current = false;
+      const { data: oRows, error: oErr } = await supabase
+        .from("daily_replay_orders")
+        .select(
+          "id, attempt_id, side, order_type, qty, filled_qty, limit_price, status, engine_order_id, created_at"
+        )
+        .eq("attempt_id", offer.attemptId)
+        .order("created_at", { ascending: true });
+      if (oErr) {
+        if (isDrStorageMissing(oErr)) {
+          drOrdersMissingRef.current = true;
+        } else {
+          historyOk = false;
+        }
+      } else {
+        orderRows = (oRows ?? []).map((r) => ({
+          id: r.id as string,
+          attemptId: r.attempt_id as string,
+          side: r.side as "buy" | "sell",
+          orderType: (r.order_type as string) ?? "limit",
+          qty: Number(r.qty),
+          filledQty: Number(r.filled_qty),
+          limitPrice: Number(r.limit_price),
+          status: r.status as DrOrderRow["status"],
+          engineOrderId:
+            r.engine_order_id != null ? Number(r.engine_order_id) : null,
+          createdAt: (r.created_at as string) ?? undefined,
+        }));
+      }
       const startingBalance =
         Number(att.starting_balance) || DAILY_REPLAY_STARTING_BALANCE;
       const recon = reconstructDrAttempt({
@@ -800,6 +862,7 @@ function ReplayPageInner() {
         startingBalance,
         startIndex: att.start_index,
         events,
+        orders: orderRows,
       });
       const { engine: eng, recorder } = recon;
       // Wire the attempt exactly like a fresh lock does.
@@ -810,6 +873,27 @@ function ReplayPageInner() {
       drSeenFillsRef.current = eng.fills.length; // restored fills are already recorded
       drPlayStartedRef.current = true; // the next Play is a resume, not a start
       drCompletedRef.current = false;
+      // Register the restored working orders with the tracker under
+      // their persistent ids, so fills/cancels from here on keep
+      // updating the SAME server rows (no duplicates, ever). Restored
+      // orders emit no new limit_placed events — the originals are
+      // already in the loaded stream.
+      const tracker = new DrOrderTracker();
+      for (const ro of recon.restoredOrders) {
+        tracker.track(ro.engineOrderId, {
+          id: ro.orderId,
+          attemptId: offer.attemptId,
+          side: ro.side,
+          orderType: "limit",
+          qty: ro.qty,
+          filledQty: ro.filledQty,
+          limitPrice: ro.limitPrice,
+          status: "working",
+          engineOrderId: ro.engineOrderId,
+        });
+      }
+      drOrderTrackerRef.current = tracker;
+      drOrderChainsRef.current = new Map();
       recorder.setListener(() => {
         setDrEvents(recorder.all);
         if (recorder.length - drFlushedRef.current >= 10) {
@@ -851,7 +935,11 @@ function ReplayPageInner() {
       setDrPhase("active");
       // The reload gap is part of the history: mark it in the
       // timeline (seq continues from the restored maximum).
-      recorder.record("session_resumed", { via: "page-reload" }, drCtx());
+      recorder.record(
+        "session_resumed",
+        { via: "page-reload", restoredOrders: recon.restoredOrders.length },
+        drCtx()
+      );
       bump();
     } catch (e) {
       setDrError(
@@ -1373,13 +1461,43 @@ function ReplayPageInner() {
         return "Daily guest limit reached (5 trades).";
       }
     }
+    const pendingBefore = new Set(eng.pendingOrders.map((o) => o.id));
     const err = eng.placeLimitOrder(side, qty, price);
     const rec = drRec();
     if (err) {
+      // Engine refused synchronously — the order exists nowhere and
+      // is never persisted (a rejected placement cannot resurrect).
       rec?.recordOrderRejected({ side, qty, reason: err }, drCtx());
     } else {
-      rec?.recordOrderSubmitted({ orderType: "limit", side, qty, requestedPrice: price }, drCtx());
-      rec?.recordLimitPlaced({ side, qty, limitPrice: price }, drCtx());
+      // The accepted order is the one pending entry that is new.
+      const placed = eng.pendingOrders.find((o) => !pendingBefore.has(o.id));
+      // Daily Replay: register the order server-side under a fresh
+      // persistent uuid BEFORE recording, so the timeline events and
+      // the authoritative order row share the same identity.
+      let orderUuid: string | undefined;
+      const tracker = drOrderTrackerRef.current;
+      const info = drInfoRef.current;
+      if (placed && tracker && info && drPhaseRef.current === "active") {
+        orderUuid = newDrOrderId();
+        const row: DrOrderRow = {
+          id: orderUuid,
+          attemptId: info.attemptId,
+          side: placed.side,
+          orderType: "limit",
+          qty: placed.qty,
+          filledQty: 0,
+          limitPrice: placed.limitPrice,
+          status: "working",
+          engineOrderId: placed.id,
+        };
+        tracker.track(placed.id, row);
+        persistDrOrderPlace(row);
+      }
+      rec?.recordOrderSubmitted(
+        { orderType: "limit", side, qty, requestedPrice: price, orderUuid },
+        drCtx()
+      );
+      rec?.recordLimitPlaced({ side, qty, limitPrice: price, orderUuid }, drCtx());
     }
     bump();
     return err;
@@ -1488,11 +1606,20 @@ function ReplayPageInner() {
     const feed = drFeedRef.current;
     const info = drInfoRef.current;
     if (!eng || !feed || !info) return;
+    // Settle fills/orders from the final candle FIRST: a limit order
+    // that filled on it must reach its server row as 'filled' before
+    // the settle-all below marks the leftovers cancelled. (The sync
+    // is idempotent; the version effect will re-run it as a no-op.)
+    drSyncFills();
     drRecorderRef.current?.record(
       "session_completed",
       { realizedPnl: eng.realizedPnl, equity: eng.equity() },
       drCtx()
     );
+    // Any order still working at the end is extinguished with the
+    // session: settle its server row as cancelled so it can never be
+    // restored (the attempt is about to be marked finished anyway).
+    drSettleTrackedOrders();
     setDrFinal({ realized: eng.realizedPnl, equity: eng.equity() });
     setDrPhase("done");
     try {
@@ -1651,11 +1778,102 @@ function ReplayPageInner() {
     }
   };
 
+  /* ---------------- Persistent working orders (v2) ----------------
+   * Every limit order the engine accepts during a Daily Replay
+   * attempt is registered server-side (dr_place_order) under a fresh
+   * uuid — the persistent identity the Decision Timeline events also
+   * carry as orderUuid. Status changes flow through dr_update_order
+   * only. All ops for one order are serialized on a per-order chain:
+   * a fill observed a tick after placement can never reach the
+   * server before the placement insert lands. Failures never crash
+   * trading: if the v2 migration is missing we latch that and stop
+   * trying (the order still works in-page; it just won't survive a
+   * refresh — the pre-v2 behavior); other errors are swallowed per
+   * op, and an update for a row the server never got fails as
+   * "order not found" and simply drops. */
+
+  /** Run `op` after every previously queued op for this order. */
+  const enqueueDrOrderOp = (orderId: string, op: () => Promise<void>): void => {
+    if (drOrdersMissingRef.current) return;
+    const chains = drOrderChainsRef.current;
+    const prev = chains.get(orderId) ?? Promise.resolve();
+    const next = prev
+      .then(op)
+      .catch((e) => {
+        if (isDrStorageMissing(e)) drOrdersMissingRef.current = true;
+      });
+    chains.set(orderId, next);
+    // Drop the chain entry once it drains, unless a newer op queued.
+    void next.then(() => {
+      if (chains.get(orderId) === next) chains.delete(orderId);
+    });
+  };
+
+  /** Register a freshly accepted engine order server-side. */
+  const persistDrOrderPlace = (row: DrOrderRow): void => {
+    const info = drInfoRef.current;
+    if (!info) return;
+    enqueueDrOrderOp(row.id, async () => {
+      if (!isSupabaseConfigured()) return;
+      const supabase = createClient();
+      const { error } = await supabase.rpc("dr_place_order", {
+        p_attempt_id: info.attemptId,
+        p_order_id: row.id,
+        p_side: row.side,
+        p_qty: row.qty,
+        p_limit_price: row.limitPrice,
+        p_engine_order_id: row.engineOrderId != null ? String(row.engineOrderId) : null,
+      });
+      if (error) throw error;
+    });
+  };
+
+  /** Persist a batch of tracker-decided status transitions. */
+  const persistDrOrderUpdates = (ops: DrOrderUpdateOp[]): void => {
+    for (const op of ops) {
+      enqueueDrOrderOp(op.orderId, async () => {
+        if (!isSupabaseConfigured()) return;
+        const supabase = createClient();
+        const { error } = await supabase.rpc("dr_update_order", {
+          p_order_id: op.orderId,
+          p_status: op.status,
+          p_filled_qty: op.filledQty,
+        });
+        if (error) throw error;
+      });
+    }
+  };
+
+  /**
+   * Settle every still-tracked order as cancelled (session reset /
+   * attempt completion: the engine extinguished them, so their
+   * server rows must end terminal or a resume would resurrect them).
+   * Used at the reset call sites and at completion; tick-driven
+   * removals are settled by the departure diff in drSyncFills.
+   */
+  const drSettleTrackedOrders = (): void => {
+    const tracker = drOrderTrackerRef.current;
+    if (!tracker || tracker.size === 0) return;
+    const ops: DrOrderUpdateOp[] = tracker.all().map((row) => ({
+      orderId: row.id,
+      status: "cancelled" as const,
+      filledQty: row.filledQty,
+    }));
+    tracker.clear();
+    persistDrOrderUpdates(ops);
+  };
+
   /**
    * Observe engine fills centrally (market/limit fills from handlers,
    * bracket triggers + limit fills from the tick loop) and feed them
    * to the recorder exactly once each. A shrinking fills array means
    * the engine was reset — the shadow restarts, history stays.
+   *
+   * The same pass settles persistent orders: fills are collected
+   * first, the order tracker diffs tracked orders against the
+   * engine's current pendingOrders (matching departed orders to this
+   * pass's limit fills), and only then are the fills recorded — so a
+   * limit fill's order_filled event carries its persistent orderUuid.
    */
   const drSyncFills = (): void => {
     const e = engineRef.current;
@@ -1666,8 +1884,21 @@ function ReplayPageInner() {
       drSeenFillsRef.current = 0;
       rec.resetTradingState();
     }
+    const newFills: Fill[] = [];
     while (drSeenFillsRef.current < e.fills.length) {
-      const f = e.fills[drSeenFillsRef.current++];
+      newFills.push(e.fills[drSeenFillsRef.current++]);
+    }
+    let fillOrderId = new Map<Fill, string>();
+    const tracker = drOrderTrackerRef.current;
+    if (tracker && drPhaseRef.current === "active") {
+      const settled = tracker.syncDepartures(
+        new Set(e.pendingOrders.map((o) => o.id)),
+        newFills
+      );
+      fillOrderId = settled.fillOrderId;
+      if (settled.updates.length > 0) persistDrOrderUpdates(settled.updates);
+    }
+    for (const f of newFills) {
       const wasFlat = rec.positionQty === 0;
       rec.recordFill({
         side: f.side,
@@ -1677,6 +1908,7 @@ function ReplayPageInner() {
         time: f.time,
         note: f.note,
         realizedPnl: f.realizedPnl,
+        orderUuid: fillOrderId.get(f),
       });
       if (f.side === "buy" && wasFlat) {
         // Risk snapshot at first entry, from the levels now in force.
@@ -2084,8 +2316,8 @@ function ReplayPageInner() {
                 }}
                 onPause={() => { stopTimer(); drRec()?.record("session_paused", {}, drCtx()); }}
                 onNext={isDr ? () => { void drStepNext(); } : () => { eng.step(); setEnded(eng.atEnd); bump(); }}
-                onReset={() => { const wasPlaying = playing; stopTimer(); setEnded(false); eng.reset(); drRec()?.record("session_reset", {}, drCtx()); bump(); if (wasPlaying) { setPlayNonce((n) => n + 1); setPlaying(true); } }}
-                onRestart={() => { stopTimer(); setEnded(false); eng.reset(); drRec()?.record("session_reset", {}, drCtx()); bump(); setPlayNonce((n) => n + 1); setPlaying(true); }}
+                onReset={() => { const wasPlaying = playing; stopTimer(); setEnded(false); drSyncFills(); drSettleTrackedOrders(); eng.reset(); drRec()?.record("session_reset", {}, drCtx()); bump(); if (wasPlaying) { setPlayNonce((n) => n + 1); setPlaying(true); } }}
+                onRestart={() => { stopTimer(); setEnded(false); drSyncFills(); drSettleTrackedOrders(); eng.reset(); drRec()?.record("session_reset", {}, drCtx()); bump(); setPlayNonce((n) => n + 1); setPlaying(true); }}
                 speed={speed}
                 onSpeed={setSpeed}
                 index={eng.index}
@@ -2314,8 +2546,24 @@ function ReplayPageInner() {
                 onCancelOrder={(id) => {
                   const o = eng.pendingOrders.find((x) => x.id === id);
                   if (eng.cancelOrder(id) && o) {
+                    // Daily Replay: settle the persistent row in the
+                    // same action — the tracker hands back the row so
+                    // the departure diff never sees (or double-settles)
+                    // this cancel.
+                    const row = drOrderTrackerRef.current?.take(id);
+                    if (row) {
+                      persistDrOrderUpdates([
+                        { orderId: row.id, status: "cancelled", filledQty: row.filledQty },
+                      ]);
+                    }
                     drRec()?.recordOrderCancelled(
-                      { orderId: id, side: o.side, qty: o.qty, limitPrice: o.limitPrice },
+                      {
+                        orderId: id,
+                        side: o.side,
+                        qty: o.qty,
+                        limitPrice: o.limitPrice,
+                        orderUuid: row?.id,
+                      },
                       drCtx()
                     );
                   }
