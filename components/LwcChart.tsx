@@ -291,17 +291,20 @@ interface Props {
    *     width at the first managed push, so residual label-width
    *     variance can't resize the plot and re-derive the visible
    *     time range mid-candle;
-   *   - a manual axis drag takes ownership of the range: the manager
-   *     then only widens on genuine exits until the next full load
-   *     or Fit-all tap;
+   *   - a manual axis drag takes ownership of the range: the
+   *     manager's AUTOMATIC recomputes then only widen on genuine
+   *     exits, until the next full load, Fit-all tap, or TIME-scale
+   *     gesture settle;
    *   - when the user zooms/pans the TIME scale, the window refits
    *     ONCE when the gesture settles (pointer-up / wheel-idle),
-   *     recomputed from the newly visible extremes — otherwise a
-   *     pinch into a quiet stretch left the wide pre-zoom window
-   *     standing (candles squashed in a thin band) until the next
-   *     candle boundary, or indefinitely while paused. Playback
-   *     itself never triggers a refit: within-candle changes remain
-   *     widen-only.
+   *     recomputed from the newly visible extremes, and the settle
+   *     re-takes ownership even after a manual axis adjustment —
+   *     otherwise a pinch into a quiet stretch left the wide
+   *     pre-zoom window standing (candles squashed in a thin band)
+   *     until the next candle boundary, or indefinitely while
+   *     paused, and a stray axis adjustment poisoned every later
+   *     settle the same way. Playback itself never triggers a
+   *     refit: within-candle changes remain widen-only.
    *  Omit/false = library autoscale exactly as before (drills,
    *  standard Trade Lab, the Daily Replay preview). */
   stableScale?: boolean;
@@ -433,10 +436,30 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
    * extremes, padded by paddedPriceRange — so the window (and its
    * padding) always derives from what is on screen, never from the
    * whole session. When the user has dragged the price axis (the live
-   * range no longer matches what the manager last set) it limits
-   * itself to anti-clip widening, exactly like the boundary path.
+   * range no longer matches what the manager last set) the AUTOMATIC
+   * recomputes (candle boundaries, intra-candle updates) limit
+   * themselves to anti-clip widening — the user's axis stays theirs.
+   *
+   * A TIME-scale gesture settle is different (opts.fromTimeGesture):
+   * the user has just deliberately reframed WHICH candles are on
+   * screen, so the settle ALWAYS refits fresh to the newly visible
+   * extremes and re-takes ownership — axis ownership governs the
+   * manager's automatic behavior, never the user's own time gestures.
+   * Without this distinction, a single price-axis adjustment (a drag
+   * on the ~57px axis strip beside the forming candle, an axis wheel
+   * scroll) silently poisoned ownership for the rest of the attempt:
+   * every later zoom/pan settle — and every candle boundary — took
+   * the expand-only branch and the wide pre-gesture window stood
+   * forever while paused, candles crushed in a thin band (measured:
+   * axis drag, then wheel-zoom to 15 bars — apply ran with
+   * owned=false and the 0.35-wide window never refit to the 0.07 the
+   * visible bars needed). The axis drag's OWN settle never reaches
+   * this path — the settle gates on the TIME range having changed,
+   * and an axis drag doesn't move it — so a manual axis adjustment
+   * is still never overridden by its own gesture, and boundaries
+   * keep respecting it until the next time gesture or Fit-all.
    * Reads only refs, so it is safe from effects and event handlers. */
-  const applyStableWindow = () => {
+  const applyStableWindow = (opts?: { fromTimeGesture?: boolean }) => {
     const chart = chartRef.current;
     const cs = candleSeriesRef.current;
     if (!chart || !cs || !stableScaleRef.current) return;
@@ -455,6 +478,7 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       );
       const cur = ps.getVisibleRange();
       const owned =
+        opts?.fromTimeGesture === true ||
         scaleWinRef.current.lastSet === null ||
         (cur !== null && priceRangesClose(cur, scaleWinRef.current.lastSet));
       if (owned) {
@@ -489,11 +513,15 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
    * settle), refit ONCE via applyStableWindow — but only if the time
    * range actually changed, which keeps plain clicks, drawing drags,
    * and price-axis drags (none of which move the time range) from
-   * ever triggering it. Wheel zoom needs no snapshot: the library
-   * applies it before the event bubbles here, so a burst is simply
-   * debounced (300ms idle) into one refit — safe even when the burst
-   * changed nothing, because applyStableWindow's ownership guard
-   * makes it a no-op or an anti-clip widening in that case.
+   * ever triggering it. Wheel bursts are debounced (300ms idle) into
+   * one refit, gated by a snapshot taken at the burst's first event:
+   * the refit re-takes ownership only when the TIME range actually
+   * moved during the burst; a burst that left it unmoved (a wheel
+   * scroll over the price axis scales the axis instead) gets the
+   * standard ownership-respecting recompute, so the user's axis
+   * scaling stands. Both settle paths therefore distinguish a time
+   * gesture from an axis adjustment precisely — the distinction the
+   * ownership guard alone could not make (see applyStableWindow).
    * Programmatic range changes (Fit-all, the initial fit, the
    * library's boundary follow-shift) produce no pointer/wheel
    * events, so they can't trigger a refit either, and the refit
@@ -504,6 +532,12 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
   const gestureSnapRef = useRef<LogicalRange | null>(null);
   const settleTimerRef = useRef<number | null>(null);
   const wheelTimerRef = useRef<number | null>(null);
+  // Visible range when the current wheel burst began (first event
+  // after idle): at fire time it tells a TIME-zoom burst (range
+  // moved — the settle may re-take ownership and refit fresh) from
+  // an axis-wheel burst (range unmoved — the user's axis scaling is
+  // manual ownership and the settle must respect it).
+  const wheelSnapRef = useRef<LogicalRange | null>(null);
   const snapVisibleRange = (): LogicalRange | null => {
     const ts = chartRef.current?.timeScale();
     if (!ts) return null;
@@ -529,14 +563,26 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
   };
   // Wheel zoom (stable-scale only): debounce the burst; 300ms after
   // the last tick the gesture has settled and the window refits once.
+  // The burst's start range is snapshotted on its first event: if the
+  // TIME range moved during the burst it was a time zoom and the
+  // refit re-takes ownership (applyStableWindow's fromTimeGesture);
+  // if it didn't move — a wheel burst over the price axis scales the
+  // axis instead — the refit keeps the standard ownership-respecting
+  // behavior, so the user's axis scaling is never overridden.
   const onStableWheel = () => {
     if (!stableScaleRef.current) return;
-    if (wheelTimerRef.current !== null) {
+    if (wheelTimerRef.current === null) {
+      wheelSnapRef.current = snapVisibleRange();
+    } else {
       window.clearTimeout(wheelTimerRef.current);
     }
     wheelTimerRef.current = window.setTimeout(() => {
       wheelTimerRef.current = null;
-      if (stableScaleRef.current) applyStableWindow();
+      const timeMoved = timeRangeChanged(wheelSnapRef.current, snapVisibleRange());
+      wheelSnapRef.current = null;
+      if (stableScaleRef.current) {
+        applyStableWindow(timeMoved ? { fromTimeGesture: true } : undefined);
+      }
     }, 300);
   };
   // AUTHORITATIVE INTERACTION STATE MACHINE (Phase 2).
@@ -1489,8 +1535,12 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       }
       settleTimerRef.current = window.setTimeout(() => {
         settleTimerRef.current = null;
-        if (stableScaleRef.current && timeRangeChanged(snap, snapVisibleRange())) {
-          applyStableWindow();
+        const ch = timeRangeChanged(snap, snapVisibleRange());
+        if (stableScaleRef.current && ch) {
+          // The gate just proved the TIME range moved during the
+          // gesture: this is a time zoom/pan settle, which always
+          // refits fresh and re-takes ownership (see applyStableWindow).
+          applyStableWindow({ fromTimeGesture: true });
         }
       }, 250);
     }
