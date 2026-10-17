@@ -10,6 +10,9 @@
 import {
   validateDataset,
   marketSessionStatus,
+  highlightBandFor,
+  premarketWarningGate,
+  drDatasetKey,
   SealedCandleFeed,
   DAILY_REPLAY_STARTING_BALANCE,
   DAILY_REPLAY_STATE_KEY,
@@ -119,6 +122,79 @@ const FRI = "2026-10-16"; // a Friday
   const cs = makeCandles(FRI, "09:30", 4).reverse(); // out of order
   const v = validateDataset(cs, { ticker: "AAPL", tradeDate: FRI });
   check("out-of-order is an error", !v.ok && v.errors.some((e) => /chronological/.test(e)));
+}
+
+/* ---------------- premarket availability (validation stats) ---------------- */
+{
+  const v = validateDataset(makeCandles(FRI, "04:00", 10), { ticker: "AAPL", tradeDate: FRI });
+  check("premarket: 04:00 start → available", v.stats.premarketAvailable === true);
+  check("premarket: 04:00 start → firstCandleEt", v.stats.firstCandleEt === "04:00");
+  check("premarket: availability does not change the verdict", v.ok && v.errors.length === 0);
+}
+{
+  const v = validateDataset(makeCandles(FRI, "09:30", 10), { ticker: "AAPL", tradeDate: FRI });
+  check("premarket: 09:30 start → unavailable", v.stats.premarketAvailable === false);
+  check("premarket: 09:30 start → firstCandleEt", v.stats.firstCandleEt === "09:30");
+  check("premarket: regular-only set still validates clean", v.ok);
+}
+{
+  const v = validateDataset(makeCandles(FRI, "08:15", 4), { ticker: "AAPL", tradeDate: FRI });
+  check("premarket: 08:15 start → available", v.stats.premarketAvailable === true);
+}
+{
+  // A single candle at 09:29 is before the 09:30 open → premarket exists.
+  const v = validateDataset(makeCandles(FRI, "09:29", 3), { ticker: "AAPL", tradeDate: FRI });
+  check("premarket: 09:29 start → available", v.stats.premarketAvailable === true);
+}
+{
+  const v = validateDataset([], { ticker: "AAPL", tradeDate: FRI });
+  check("premarket: empty → unavailable", v.stats.premarketAvailable === false);
+  check("premarket: empty → firstCandleEt null", v.stats.firstCandleEt === null);
+  check("premarket: empty → existing error unchanged", !v.ok && v.errors.length === 1);
+}
+
+/* ---------------- locked-candle highlight band ---------------- */
+{
+  const cs = makeCandles(FRI, "09:30", 10); // 09:30..09:39, 1-minute spacing
+  const band = highlightBandFor(cs, 3);
+  check("highlight: band targets the chosen candle", band !== null && band.timeSec === Math.floor(cs[3].t / 1000));
+  check("highlight: span is exactly one interval", band !== null && band.spanSec === 60);
+  check("highlight: previous neighbor excluded", band !== null && band.timeSec === Math.floor(cs[2].t / 1000) + 60);
+  check("highlight: next neighbor excluded", band !== null && band.timeSec + band.spanSec === Math.floor(cs[4].t / 1000));
+  const first = highlightBandFor(cs, 0);
+  check("highlight: first candle band", first !== null && first.timeSec === Math.floor(cs[0].t / 1000) && first.spanSec === 60);
+  const last = highlightBandFor(cs, 9);
+  check("highlight: last candle span from previous spacing",
+    last !== null && last.timeSec === Math.floor(cs[9].t / 1000) && last.spanSec === 60);
+  check("highlight: resume startIndex maps to the locked candle",
+    highlightBandFor(cs, 7)?.timeSec === Math.floor(cs[7].t / 1000));
+  check("highlight: out-of-range index → null", highlightBandFor(cs, -1) === null && highlightBandFor(cs, 10) === null);
+  check("highlight: empty series → null", highlightBandFor([], 0) === null);
+}
+{
+  const one = makeCandles(FRI, "09:30", 1);
+  const band = highlightBandFor(one, 0);
+  check("highlight: lone candle defaults to a 60s span", band !== null && band.spanSec === 60);
+  // Irregular spacing: span follows the actual next/previous intervals.
+  const cs = [...makeCandles(FRI, "09:30", 2), ...makeCandles(FRI, "09:35", 1)]; // 09:30, 09:31, 09:35
+  check("highlight: span to next candle uses real spacing", highlightBandFor(cs, 1)?.spanSec === 240);
+  check("highlight: last candle uses previous spacing", highlightBandFor(cs, 2)?.spanSec === 240);
+}
+
+/* ---------------- premarket warning gate ---------------- */
+{
+  const key = drDatasetKey("aapl", FRI, 390);
+  check("gate: dataset key format", key === `AAPL|${FRI}|390`);
+  check("gate: key changes with ticker/date/count",
+    drDatasetKey("TSLA", FRI, 390) !== key && drDatasetKey("AAPL", "2026-10-15", 390) !== key && drDatasetKey("AAPL", FRI, 391) !== key);
+  const shown = premarketWarningGate({ premarketAvailable: false, datasetKey: key, dismissedKey: null });
+  check("gate: unavailable + not dismissed → show + block", shown.showWarning && shown.blockSelection);
+  const dismissed = premarketWarningGate({ premarketAvailable: false, datasetKey: key, dismissedKey: key });
+  check("gate: dismissed for this dataset → hidden + selection enabled", !dismissed.showWarning && !dismissed.blockSelection);
+  const otherKey = premarketWarningGate({ premarketAvailable: false, datasetKey: drDatasetKey("TSLA", FRI, 390), dismissedKey: key });
+  check("gate: new dataset re-evaluates → shown again", otherKey.showWarning && otherKey.blockSelection);
+  const avail = premarketWarningGate({ premarketAvailable: true, datasetKey: key, dismissedKey: null });
+  check("gate: premarket available → never shown, never blocked", !avail.showWarning && !avail.blockSelection);
 }
 
 /* ---------------- market-session calendar ---------------- */

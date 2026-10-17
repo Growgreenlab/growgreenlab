@@ -51,6 +51,26 @@ export function etDateString(ms: number): string {
   return `${get("year")}-${get("month")}-${get("day")}`;
 }
 
+const etTimeParts = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+/** Minutes since midnight in America/New_York for an epoch-ms instant. */
+export function etMinutesOfDay(ms: number): number {
+  const parts = etTimeParts.formatToParts(new Date(ms));
+  const h = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
+  const m = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
+  return (h % 24) * 60 + m; // hour can read "24" at midnight in some runtimes
+}
+
+/** 09:30 ET in minutes-of-day: the regular-session open. A dataset has
+ *  premarket data iff at least one candle on the trade date starts
+ *  before this minute. */
+export const REGULAR_SESSION_OPEN_MINUTES_ET = 9 * 60 + 30;
+
 /* ------------------------------------------------------------------ */
 /* 1. Dataset validation                                               */
 /* ------------------------------------------------------------------ */
@@ -83,6 +103,12 @@ export interface DatasetValidation {
     lastT: number | null;
     gapCount: number;
     missingCandles: number;
+    /** True iff at least one candle on the trade date starts before
+     *  09:30 ET (premarket coverage). Purely descriptive — it never
+     *  changes the ok/errors verdicts. */
+    premarketAvailable: boolean;
+    /** ET wall-clock time ("HH:MM") of the first candle, or null. */
+    firstCandleEt: string | null;
   };
 }
 
@@ -107,6 +133,8 @@ export function validateDataset(
     lastT: candles.length ? candles[candles.length - 1].t : null,
     gapCount: 0,
     missingCandles: 0,
+    premarketAvailable: false,
+    firstCandleEt: null as string | null,
   };
 
   if (candles.length === 0) {
@@ -115,6 +143,18 @@ export function validateDataset(
     );
     return { ok: false, errors, warnings, gaps, stats };
   }
+
+  // Premarket coverage, known the moment the dataset is loaded: any
+  // candle on the trade date before the 09:30 ET regular-session open.
+  // (The fetch window is 04:00–16:00 ET, so a dataset whose first
+  // candle is the 09:30 open is regular-session only.)
+  stats.firstCandleEt = formatEtTime(candles[0].t);
+  stats.premarketAvailable = candles.some(
+    (c) =>
+      Number.isFinite(c.t) &&
+      etDateString(c.t) === opts.tradeDate &&
+      etMinutesOfDay(c.t) < REGULAR_SESSION_OPEN_MINUTES_ET,
+  );
 
   let badPrice = 0;
   let badVolume = 0;
@@ -206,6 +246,77 @@ export function validateDataset(
   }
 
   return { ok: errors.length === 0, errors, warnings, gaps, stats };
+}
+
+/* ------------------------------------------------------------------ */
+/* 1b. Locked-candle highlight + premarket warning gate                */
+/* ------------------------------------------------------------------ */
+
+export interface HighlightBand {
+  /** Band start: the highlighted candle's timestamp, epoch seconds. */
+  timeSec: number;
+  /** Band width in seconds: exactly one candle interval, so the band
+   *  covers the target candle and neither neighbor. */
+  spanSec: number;
+}
+
+/**
+ * The highlight band for `candles[index]` (the selected candle in the
+ * preview; the locked starting candle once an attempt is active,
+ * including after resume, where index is the attempt's startIndex into
+ * the same dataset-ordered candle array). Purely presentational:
+ * returns null for an out-of-range index and never touches replay
+ * state. The span is the distance to the next candle (the previous
+ * candle's spacing for the last one; 60s for a lone candle).
+ */
+export function highlightBandFor(
+  candles: Candle[],
+  index: number,
+): HighlightBand | null {
+  if (!Number.isFinite(index)) return null;
+  const i = Math.floor(index);
+  if (i < 0 || i >= candles.length) return null;
+  const c = candles[i];
+  let spanMs = 60_000;
+  if (i + 1 < candles.length) spanMs = candles[i + 1].t - c.t;
+  else if (i > 0) spanMs = c.t - candles[i - 1].t;
+  if (!(spanMs > 0)) spanMs = 60_000;
+  return { timeSec: Math.floor(c.t / 1000), spanSec: spanMs / 1000 };
+}
+
+/** Stable identity of one loaded dataset, for per-dataset UI state
+ *  (e.g. "the premarket warning was dismissed for THIS dataset"). */
+export function drDatasetKey(
+  ticker: string,
+  tradeDate: string,
+  candleCount: number,
+): string {
+  return `${ticker.toUpperCase()}|${tradeDate}|${candleCount}`;
+}
+
+export interface PremarketWarningGate {
+  /** Show the PREMARKET DATA UNAVAILABLE banner. */
+  showWarning: boolean;
+  /** While true, starting-candle selection + the Lock button stay
+   *  disabled (the chart itself remains viewable/pannable). */
+  blockSelection: boolean;
+}
+
+/**
+ * Premarket warning gate for the Daily Replay preview. The warning is
+ * owed exactly when the loaded dataset has no premarket candles and
+ * the user has not dismissed it for this dataset. Dismissal is keyed
+ * by dataset, so switching ticker/date (a new key) re-evaluates and
+ * re-shows; ordinary interactions within the same dataset never do.
+ */
+export function premarketWarningGate(input: {
+  premarketAvailable: boolean;
+  datasetKey: string;
+  dismissedKey: string | null;
+}): PremarketWarningGate {
+  const showWarning =
+    !input.premarketAvailable && input.dismissedKey !== input.datasetKey;
+  return { showWarning, blockSelection: showWarning };
 }
 
 /* ------------------------------------------------------------------ */

@@ -18,6 +18,10 @@ import {
   DAILY_REPLAY_STATE_KEY,
   encodeDrResumeHint,
   decodeDrResumeHint,
+  validateDataset,
+  highlightBandFor,
+  drDatasetKey,
+  premarketWarningGate,
   type SealedTransport,
 } from "../../lib/dailyReplay";
 import {
@@ -332,7 +336,16 @@ function ReplayPageInner() {
     meta: SessionMeta;
     warnings: string[];
     selected: number;
+    /** From validateDataset stats at load time: whether this dataset
+     *  has any pre-09:30 ET candles. Drives the load-time premarket
+     *  warning gate in the preview (see premarketWarningGate). */
+    premarketAvailable: boolean;
   } | null>(null);
+  /** Dataset key for which the preview's premarket warning was
+   *  dismissed. Keyed (not boolean) so a new dataset always
+   *  re-evaluates; also reset on every new preview load. */
+  const [drPremarketDismissedKey, setDrPremarketDismissedKey] =
+    useState<string | null>(null);
   const [drConfirm, setDrConfirm] = useState(false);
   const [drBusy, setDrBusy] = useState(false);
   const [drBuffering, setDrBuffering] = useState(false);
@@ -525,12 +538,23 @@ function ReplayPageInner() {
       setDrError(null);
       setDrFinal(null);
       setDrSaveMsg(null);
+      // Premarket availability is determined NOW, at load time (the
+      // panel already validated this exact dataset with the same
+      // arguments — the recomputation is deterministic and cheap), so
+      // the preview can warn before any candle is selected or locked.
+      const v = validateDataset(cs, {
+        ticker: m.ticker,
+        tradeDate: m.tradeDate,
+        timeframeMinutes: 1,
+      });
       setDrPreview({
         candles: cs,
         meta: m,
         warnings,
         selected: Math.min(Math.max(m.startIndex, 0), cs.length - 1),
+        premarketAvailable: v.stats.premarketAvailable,
       });
+      setDrPremarketDismissedKey(null);
       setDrConfirm(false);
       setDrPhase("preview");
       bump();
@@ -1951,6 +1975,31 @@ function ReplayPageInner() {
     isDr && drInfo
       ? `dr|${drInfo.attemptId}|${timeframe}`
       : `${meta?.ticker}|${meta?.tradeDate}|${meta?.source}|${candles?.length}|${timeframe}`;
+  // Locked/selected-candle highlight (Daily Replay only). Preview: the
+  // band follows the currently selected starting candle. Active/done:
+  // it is pinned to the attempt's locked starting candle (drInfo
+  // .startIndex into the feed's array — the same index resume restores
+  // from), so it survives pan/zoom, pause/play, and refresh/resume,
+  // and it never moves for the life of the attempt. Purely visual:
+  // the lock, timestamps, and execution are untouched.
+  const drPreviewKey = drPreview
+    ? drDatasetKey(drPreview.meta.ticker, drPreview.meta.tradeDate, drPreview.candles.length)
+    : null;
+  const drPreviewGate =
+    drPreview && drPreviewKey
+      ? premarketWarningGate({
+          premarketAvailable: drPreview.premarketAvailable,
+          datasetKey: drPreviewKey,
+          dismissedKey: drPremarketDismissedKey,
+        })
+      : null;
+  const drPreviewBand = drPreview
+    ? highlightBandFor(drPreview.candles, drPreview.selected)
+    : null;
+  const drActiveBand =
+    isDr && drInfo && candles
+      ? highlightBandFor(candles, drInfo.startIndex)
+      : null;
 
   return (
     <div className="ws">
@@ -1971,6 +2020,47 @@ function ReplayPageInner() {
           >
             FULL-DAY PREVIEW — FUTURE CANDLES ARE VISIBLE
           </div>
+          {drPreviewGate?.showWarning && (
+            <div
+              role="alert"
+              style={{
+                display: "flex", alignItems: "flex-start", gap: 10,
+                background: "rgba(251,191,36,0.08)",
+                border: "1px solid rgba(251,191,36,0.45)",
+                borderRadius: 8, padding: "10px 14px", marginTop: 10,
+                fontSize: 13,
+              }}
+            >
+              <span style={{ color: "#fbbf24", fontSize: 15 }}>⚠</span>
+              <div style={{ lineHeight: 1.45, flex: 1 }}>
+                <div style={{ fontWeight: 700, color: "#fbbf24", letterSpacing: "0.02em" }}>
+                  PREMARKET DATA UNAVAILABLE
+                </div>
+                <div style={{ color: "var(--muted)" }}>
+                  Historical premarket data is unavailable for this session. The replay
+                  starts at 9:30 AM ET using verified regular-market data.
+                </div>
+              </div>
+              <button
+                className="btn"
+                onClick={() => setDrPremarketDismissedKey(drPreviewKey)}
+                style={{ flexShrink: 0 }}
+              >
+                Got it
+              </button>
+              <button
+                onClick={() => setDrPremarketDismissedKey(drPreviewKey)}
+                title="Dismiss"
+                aria-label="Dismiss premarket warning"
+                style={{
+                  background: "none", border: "none", color: "var(--muted)",
+                  cursor: "pointer", fontSize: 16, padding: "2px 6px", flexShrink: 0,
+                }}
+              >
+                ×
+              </button>
+            </div>
+          )}
           <p className="hint" style={{ marginTop: 10 }}>
             {drPreview.meta.ticker} · {drPreview.meta.tradeDate} · 1-minute candles ·{" "}
             {drPreview.candles.length} candles loaded. This preview is intentionally
@@ -2008,7 +2098,13 @@ function ReplayPageInner() {
               lastPrice={drPreview.candles[drPreview.selected].c}
               brackets={DR_EMPTY_BRACKETS}
               fitOnLoad
+              highlightTimeSec={drPreviewBand?.timeSec ?? null}
+              highlightSpanSec={drPreviewBand?.spanSec ?? 60}
               onCandleClick={(timeSec) => {
+                // While the premarket warning is undismissed, candle
+                // selection stays disabled (the chart itself remains
+                // viewable and pannable).
+                if (drPreviewGate?.blockSelection) return;
                 const t = timeSec * 1000;
                 let best = 0;
                 let bestDist = Infinity;
@@ -2055,6 +2151,8 @@ function ReplayPageInner() {
             <button
               className="btn primary big"
               onClick={() => { setDrError(null); setDrConfirm(true); }}
+              disabled={drPreviewGate?.blockSelection ?? false}
+              title={drPreviewGate?.blockSelection ? "Dismiss the premarket warning above to choose a starting candle" : undefined}
             >
               Lock Starting Candle
             </button>
@@ -2426,6 +2524,8 @@ function ReplayPageInner() {
                     countdown={tfCountdown}
                     lastPrice={snap.price}
                     brackets={brackets}
+                    highlightTimeSec={isDr ? (drActiveBand?.timeSec ?? null) : undefined}
+                    highlightSpanSec={drActiveBand?.spanSec ?? 60}
                     onPlannedDrag={(sl, tp) => { setPlannedLevels(sl, tp); drBracketsChanged(sl, tp, "drag", "planned"); }}
                     onActiveDrag={(sl, tp) => {
                       const e = engineRef.current;

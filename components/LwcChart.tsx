@@ -18,9 +18,14 @@ import {
   type IChartApi,
   type ISeriesApi,
   type IPriceLine,
+  type ISeriesPrimitive,
+  type IPrimitivePaneView,
+  type IPrimitivePaneRenderer,
+  type SeriesAttachedParameter,
   type MouseEventParams,
   type UTCTimestamp,
 } from "lightweight-charts";
+import type { CanvasRenderingTarget2D } from "fancy-canvas";
 import type { Candle } from "../lib/types";
 import { planBarPush, type BarPushState } from "../lib/chartPush";
 import { diag } from "../lib/diag";
@@ -34,6 +39,84 @@ const UP = "#2ebd85";
 const DOWN = "#f6465d";
 const UP_VOL = "rgba(46,189,133,0.45)";
 const DOWN_VOL = "rgba(246,70,93,0.45)";
+
+/* ---------- Single-candle highlight (optional; Daily Replay) ----------
+ * A series primitive painting a restrained emerald band behind exactly
+ * one candle: a soft translucent fill over that candle's time slot,
+ * with a subtle emerald rule on each edge as the outline. Coordinates
+ * are recomputed from TIMES via the chart's time scale on every draw,
+ * so the band stays glued to its candle across pan/zoom with no pixel
+ * bookkeeping, and it never touches axes or scales. The band renders
+ * in the pane background (z-order bottom), so the candle's own body
+ * and wick colors stay fully visible on top. The primitive exists only
+ * while a parent passes a highlight target — every other parent is
+ * completely unaffected. */
+const HIGHLIGHT_FILL = "rgba(46,189,133,0.13)";
+const HIGHLIGHT_EDGE = "rgba(46,189,133,0.55)";
+
+class CandleHighlightPrimitive implements ISeriesPrimitive {
+  private chart: IChartApi | null = null;
+  private requestUpdate: (() => void) | null = null;
+  private timeSec: number | null = null;
+  private spanSec = 60;
+  private readonly views: IPrimitivePaneView[];
+
+  constructor() {
+    const renderer: IPrimitivePaneRenderer = {
+      draw: () => {
+        /* painted in the background pass instead */
+      },
+      drawBackground: (target) => this.paint(target),
+    };
+    this.views = [{ zOrder: () => "bottom", renderer: () => renderer }];
+  }
+
+  attached(param: SeriesAttachedParameter) {
+    this.chart = param.chart;
+    this.requestUpdate = param.requestUpdate;
+  }
+
+  detached() {
+    this.chart = null;
+    this.requestUpdate = null;
+  }
+
+  paneViews() {
+    return this.views;
+  }
+
+  setTarget(timeSec: number | null, spanSec: number) {
+    this.timeSec = timeSec;
+    this.spanSec = spanSec > 0 ? spanSec : 60;
+    this.requestUpdate?.();
+  }
+
+  private paint(target: CanvasRenderingTarget2D) {
+    const chart = this.chart;
+    const t0 = this.timeSec;
+    if (!chart || t0 == null) return;
+    const ts = chart.timeScale();
+    target.useMediaCoordinateSpace(({ context, mediaSize }) => {
+      const x1: number | null = ts.timeToCoordinate(t0 as UTCTimestamp);
+      if (x1 == null) return; // band's candle is off-screen
+      let x2: number | null = ts.timeToCoordinate((t0 + this.spanSec) as UTCTimestamp);
+      if (x2 == null) {
+        // Band end is past the last bar (highlighting the final
+        // candle): estimate one bar's width from the visible logical
+        // range so the band still spans exactly one slot.
+        const range = ts.getVisibleLogicalRange();
+        if (!range || range.to <= range.from) return;
+        x2 = x1 + mediaSize.width / (range.to - range.from);
+      }
+      if (x2 == null || x2 <= x1) return;
+      context.fillStyle = HIGHLIGHT_FILL;
+      context.fillRect(x1, 0, x2 - x1, mediaSize.height);
+      context.fillStyle = HIGHLIGHT_EDGE;
+      context.fillRect(x1, 0, 1.5, mediaSize.height);
+      context.fillRect(x2 - 1.5, 0, 1.5, mediaSize.height);
+    });
+  }
+}
 
 interface BracketLevels {
   plannedSL: number | null;
@@ -68,6 +151,14 @@ interface Props {
    *  click. Used by Daily Replay's full-day preview to pick the starting
    *  candle. Omit = no behavior (all existing parents). */
   onCandleClick?: (timeSec: number) => void;
+  /** Optional: epoch-seconds timestamp of ONE candle to mark with a
+   *  subtle emerald highlight band (Daily Replay's selected/locked
+   *  starting candle). Omit or null = no highlight (all existing
+   *  parents). Purely presentational — never affects data or scales. */
+  highlightTimeSec?: number | null;
+  /** Highlight band width in seconds (one candle interval, from
+   *  lib/dailyReplay's highlightBandFor). Defaults to 60. */
+  highlightSpanSec?: number;
   onPlannedDrag: (sl: number | null, tp: number | null) => void;
   onActiveDrag: (sl: number | null, tp: number | null) => void;
   drawings: Drawing[];
@@ -76,7 +167,7 @@ interface Props {
   onDrawingToolChange: (tool: DrawingTool) => void;
 }
 
-export default function LwcChart({ candles, revealedCount, sessionKey, countdown, lastPrice, brackets, referenceLevels, fitOnLoad, onCandleClick, onPlannedDrag, onActiveDrag, drawings, onDrawingsChange, drawingTool, onDrawingToolChange }: Props) {
+export default function LwcChart({ candles, revealedCount, sessionKey, countdown, lastPrice, brackets, referenceLevels, fitOnLoad, onCandleClick, highlightTimeSec, highlightSpanSec, onPlannedDrag, onActiveDrag, drawings, onDrawingsChange, drawingTool, onDrawingToolChange }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const elRef = useRef<HTMLDivElement>(null);
   const countdownRef = useRef<HTMLDivElement>(null);
@@ -457,6 +548,28 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       }
     }
   }, [candles, revealedCount, sessionKey, countdown, lastPrice]);
+
+  // Single-candle highlight primitive (Daily Replay only): attach
+  // lazily on first target, retarget in place while one is set, and
+  // detach when the target clears — parents that never pass a target
+  // never create it.
+  const highlightRef = useRef<CandleHighlightPrimitive | null>(null);
+  useEffect(() => {
+    const cs = candleSeriesRef.current;
+    if (!cs) return;
+    if (highlightTimeSec == null) {
+      if (highlightRef.current) {
+        cs.detachPrimitive(highlightRef.current);
+        highlightRef.current = null;
+      }
+      return;
+    }
+    if (!highlightRef.current) {
+      highlightRef.current = new CandleHighlightPrimitive();
+      cs.attachPrimitive(highlightRef.current);
+    }
+    highlightRef.current.setTarget(highlightTimeSec, highlightSpanSec ?? 60);
+  }, [highlightTimeSec, highlightSpanSec]);
 
   // Bracket line dragging: hit-test on pointerdown, drag the price line,
   // commit on pointerup. Disables chart pan/zoom while a line is dragged.
