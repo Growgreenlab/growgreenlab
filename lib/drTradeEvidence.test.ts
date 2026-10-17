@@ -232,5 +232,62 @@ seq = 0;
   approx("10 final stop unchanged = 9.5", e.stopLoss, 9.5);
 }
 
+/* ===== 11. Post-reset stream: evidence attaches to the POST-reset trade only =====
+ * session_trades contain only post-reset fills, so the grouped trades
+ * passed in are built from the post-reset fills alone. The pre-reset
+ * closed cycle has no journal counterpart and must not shift pairing. */
+seq = 0;
+{
+  const fills = [fill("buy", 100, 12, 20), fill("sell", 100, 13, 24, 100)];
+  const trades = tradesOf(fills);
+  check("11 grouped trades = post-reset only", trades.length === 1 && trades[0].tradeKey === `${SID}:1`);
+  const events: DrEvent[] = [
+    ev("session_started"),
+    ev("order_filled", { side: "buy", qty: 100, price: 10, candleIndex: 5 }, 5),
+    ev("risk_snapshot", { entry: 10, qty: 100, stopLoss: 9.5, takeProfit: 11, plannedRisk: 50, rewardRisk: 2 }, 5),
+    ev("order_filled", { side: "sell", qty: 100, price: 11, candleIndex: 9 }, 9),
+    ev("position_closed", { qty: 100, price: 11, realizedPnl: 100, sessionRealized: 100, reason: "manual", unrealizedPnl: 0 }, 9),
+    ev("session_reset"),
+    ev("order_filled", { side: "buy", qty: 100, price: 12, candleIndex: 20 }, 20),
+    ev("risk_snapshot", { entry: 12, qty: 100, stopLoss: 11, takeProfit: 14, plannedRisk: 100, rewardRisk: 2 }, 20),
+    ev("order_filled", { side: "sell", qty: 100, price: 13, candleIndex: 24 }, 24),
+    ev("position_closed", { qty: 100, price: 13, realizedPnl: 100, sessionRealized: 100, reason: "manual", unrealizedPnl: 0 }, 24),
+  ];
+  const out = deriveDrEvidence({ attemptId: "att-11", trades, events });
+  const e = out.byTradeKey.get(trades[0].tradeKey)!;
+  check("11 only the post-reset trade gets an entry", out.byTradeKey.size === 1);
+  approx("11 post-reset originalStopLoss = 11 (not the pre-reset 9.5)", e.originalStopLoss, 11);
+  approx("11 post-reset initialRisk = 100", e.initialRisk, 100);
+  approx("11 post-reset R = 100/100 = 1", e.rMultiple, 1);
+  check("11 hasSnapshot true via the verified post-reset pair", e.hasSnapshot === true);
+  check("11 cyclesFound = final-generation closed cycles = 1", out.cyclesFound === 1, `got ${out.cyclesFound}`);
+  check("11 post-reset events assigned to the trade",
+    out.eventTradeKey.get(events[6].seq) === trades[0].tradeKey && out.eventTradeKey.get(events[9].seq) === trades[0].tradeKey);
+  check("11 pre-reset cycle events unassigned (no trade exists for them)",
+    out.eventTradeKey.get(events[1].seq) === null && out.eventTradeKey.get(events[2].seq) === null && out.eventTradeKey.get(events[4].seq) === null);
+}
+
+/* ===== 12. Cycle open at reset is discarded; the post-reset cycle pairs ===== */
+seq = 0;
+{
+  const fills = [fill("buy", 50, 12, 20), fill("sell", 50, 12.5, 22, 25)];
+  const trades = tradesOf(fills);
+  const events: DrEvent[] = [
+    ev("order_filled", { side: "buy", qty: 100, price: 10, candleIndex: 5 }, 5),
+    ev("risk_snapshot", { entry: 10, qty: 100, stopLoss: 9.5, takeProfit: 11, plannedRisk: 50, rewardRisk: 2 }, 5),
+    ev("session_reset"),
+    ev("order_filled", { side: "buy", qty: 50, price: 12, candleIndex: 20 }, 20),
+    ev("risk_snapshot", { entry: 12, qty: 50, stopLoss: 11.5, takeProfit: 13, plannedRisk: 25, rewardRisk: 2 }, 20),
+    ev("order_filled", { side: "sell", qty: 50, price: 12.5, candleIndex: 22 }, 22),
+    ev("position_closed", { qty: 50, price: 12.5, realizedPnl: 25, sessionRealized: 25, reason: "manual", unrealizedPnl: 0 }, 22),
+  ];
+  const out = deriveDrEvidence({ attemptId: "att-12", trades, events });
+  const e = out.byTradeKey.get(trades[0].tradeKey)!;
+  approx("12 R = 25/25 = 1 from the post-reset cycle", e.rMultiple, 1);
+  check("12 cyclesFound = 1 (discarded open cycle never counts)", out.cyclesFound === 1, `got ${out.cyclesFound}`);
+  check("12 discarded cycle's events unassigned",
+    out.eventTradeKey.get(events[0].seq) === null && out.eventTradeKey.get(events[1].seq) === null);
+}
+
 console.log(`=== drTradeEvidence RESULT: ${passed} passed, ${failed} failed ===`);
 if (failed > 0) process.exit(1);

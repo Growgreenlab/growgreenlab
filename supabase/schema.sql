@@ -299,3 +299,77 @@ alter table public.journal_real_fills
 create unique index if not exists journal_real_fills_import_hash
   on public.journal_real_fills (user_id, import_hash)
   where import_hash is not null;
+
+-- Daily Replay trade drafts: per-cycle durable drafts written when a
+-- Daily Replay position cycle closes (identity + status + anchors
+-- only; see supabase/migrations/daily-replay-trade-drafts-v1.sql,
+-- PREPARED ONLY — not applied). Mirror of that migration for fresh
+-- installs. NOTE: this base schema predates the Daily Replay tables —
+-- daily_replay_attempts is created by the daily-replay-v1 migration,
+-- which runs AFTER this file in the migration stack — so the mirror
+-- is created inside an existence guard: on a stack run the migration
+-- file creates the table, and on any database where the attempts
+-- table already exists this block creates the identical table here.
+do $drafts_guard$
+begin
+  if exists (
+    select 1 from pg_tables
+    where schemaname = 'public' and tablename = 'daily_replay_attempts'
+  ) then
+    execute $sql$
+      create table if not exists public.daily_replay_trade_drafts (
+        id uuid primary key default gen_random_uuid(),
+        user_id uuid not null references auth.users(id) on delete cascade,
+        attempt_id uuid not null
+          references public.daily_replay_attempts(id) on delete cascade,
+        reset_generation int not null check (reset_generation >= 0),
+        cycle_index int not null check (cycle_index >= 1),
+        draft_key text not null,
+        status text not null default 'draft'
+          check (status in ('draft', 'finalized', 'superseded')),
+        first_fill_candle_index int not null,
+        first_fill_price numeric not null,
+        first_fill_qty numeric not null,
+        close_fill_candle_index int not null,
+        realized_pnl numeric not null,
+        event_first_seq int not null,
+        event_last_seq int not null,
+        auto_capture jsonb not null default '{}'::jsonb,
+        finalized_session_id uuid
+          references public.replay_sessions(id) on delete set null,
+        finalized_trade_key text,
+        finalized_at timestamptz,
+        created_at timestamptz not null default now(),
+        updated_at timestamptz not null default now(),
+        unique (attempt_id, reset_generation, cycle_index),
+        unique (user_id, draft_key)
+      );
+      create index if not exists daily_replay_trade_drafts_user_status_idx
+        on public.daily_replay_trade_drafts (user_id, status, created_at desc);
+      create index if not exists daily_replay_trade_drafts_attempt_idx
+        on public.daily_replay_trade_drafts (attempt_id);
+      alter table public.daily_replay_trade_drafts enable row level security;
+      drop policy if exists dr_trade_drafts_select_own on public.daily_replay_trade_drafts;
+      create policy dr_trade_drafts_select_own on public.daily_replay_trade_drafts
+        for select to authenticated
+        using (auth.uid() = user_id);
+      drop policy if exists dr_trade_drafts_insert_own on public.daily_replay_trade_drafts;
+      create policy dr_trade_drafts_insert_own on public.daily_replay_trade_drafts
+        for insert to authenticated
+        with check (
+          auth.uid() = user_id
+          and exists (
+            select 1 from public.daily_replay_attempts a
+            where a.id = attempt_id and a.user_id = auth.uid()
+          )
+        );
+      drop policy if exists dr_trade_drafts_update_own on public.daily_replay_trade_drafts;
+      create policy dr_trade_drafts_update_own on public.daily_replay_trade_drafts
+        for update to authenticated
+        using (auth.uid() = user_id)
+        with check (auth.uid() = user_id);
+    $sql$;
+    -- NO delete policy (same as the migration): lifecycle is status.
+  end if;
+end;
+$drafts_guard$;

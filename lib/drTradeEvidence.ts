@@ -27,6 +27,12 @@
  * best guess. A trailing cycle with no grouped trade is the position
  * still open when the attempt completed — the journal correctly shows
  * closed trades only, and that cycle's events stay unassigned.
+ *
+ * Reset alignment (plan decision 10): cycle splitting is shared with
+ * lib/drDrafts.ts via splitCyclesByGeneration and honors
+ * `session_reset` — a reset wipes the engine fills, so only
+ * final-generation closed cycles are paired with trades. An open
+ * cycle at a reset is discarded entirely.
  */
 import type { DrEvent } from "./dailyReplayEvents";
 import type { GroupedTrade, PlanChange } from "./journal";
@@ -73,24 +79,76 @@ function n(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 
-interface Cycle {
+/**
+ * One position cycle in the event stream, delineated exactly as the
+ * original splitCycles did: a cycle opens on an `order_filled` buy at
+ * shadow 0, its events run from that first entry fill through
+ * `position_closed`, its snapshot is the cycle's first
+ * `risk_snapshot`, and its realizedSum is the sum of its
+ * `partial_exit` + `position_closed` realizedPnl payloads.
+ *
+ * Generation handling (plan decision 10 — the D1 reset fix): a
+ * `session_reset` wipes the engine's fills, so only cycles from the
+ * attempt's FINAL generation can ever correspond to grouped journal
+ * trades (session_trades carry post-reset fills only). `generation`
+ * is the number of `session_reset` events seen before the cycle, and
+ * `cycleIndex` is the 1-based close order WITHIN that generation (a
+ * still-open trailing cycle carries the next index of its
+ * generation, provisionally). An OPEN cycle at a reset is discarded
+ * entirely: it is never returned here, so its fills can never be
+ * paired or drafted as if they reached the journal.
+ */
+export interface DrCycleInfo {
+  generation: number;
+  cycleIndex: number;
   events: DrEvent[];
-  snapshot: DrEvent | null;
   firstFill: DrEvent | null;
+  closeEvent: DrEvent | null;
+  snapshot: DrEvent | null;
   realizedSum: number;
-  verified: boolean;
+  closed: boolean;
 }
 
-function splitCycles(events: DrEvent[]): Cycle[] {
-  const cycles: Cycle[] = [];
-  let cur: Cycle | null = null;
+export function splitCyclesByGeneration(events: DrEvent[]): {
+  cycles: DrCycleInfo[];
+  resetCount: number;
+  lastGeneration: number;
+} {
+  const sorted = [...events].sort((a, b) => a.seq - b.seq);
+  const cycles: DrCycleInfo[] = [];
+  let cur: DrCycleInfo | null = null;
   let shadow = 0;
-  for (const e of events) {
+  let generation = 0;
+  let closedInGeneration = 0;
+  for (const e of sorted) {
+    if (e.type === "session_reset") {
+      if (cur) {
+        // Discard the open cycle entirely: the reset wiped its fills,
+        // so it must never reach cycles, drafts, or session_trades
+        // pairing. It is always the last cycle pushed (no other cycle
+        // can open while one is open).
+        if (cycles[cycles.length - 1] === cur) cycles.pop();
+        cur = null;
+      }
+      shadow = 0;
+      generation += 1;
+      closedInGeneration = 0;
+      continue;
+    }
     if (e.type === "order_filled") {
       const side = e.payload.side;
       const qty = n(e.payload.qty) ?? 0;
       if (cur === null && shadow === 0 && side === "buy") {
-        cur = { events: [], snapshot: null, firstFill: e, realizedSum: 0, verified: false };
+        cur = {
+          generation,
+          cycleIndex: closedInGeneration + 1,
+          events: [],
+          firstFill: e,
+          closeEvent: null,
+          snapshot: null,
+          realizedSum: 0,
+          closed: false,
+        };
         cycles.push(cur);
       }
       if (cur) cur.events.push(e);
@@ -104,14 +162,17 @@ function splitCycles(events: DrEvent[]): Cycle[] {
     if (e.type === "partial_exit") cur.realizedSum += n(e.payload.realizedPnl) ?? 0;
     if (e.type === "position_closed") {
       cur.realizedSum += n(e.payload.realizedPnl) ?? 0;
+      cur.closeEvent = e;
+      cur.closed = true;
+      closedInGeneration += 1;
       cur = null;
       shadow = 0;
     }
   }
-  return cycles;
+  return { cycles, resetCount: generation, lastGeneration: generation };
 }
 
-function verifyPair(cycle: Cycle, trade: GroupedTrade): boolean {
+export function verifyCycleTradePair(cycle: DrCycleInfo, trade: GroupedTrade): boolean {
   const ff = cycle.firstFill;
   const first = trade.fills[0];
   if (!ff || !first) return false;
@@ -130,17 +191,22 @@ export function deriveDrEvidence(input: {
 }): DrAttemptEvidence {
   const { attemptId, trades } = input;
   const events = [...input.events].sort((a, b) => a.seq - b.seq);
-  const cycles = splitCycles(events);
+  const { cycles, resetCount, lastGeneration } = splitCyclesByGeneration(events);
+  // Pairing is final-generation only: grouped trades derive from
+  // session_trades, which a session_reset wipes back to post-reset
+  // fills, so earlier-generation cycles have no journal counterpart.
+  // Without a reset this is exactly the old splitCycles list, in the
+  // same order — no-reset behavior is unchanged.
+  const pairable = cycles.filter((c) => c.closed && c.generation === lastGeneration);
   const byTradeKey = new Map<string, DrTradeEvidence>();
   const eventTradeKey = new Map<number, string | null>();
   for (const e of events) eventTradeKey.set(e.seq, null);
 
-  const pairs = Math.min(cycles.length, trades.length);
+  const pairs = Math.min(pairable.length, trades.length);
   for (let i = 0; i < pairs; i++) {
-    const cycle = cycles[i];
+    const cycle = pairable[i];
     const trade = trades[i];
-    cycle.verified = verifyPair(cycle, trade);
-    if (!cycle.verified) continue;
+    if (!verifyCycleTradePair(cycle, trade)) continue;
     for (const e of cycle.events) eventTradeKey.set(e.seq, trade.tradeKey);
     byTradeKey.set(trade.tradeKey, buildEvidence(attemptId, trade, cycle));
   }
@@ -161,7 +227,13 @@ export function deriveDrEvidence(input: {
     attemptId,
     byTradeKey,
     eventTradeKey,
-    cyclesFound: cycles.length,
+    // cyclesFound: with no reset this is exactly the old meaning —
+    // every cycle splitCycles found, including a still-open trailing
+    // cycle. Once a reset has occurred, earlier-generation cycles can
+    // never correspond to journal trades, so the count narrows to the
+    // final generation's CLOSED cycles — the only cycles that can
+    // pair with trades or become drafts.
+    cyclesFound: resetCount === 0 ? cycles.length : pairable.length,
     resumed: events.some((e) => e.type === "session_resumed"),
   };
 }
@@ -177,7 +249,7 @@ function noEvidence(attemptId: string, trade: GroupedTrade, basis: string): DrTr
   };
 }
 
-function buildEvidence(attemptId: string, trade: GroupedTrade, cycle: Cycle): DrTradeEvidence {
+function buildEvidence(attemptId: string, trade: GroupedTrade, cycle: DrCycleInfo): DrTradeEvidence {
   const snap = cycle.snapshot;
   const snapQty = snap ? n(snap.payload.qty) : null;
 
