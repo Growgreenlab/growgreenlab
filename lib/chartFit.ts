@@ -160,6 +160,53 @@ export function expandPriceRange(range: PriceRange, lo: number, hi: number): Pri
   return { from, to };
 }
 
+/** Extremes (min low / max high) over the FINALIZED bars inside a
+ *  visible logical range (bar-index space; fractional bounds are
+ *  floored/ceiled exactly like the render path). `n` is the revealed
+ *  bar count — the bar at n-1 is the still-forming candle and is
+ *  EXCLUDED; callers fold it in separately from its already-printed
+ *  extremes, so no future data is ever used. A null/non-finite range,
+ *  or one that misses the finalized set entirely, falls back to the
+ *  full finalized range — the same fallback the chart's boundary
+ *  recompute has always used. Returns null when no bar has finalized
+ *  yet (n < 2). This is the input to every managed-window recompute:
+ *  candle boundaries AND user-gesture settle refits share it, so a
+ *  refit after zooming into a quiet stretch fits the candles that are
+ *  actually on screen — with padding derived from THEIR range via
+ *  paddedPriceRange, not from the session's. */
+export function visibleFinalizedExtremes(
+  candles: ReadonlyArray<{ l: number; h: number }>,
+  n: number,
+  vlrFrom: number | null,
+  vlrTo: number | null,
+): { lo: number; hi: number } | null {
+  const lastFinal = Math.min(n, candles.length) - 2;
+  if (lastFinal < 0) return null;
+  let a = 0;
+  let b = lastFinal;
+  if (
+    vlrFrom !== null &&
+    vlrTo !== null &&
+    Number.isFinite(vlrFrom) &&
+    Number.isFinite(vlrTo)
+  ) {
+    a = Math.max(0, Math.floor(vlrFrom));
+    b = Math.min(lastFinal, Math.ceil(vlrTo));
+    if (b < a) {
+      a = 0;
+      b = lastFinal;
+    }
+  }
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (let i = a; i <= b; i++) {
+    if (candles[i].l < lo) lo = candles[i].l;
+    if (candles[i].h > hi) hi = candles[i].h;
+  }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null;
+  return { lo, hi };
+}
+
 /** Epsilon comparison for price ranges (ownership detection: did the
  *  range move since the manager last set it, beyond float noise?). */
 export function priceRangesClose(a: PriceRange, b: PriceRange): boolean {

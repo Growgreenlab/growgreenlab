@@ -11,6 +11,7 @@ import {
   paddedPriceRange,
   expandPriceRange,
   priceRangesClose,
+  visibleFinalizedExtremes,
 } from "./chartFit";
 
 let passed = 0;
@@ -154,6 +155,72 @@ function eqRange(
     priceRangesClose(r, { from: r.from + total * 1e-10, to: r.to - total * 1e-10 }));
   check("close: a real user drag is NOT close",
     !priceRangesClose(r, { from: r.from - 0.5, to: r.to }));
+}
+
+/* ---------- visibleFinalizedExtremes (boundary + settle refits) ---------- */
+{
+  // Ten bars: bar i has low = i, high = i + 0.5 — except bar 3, a spike
+  // (low 2.5, high 9.5), so subsets are distinguishable.
+  const bars = Array.from({ length: 10 }, (_, i) => ({ l: i, h: i + 0.5 }));
+  bars[3] = { l: 2.5, h: 9.5 };
+
+  // Null range -> ALL finalized bars (forming bar 9 excluded).
+  const all = visibleFinalizedExtremes(bars, 10, null, null);
+  check("extremes: null range -> full finalized set, forming bar excluded",
+    all !== null && all.lo === 0 && all.hi === 9.5);
+  // Non-finite range -> same fallback.
+  const nan = visibleFinalizedExtremes(bars, 10, NaN, NaN);
+  check("extremes: NaN range -> full finalized fallback",
+    nan !== null && nan.lo === 0 && nan.hi === 9.5);
+  // A quiet visible subset (bars 4..7) -> only their extremes.
+  const sub = visibleFinalizedExtremes(bars, 10, 4.6, 7.0);
+  check("extremes: visible subset only",
+    sub !== null && sub.lo === 4 && sub.hi === 7.5);
+  // Fractional bounds floor/ceil outward (the render path's exact
+  // convention): to=7.2 pulls bar 8 into the set.
+  const frac = visibleFinalizedExtremes(bars, 10, 4.6, 7.2);
+  check("extremes: fractional to ceils into the next bar",
+    frac !== null && frac.lo === 4 && frac.hi === 8.5);
+  // Subset including the spike bar picks it up.
+  const spike = visibleFinalizedExtremes(bars, 10, 2.1, 3.9);
+  check("extremes: subset containing the spike bar",
+    spike !== null && spike.lo === 2 && spike.hi === 9.5);
+  // Range entirely past the finalized set -> fallback to full set.
+  const past = visibleFinalizedExtremes(bars, 10, 50, 60);
+  check("extremes: range beyond data -> full finalized fallback",
+    past !== null && past.lo === 0 && past.hi === 9.5);
+  // Range hanging off the left edge clamps to bar 0.
+  const left = visibleFinalizedExtremes(bars, 10, -20, 1.2);
+  check("extremes: negative from clamps to bar 0 (bars 0..2)",
+    left !== null && left.lo === 0 && left.hi === 2.5);
+  // Fewer revealed bars than the array holds: n governs (n-2 is last final).
+  const early = visibleFinalizedExtremes(bars, 4, null, null);
+  check("extremes: n=4 -> only bars 0..2 count as finalized",
+    early !== null && early.lo === 0 && early.hi === 2.5);
+  // Nothing finalized yet.
+  check("extremes: n=1 (only the forming bar) -> null",
+    visibleFinalizedExtremes(bars, 1, null, null) === null);
+  check("extremes: n=0 -> null",
+    visibleFinalizedExtremes(bars, 0, null, null) === null);
+
+  // Composed boundary semantics (the pinned contract): a FRESH window
+  // computed from a quiet VISIBLE subset is NARROWER than the standing
+  // window computed from the whole session — narrowing at a boundary
+  // (or at a gesture settle) is exactly one paddedPriceRange over the
+  // visible extremes, while expandPriceRange (the within-candle path)
+  // can never produce that narrowing.
+  const sessionWin = paddedPriceRange(0, 9.5);
+  const quietExt = visibleFinalizedExtremes(bars, 10, 4.6, 7.0);
+  const quietWin = quietExt ? paddedPriceRange(quietExt.lo, quietExt.hi) : null;
+  check("boundary refit CAN narrow: quiet-subset window < session window",
+    quietWin !== null && quietWin.to - quietWin.from < sessionWin.to - sessionWin.from);
+  const widenedOnly = expandPriceRange(sessionWin, 4, 7.5);
+  check("within-candle path can NOT narrow (expand leaves the wide window)",
+    widenedOnly.from === sessionWin.from && widenedOnly.to === sessionWin.to);
+  // Padding is derived from the VISIBLE range: the quiet window's span
+  // is the visible span / 0.78, not the session span / 0.78.
+  check("refit padding derives from the visible range itself",
+    quietWin !== null && Math.abs((quietWin.to - quietWin.from) - 3.5 / 0.78) < 1e-9);
 }
 
 console.log(`\n=== CHART FIT RESULT: ${passed} passed, ${failed} failed ===`);

@@ -35,7 +35,9 @@ import {
   paddedPriceRange,
   expandPriceRange,
   priceRangesClose,
+  visibleFinalizedExtremes,
   type PriceRange,
+  type LogicalRange,
 } from "../lib/chartFit";
 import { resolveHighlightBar, type HighlightDisplayBar } from "../lib/dailyReplay";
 import { diag } from "../lib/diag";
@@ -290,7 +292,15 @@ interface Props {
    *     time range mid-candle;
    *   - a manual axis drag takes ownership of the range: the manager
    *     then only widens on genuine exits until the next full load
-   *     or Fit-all tap.
+   *     or Fit-all tap;
+   *   - when the user zooms/pans the TIME scale, the window refits
+   *     ONCE when the gesture settles (pointer-up / wheel-idle),
+   *     recomputed from the newly visible extremes — otherwise a
+   *     pinch into a quiet stretch left the wide pre-zoom window
+   *     standing (candles squashed in a thin band) until the next
+   *     candle boundary, or indefinitely while paused. Playback
+   *     itself never triggers a refit: within-candle changes remain
+   *     widen-only.
    *  Omit/false = library autoscale exactly as before (drills,
    *  standard Trade Lab, the Daily Replay preview). */
   stableScale?: boolean;
@@ -378,6 +388,122 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
   // Candles ref for time-snapping in drawingCoords (avoids stale closures).
   const candlesRef = useRef(candles);
   candlesRef.current = candles;
+
+  /* ---- Stable-scale window management (Daily Replay only) ----
+   * applyStableWindow is THE managed-window recompute, shared by the
+   * candle-boundary path in the data-push effect and the gesture-settle
+   * refit below: when the manager owns the range it refits FRESH from
+   * the currently VISIBLE finalized extremes (lib/chartFit
+   * visibleFinalizedExtremes) folded with the forming bar's printed
+   * extremes, padded by paddedPriceRange — so the window (and its
+   * padding) always derives from what is on screen, never from the
+   * whole session. When the user has dragged the price axis (the live
+   * range no longer matches what the manager last set) it limits
+   * itself to anti-clip widening, exactly like the boundary path.
+   * Reads only refs, so it is safe from effects and event handlers. */
+  const applyStableWindow = () => {
+    const chart = chartRef.current;
+    const cs = candleSeriesRef.current;
+    if (!chart || !cs || !stableScaleRef.current) return;
+    const arr = candlesRef.current;
+    const n = Math.max(0, Math.min(revealedCountRef.current, arr.length));
+    if (n === 0) return;
+    try {
+      const ps = cs.priceScale();
+      const forming = arr[n - 1];
+      const vlr = chart.timeScale().getVisibleLogicalRange();
+      const ext = visibleFinalizedExtremes(
+        arr,
+        n,
+        vlr?.from ?? null,
+        vlr?.to ?? null,
+      );
+      const cur = ps.getVisibleRange();
+      const owned =
+        scaleWinRef.current.lastSet === null ||
+        (cur !== null && priceRangesClose(cur, scaleWinRef.current.lastSet));
+      if (owned) {
+        const win = paddedPriceRange(
+          ext ? Math.min(ext.lo, forming.l) : forming.l,
+          ext ? Math.max(ext.hi, forming.h) : forming.h,
+        );
+        ps.setVisibleRange(win);
+        scaleWinRef.current.lastSet = win;
+      } else if (cur) {
+        const win = expandPriceRange(cur, forming.l, forming.h);
+        if (!priceRangesClose(win, cur)) {
+          ps.setVisibleRange(win);
+          scaleWinRef.current.lastSet = win;
+        }
+      }
+    } catch {
+      /* scale management must never break the data path */
+    }
+  };
+
+  /* Settle refit (stable-scale only): the boundary recompute keeps the
+   * window fitted to the visible bars as candles roll, but it cannot
+   * see a USER zooming/panning the TIME scale mid-candle — and before
+   * the managed scale existed, library autoscale refit the instant the
+   * visible set changed, so candles always filled the pane after a
+   * zoom. Without a reaction, a pinch into a quiet stretch leaves the
+   * wide pre-zoom window standing (candles squashed in a thin band)
+   * until the next candle boundary — or indefinitely while paused.
+   * So: snapshot the visible logical range when a pointer gesture
+   * starts on the chart wrapper; when the last pointer lifts (+250ms
+   * settle), refit ONCE via applyStableWindow — but only if the time
+   * range actually changed, which keeps plain clicks, drawing drags,
+   * and price-axis drags (none of which move the time range) from
+   * ever triggering it. Wheel zoom needs no snapshot: the library
+   * applies it before the event bubbles here, so a burst is simply
+   * debounced (300ms idle) into one refit — safe even when the burst
+   * changed nothing, because applyStableWindow's ownership guard
+   * makes it a no-op or an anti-clip widening in that case.
+   * Programmatic range changes (Fit-all, the initial fit, the
+   * library's boundary follow-shift) produce no pointer/wheel
+   * events, so they can't trigger a refit either, and the refit
+   * itself only writes the PRICE scale, so there is no feedback
+   * loop. Playback never calls this: within-candle window changes
+   * remain limited to genuine-exit widening, as shipped. */
+  const gesturePtrsRef = useRef<Set<number>>(new Set());
+  const gestureSnapRef = useRef<LogicalRange | null>(null);
+  const settleTimerRef = useRef<number | null>(null);
+  const wheelTimerRef = useRef<number | null>(null);
+  const snapVisibleRange = (): LogicalRange | null => {
+    const ts = chartRef.current?.timeScale();
+    if (!ts) return null;
+    const r = ts.getVisibleLogicalRange();
+    return r ? { from: r.from, to: r.to } : null;
+  };
+  const timeRangeChanged = (
+    a: LogicalRange | null,
+    b: LogicalRange | null,
+  ): boolean =>
+    a !== null &&
+    b !== null &&
+    (Math.abs(a.from - b.from) > 1e-3 || Math.abs(a.to - b.to) > 1e-3);
+  const clearSettleTimers = () => {
+    if (settleTimerRef.current !== null) {
+      window.clearTimeout(settleTimerRef.current);
+      settleTimerRef.current = null;
+    }
+    if (wheelTimerRef.current !== null) {
+      window.clearTimeout(wheelTimerRef.current);
+      wheelTimerRef.current = null;
+    }
+  };
+  // Wheel zoom (stable-scale only): debounce the burst; 300ms after
+  // the last tick the gesture has settled and the window refits once.
+  const onStableWheel = () => {
+    if (!stableScaleRef.current) return;
+    if (wheelTimerRef.current !== null) {
+      window.clearTimeout(wheelTimerRef.current);
+    }
+    wheelTimerRef.current = window.setTimeout(() => {
+      wheelTimerRef.current = null;
+      if (stableScaleRef.current) applyStableWindow();
+    }, 300);
+  };
   // AUTHORITATIVE INTERACTION STATE MACHINE (Phase 2).
   // Only one state is active at any moment. All drawing interactions
   // must check and update this state — no scattered independent flags.
@@ -561,6 +687,7 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     setChartSize({ w: el.clientWidth, h: el.clientHeight });
     return () => {
       ro.disconnect();
+      clearSettleTimers();
       chart.unsubscribeClick(handleChartClick);
       chart.remove();
       chartRef.current = null;
@@ -799,46 +926,12 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
         const forming = candles[n - 1];
         const appended = plan.mode === "updates" && plan.state.n > (prevPushed?.n ?? 0);
         if (plan.mode === "full" || appended) {
-          const ts = chartRef.current.timeScale();
-          const vlr = ts.getVisibleLogicalRange();
-          let lo = Infinity;
-          let hi = -Infinity;
-          const lastFinal = n - 2;
-          if (lastFinal >= 0) {
-            let a = 0;
-            let b = lastFinal;
-            if (vlr) {
-              a = Math.max(0, Math.floor(vlr.from));
-              b = Math.min(lastFinal, Math.ceil(vlr.to));
-              if (b < a) { a = 0; b = lastFinal; }
-            }
-            for (let i = a; i <= b; i++) {
-              if (candles[i].l < lo) lo = candles[i].l;
-              if (candles[i].h > hi) hi = candles[i].h;
-            }
-          }
-          if (!Number.isFinite(lo) || !Number.isFinite(hi)) {
-            lo = forming.l;
-            hi = forming.h;
-          }
-          const cur = ps.getVisibleRange();
-          const owned =
-            scaleWinRef.current.lastSet === null ||
-            (cur !== null && priceRangesClose(cur, scaleWinRef.current.lastSet));
-          if (owned) {
-            const win = paddedPriceRange(
-              Math.min(lo, forming.l),
-              Math.max(hi, forming.h)
-            );
-            ps.setVisibleRange(win);
-            scaleWinRef.current.lastSet = win;
-          } else if (cur) {
-            const win = expandPriceRange(cur, forming.l, forming.h);
-            if (!priceRangesClose(win, cur)) {
-              ps.setVisibleRange(win);
-              scaleWinRef.current.lastSet = win;
-            }
-          }
+          // Candle boundary (or full load): fresh refit from the
+          // visible finalized extremes — shared with the gesture-settle
+          // refit (applyStableWindow reads the same refs/props this
+          // effect just pushed: candlesRef/revealedCountRef are already
+          // current for this render).
+          applyStableWindow();
         } else {
           const cur = ps.getVisibleRange();
           if (cur) {
@@ -1029,6 +1122,15 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     const chart = chartRef.current;
     const el = elRef.current;
     if (!chart || !el) return;
+    // Settle-refit tracking (stable-scale only; see the manager block):
+    // snapshot the time range when the FIRST pointer of a gesture
+    // lands, before any drawing logic below can return early.
+    if (stableScaleRef.current) {
+      if (gesturePtrsRef.current.size === 0) {
+        gestureSnapRef.current = snapVisibleRange();
+      }
+      gesturePtrsRef.current.add(e.pointerId);
+    }
     const dc = drawingCoords();
     if (!dc) return;
     const rect = dc.rect;
@@ -1289,6 +1391,25 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
   };
 
   const onPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    // Settle-refit tracking (stable-scale only): when the LAST pointer
+    // of a gesture lifts, refit once if the time range actually moved.
+    if (
+      stableScaleRef.current &&
+      gesturePtrsRef.current.delete(e.pointerId) &&
+      gesturePtrsRef.current.size === 0
+    ) {
+      const snap = gestureSnapRef.current;
+      gestureSnapRef.current = null;
+      if (settleTimerRef.current !== null) {
+        window.clearTimeout(settleTimerRef.current);
+      }
+      settleTimerRef.current = window.setTimeout(() => {
+        settleTimerRef.current = null;
+        if (stableScaleRef.current && timeRangeChanged(snap, snapVisibleRange())) {
+          applyStableWindow();
+        }
+      }, 250);
+    }
     // End drawing drag — push to history for undo.
     if (drawingDragRef.current) {
       drawingDragRef.current = null;
@@ -1365,6 +1486,7 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
+      onWheel={onStableWheel}
       onPointerLeave={() => {
         // Pointer left the chart: drop hover feedback. An active drag
         // holds pointer capture and keeps its grabbing cursor until
