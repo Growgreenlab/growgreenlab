@@ -2,13 +2,18 @@
 -- *** PREPARED ONLY — NOT APPLIED ***
 -- This file has NOT been run against any database. Applying it waits
 -- for Karandeep's explicit authorization (paste into the Supabase SQL
--- editor, per DEPLOY.md). It is additive: three new tables + five
+-- editor, per DEPLOY.md). It is additive: four new tables + five
 -- security-definer functions; no existing table, policy, or function
 -- is touched.
 --
 -- Design — server-sealed candles:
 --   daily_replay_datasets          per-user dataset registry (RLS: owner
 --                                  select + insert, like the journal tables)
+--   daily_replay_events            Decision Timeline: append-only event
+--                                  stream per attempt (RLS: owner SELECT
+--                                  + INSERT only — no UPDATE/DELETE
+--                                  policies exist, so history cannot be
+--                                  rewritten at the database level)
 --   daily_replay_dataset_candles   the full candle array as jsonb.
 --                                  RLS is ENABLED WITH NO POLICIES AT ALL:
 --                                  direct PostgREST access is denied for
@@ -95,6 +100,46 @@ create policy dr_attempts_select_own on public.daily_replay_attempts
   using (auth.uid() = user_id);
 -- NO insert/update/delete policies: attempts are created, advanced, and
 -- finished exclusively inside the dr_* functions below.
+
+-- ============ EVENTS (Decision Timeline, append-only) ============
+create table if not exists public.daily_replay_events (
+  id uuid primary key default gen_random_uuid(),
+  attempt_id uuid not null
+    references public.daily_replay_attempts(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  seq int not null check (seq > 0),
+  type text not null,
+  -- Server-stamped wall clock (the client's wallTs travels in payload
+  -- cross-checks; this column is authoritative for row creation time).
+  wall_ts timestamptz not null default now(),
+  -- Historical candle the event belongs to (kept distinct from wall_ts).
+  market_idx int,
+  market_ts bigint,
+  payload jsonb not null default '{}'::jsonb,
+  unique (attempt_id, seq)
+);
+create index if not exists daily_replay_events_attempt_idx
+  on public.daily_replay_events (attempt_id, seq);
+
+alter table public.daily_replay_events enable row level security;
+
+drop policy if exists dr_events_select_own on public.daily_replay_events;
+create policy dr_events_select_own on public.daily_replay_events
+  for select to authenticated
+  using (auth.uid() = user_id);
+
+drop policy if exists dr_events_insert_own on public.daily_replay_events;
+create policy dr_events_insert_own on public.daily_replay_events
+  for insert to authenticated
+  with check (
+    auth.uid() = user_id
+    and exists (
+      select 1 from public.daily_replay_attempts a
+      where a.id = attempt_id and a.user_id = auth.uid()
+    )
+  );
+-- NO update/delete policies: with RLS enabled, updates and deletes are
+-- denied for everyone — the timeline is append-only at the DB level.
 
 -- ============ HELPERS ============
 -- Shared ownership loader for the attempt functions. Not granted to
