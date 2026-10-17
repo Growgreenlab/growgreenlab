@@ -49,7 +49,7 @@
  *    engine re-tracks them from the resume point forward, the same
  *    trade-off the saved-session reload already makes.
  */
-import { ReplayEngine } from "./engine";
+import { ReplayEngine, TICKS_PER_CANDLE } from "./engine";
 import { DrEventRecorder, type DrEvent } from "./dailyReplayEvents";
 import {
   planRestoredOrders,
@@ -144,7 +144,16 @@ export function reconstructDrAttempt(opts: {
   // exists (the resume path releases it before reconstructing); when
   // the array ends AT the locked candle the constructor clamps and
   // the finalize guard below settles it.
-  const engine = new ReplayEngine(candles, startingBalance, startIndex + 1);
+  // Same explicit "excursions" opt-in as a fresh lock (buildDrEngine):
+  // recorded fills replay at their recorded prices regardless of path
+  // mode; the mode shapes only live formation after the resume point.
+  const engine = new ReplayEngine(
+    candles,
+    startingBalance,
+    startIndex + 1,
+    TICKS_PER_CANDLE,
+    "excursions"
+  );
   let fillsReplayed = 0;
   for (const e of events) {
     if (e.type === "session_reset") {

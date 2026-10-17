@@ -167,7 +167,12 @@ export class DrillSim {
       scenario.candles,
       100_000,
       historyCount,
-      DRILL_TICKS_PER_CANDLE
+      DRILL_TICKS_PER_CANDLE,
+      // PINNED: drills orderflow (Level 2 / Time & Sales) calibration
+      // is frozen against the legacy tick path. Do not change this to
+      // "excursions" — Daily Replay's smooth wick formation must not
+      // alter drills behavior by a single tick.
+      "legacy-pin"
     );
     const hist = scenario.candles[historyCount - 1];
     this.windowStartPrice = hist.c;

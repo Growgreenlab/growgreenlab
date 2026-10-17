@@ -21,6 +21,22 @@ export const TICKS_PER_CANDLE = 360; // ~6 ticks/sec at 1x real-time speed
 /** Real seconds for one 1-minute candle to form at 1x speed (live market pace). */
 export const SECONDS_PER_CANDLE = 60;
 
+/**
+ * How the intra-candle tick path attains the candle's true high/low:
+ * - "legacy-pin": two single ticks are overwritten with the exact
+ *   extremes (the original algorithm). This is the DEFAULT so every
+ *   existing consumer — Breakout Drills above all, whose Level 2 /
+ *   Time & Sales calibration is frozen against it — stays
+ *   byte-identical unless it explicitly opts in.
+ * - "excursions": the extremes are reached via smooth raised-cosine
+ *   excursions, so wicks develop progressively instead of teleporting
+ *   (Daily Replay only — see buildDrEngine / reconstructDrAttempt).
+ * Both modes share the same seeded bridge, the same [low, high]
+ * clamp, the same volume pacing, and settle exactly on the true
+ * OHLC; they differ ONLY in how the extremes are attained.
+ */
+export type TickPathMode = "legacy-pin" | "excursions";
+
 interface FormingState {
   ticks: number[];
   /** Cumulative volume fraction per tick (0..1), bursts with price activity. */
@@ -101,6 +117,8 @@ export class ReplayEngine {
   private forming: FormingState | null = null;
   /** Ticks per candle — 360 default; drills may use fewer for faster pacing. */
   readonly ticksPerCandle: number;
+  /** Intra-candle path mode — see TickPathMode. Defaults to legacy. */
+  readonly pathMode: TickPathMode;
   /**
    * Lowest/highest tick prices seen since the current position opened.
    * Used by the end-of-candle bracket backstop so a stop set above an
@@ -110,11 +128,18 @@ export class ReplayEngine {
   private lowSinceEntry: number | null = null;
   private highSinceEntry: number | null = null;
 
-  constructor(candles: Candle[], startCash = 100_000, startIndex = 0, ticksPerCandle = TICKS_PER_CANDLE) {
+  constructor(
+    candles: Candle[],
+    startCash = 100_000,
+    startIndex = 0,
+    ticksPerCandle = TICKS_PER_CANDLE,
+    pathMode: TickPathMode = "legacy-pin"
+  ) {
     if (candles.length === 0) throw new Error("Engine needs at least one candle");
     this.candles = candles;
     this.startCash = startCash;
     this.ticksPerCandle = ticksPerCandle;
+    this.pathMode = pathMode;
     // startIndex = the first LIVE candle: everything before it is history,
     // and the replay opens with it forming tick-by-tick.
     this.startIndex = Math.max(0, Math.min(startIndex, candles.length - 1));
@@ -433,7 +458,7 @@ export class ReplayEngine {
 
   private beginForming(): void {
     const target = this.candles[this.index + 1];
-    const { ticks, volFrac } = makeTicks(target, this.ticksPerCandle);
+    const { ticks, volFrac } = makeTicks(target, this.ticksPerCandle, this.pathMode);
     this.forming = {
       ticks,
       volFrac,
@@ -530,18 +555,29 @@ export class ReplayEngine {
  * The path is clamped to the candle's true [low, high], and volume
  * accumulates in bursts proportional to price movement, as in real markets.
  *
- * The true high/low are attained via smooth EXCURSIONS, not teleports:
- * each extreme gets a raised-cosine (Hann) bump centered at a random
- * interior tick, sized to exactly the bridge's deficit at that tick, so
- * price WALKS to the extreme and back over ~2W ticks instead of jumping
- * there in one tick (the old single-point pin moved up to a full range
- * in a single tick — the wick appeared fully grown in one frame). The
- * bump's max slope is amp·π/(2W); W is derived from the deficit so the
- * excursion's own slope stays ≤ ~range/25, and the bumps vanish at both
- * ends so the open/close pins are never disturbed. The two bumps are
- * kept non-overlapping (an overlap would eat into the other's peak).
+ * How the true high/low are attained depends on the path mode:
+ *
+ * "legacy-pin" (default): two single ticks are overwritten with the
+ * exact extremes — the original algorithm, restored verbatim. Every
+ * consumer that does not explicitly opt in (Breakout Drills, standard
+ * Trade Lab replay) gets bit-for-bit the paths it has always had.
+ *
+ * "excursions" (Daily Replay): each extreme gets a raised-cosine
+ * (Hann) bump centered at a random interior tick, sized to exactly
+ * the bridge's deficit at that tick, so price WALKS to the extreme
+ * and back over ~2W ticks instead of jumping there in one tick (the
+ * single-point pin moved up to a full range in a single tick — the
+ * wick appeared fully grown in one frame). The bump's max slope is
+ * amp·π/(2W); W is derived from the deficit so the excursion's own
+ * slope stays ≤ ~range/25, and the bumps vanish at both ends so the
+ * open/close pins are never disturbed. The two bumps are kept
+ * non-overlapping (an overlap would eat into the other's peak).
  */
-function makeTicks(c: Candle, n: number = TICKS_PER_CANDLE): { ticks: number[]; volFrac: number[] } {
+function makeTicks(
+  c: Candle,
+  n: number = TICKS_PER_CANDLE,
+  mode: TickPathMode = "legacy-pin"
+): { ticks: number[]; volFrac: number[] } {
   const rand = mulberry32(hashSeed(c.t, c.o, c.h, c.l, c.c, c.v));
   const zn = () => (rand() + rand() + rand() - 1.5) * 2; // ~N(0,1)
 
@@ -562,7 +598,17 @@ function makeTicks(c: Candle, n: number = TICKS_PER_CANDLE): { ticks: number[]; 
   }
   pts[0] = c.o;
   pts[n - 1] = c.c;
-  if (c.h > c.l && n > 4) {
+  if (c.h > c.l && n > 4 && mode === "legacy-pin") {
+    // LEGACY: pin the true high/low by overwriting two single random
+    // ticks — the exact pre-excursion algorithm (same RNG draws, same
+    // order), so legacy paths are bit-for-bit unchanged.
+    const iH = 1 + Math.floor(rand() * (n - 2));
+    let iL = 1 + Math.floor(rand() * (n - 2));
+    if (iL === iH) iL = iL >= n - 2 ? 1 : iL + 1;
+    pts[iH] = c.h;
+    pts[iL] = c.l;
+  }
+  if (c.h > c.l && n > 4 && mode === "excursions") {
     // Excursion centers stay interior so the bumps (half-width ≤ maxW)
     // are exactly zero at both ends and never disturb the open/close.
     const edge = Math.min(48, Math.floor(n / 4));

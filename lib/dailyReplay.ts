@@ -20,7 +20,7 @@
  */
 import type { Candle } from "./types";
 import { formatEtTime } from "./marketData";
-import { ReplayEngine } from "./engine";
+import { ReplayEngine, TICKS_PER_CANDLE } from "./engine";
 
 /** Daily Replay attempts always start from this balance — fully
  *  separate from the Trade Lab persistent account balance. */
@@ -734,7 +734,16 @@ export async function buildDrEngine(
   if (!feed.finished && feed.position <= lockIndex) {
     await feed.advance(1);
   }
-  const engine = new ReplayEngine(feed.candles, startingBalance, lockIndex + 1);
+  // Daily Replay explicitly opts into the smooth "excursions" tick
+  // path (progressive wick formation). Every other engine consumer
+  // keeps the legacy path — see TickPathMode in lib/engine.ts.
+  const engine = new ReplayEngine(
+    feed.candles,
+    startingBalance,
+    lockIndex + 1,
+    TICKS_PER_CANDLE,
+    "excursions"
+  );
   if (
     feed.finished &&
     lockIndex >= feed.candles.length - 1 &&
