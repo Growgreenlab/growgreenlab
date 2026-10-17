@@ -18,6 +18,7 @@ import {
   type IChartApi,
   type ISeriesApi,
   type IPriceLine,
+  type MouseEventParams,
   type UTCTimestamp,
 } from "lightweight-charts";
 import type { Candle } from "../lib/types";
@@ -63,6 +64,10 @@ interface Props {
   referenceLevels?: ChartReferenceLevel[];
   /** If true, fit the time scale to content on initial data load (drills). */
   fitOnLoad?: boolean;
+  /** Optional: notified with the clicked candle's time (seconds) on chart
+   *  click. Used by Daily Replay's full-day preview to pick the starting
+   *  candle. Omit = no behavior (all existing parents). */
+  onCandleClick?: (timeSec: number) => void;
   onPlannedDrag: (sl: number | null, tp: number | null) => void;
   onActiveDrag: (sl: number | null, tp: number | null) => void;
   drawings: Drawing[];
@@ -71,7 +76,7 @@ interface Props {
   onDrawingToolChange: (tool: DrawingTool) => void;
 }
 
-export default function LwcChart({ candles, revealedCount, sessionKey, countdown, lastPrice, brackets, referenceLevels, fitOnLoad, onPlannedDrag, onActiveDrag, drawings, onDrawingsChange, drawingTool, onDrawingToolChange }: Props) {
+export default function LwcChart({ candles, revealedCount, sessionKey, countdown, lastPrice, brackets, referenceLevels, fitOnLoad, onCandleClick, onPlannedDrag, onActiveDrag, drawings, onDrawingsChange, drawingTool, onDrawingToolChange }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const elRef = useRef<HTMLDivElement>(null);
   const countdownRef = useRef<HTMLDivElement>(null);
@@ -90,6 +95,10 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
   // Latest brackets for use in pointer handlers (avoids stale closures).
   const bracketsRef = useRef(brackets);
   bracketsRef.current = brackets;
+  // Latest candle-click callback (read inside the chart-creation effect,
+  // which runs once — a ref keeps inline parent closures safe).
+  const onCandleClickRef = useRef(onCandleClick);
+  onCandleClickRef.current = onCandleClick;
   // Drawing state.
   const [selectedDrawingId, setSelectedDrawingId] = useState<string | null>(null);
   const drawingsRef = useRef(drawings);
@@ -263,6 +272,15 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     volumeSeriesRef.current = volumeSeries;
     pushedRef.current = null;
 
+    // Optional candle-click notifications (Daily Replay preview). The
+    // handler reads the callback through a ref; when no parent passes
+    // one this is a no-op.
+    const handleChartClick = (param: MouseEventParams) => {
+      const cb = onCandleClickRef.current;
+      if (cb && typeof param.time === "number") cb(param.time);
+    };
+    chart.subscribeClick(handleChartClick);
+
     const ro = new ResizeObserver(() => {
       chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
       setChartSize({ w: el.clientWidth, h: el.clientHeight });
@@ -271,6 +289,7 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     setChartSize({ w: el.clientWidth, h: el.clientHeight });
     return () => {
       ro.disconnect();
+      chart.unsubscribeClick(handleChartClick);
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;

@@ -11,7 +11,22 @@ import TradingPanel from "../../components/TradingPanel";
 import RiskCalculator from "../../components/RiskCalculator";
 import { ReplayEngine, formatMoney, formatSigned, countdownText, countdownTextFor, TICKS_PER_CANDLE, SECONDS_PER_CANDLE } from "../../lib/engine";
 import type { Candle, SessionMeta } from "../../lib/types";
-import { TIMEFRAMES, aggregateCandles, higherTimeframeProgress, timeframeMinutes, type TimeframeId } from "../../lib/marketData";
+import { TIMEFRAMES, aggregateCandles, higherTimeframeProgress, timeframeMinutes, formatEtTime, type TimeframeId } from "../../lib/marketData";
+import {
+  SealedCandleFeed,
+  DAILY_REPLAY_STARTING_BALANCE,
+  DAILY_REPLAY_STATE_KEY,
+  encodeDrResumeHint,
+  type SealedTransport,
+} from "../../lib/dailyReplay";
+import {
+  DrEventRecorder,
+  describeDrEvent,
+  formatDrClock,
+  type DrEvent,
+  type DrBracketMethod,
+  type DrBracketScope,
+} from "../../lib/dailyReplayEvents";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
 import { diag } from "../../lib/diag";
 import { DEFAULT_HOTKEYS, isTypingTarget } from "../../lib/hotkeys";
@@ -46,6 +61,89 @@ import {
 
 const START_CASH = 100_000;
 const BALANCE_KEY = "ggl-account-balance";
+
+/* ---------------- Daily Replay (server-sealed) ---------------- */
+
+interface DrInfo {
+  attemptId: string;
+  datasetId: string;
+  ticker: string;
+  tradeDate: string;
+  startIndex: number;
+  total: number;
+}
+
+const DR_EMPTY_BRACKETS = {
+  plannedSL: null,
+  plannedTP: null,
+  activeSL: null,
+  activeTP: null,
+};
+
+/**
+ * Supabase transport for SealedCandleFeed — thin mapping over the dr_*
+ * RPCs from supabase/migrations/daily-replay-v1.sql. All sealing rules
+ * (ownership, position clamping) are enforced inside those functions.
+ */
+function createDrTransport(
+  supabase: ReturnType<typeof createClient>
+): SealedTransport {
+  return {
+    async createAttempt(datasetId, startIndex) {
+      const { data, error } = await supabase.rpc("dr_create_attempt", {
+        p_dataset_id: datasetId,
+        p_start_index: startIndex,
+      });
+      if (error) throw error;
+      const d = data as { attempt_id: string; position: number; candles: Candle[] };
+      return { attemptId: d.attempt_id, position: d.position, candles: d.candles };
+    },
+    async advance(attemptId, steps) {
+      const { data, error } = await supabase.rpc("dr_advance_attempt", {
+        p_attempt_id: attemptId,
+        p_steps: steps,
+      });
+      if (error) throw error;
+      const d = data as { position: number; candles: Candle[]; finished: boolean };
+      return { position: d.position, candles: d.candles, finished: d.finished };
+    },
+    async getRevealed(attemptId) {
+      const { data, error } = await supabase.rpc("dr_get_revealed", {
+        p_attempt_id: attemptId,
+      });
+      if (error) throw error;
+      const d = data as { position: number; candles: Candle[] };
+      return { position: d.position, candles: d.candles };
+    },
+  };
+}
+
+/** True when the Daily Replay migration has not been applied yet. */
+function isDrStorageMissing(e: unknown): boolean {
+  if (!e || typeof e !== "object") return false;
+  const err = e as { code?: string; message?: string };
+  if (
+    err.code === "PGRST202" ||
+    err.code === "PGRST205" ||
+    err.code === "42P01" ||
+    err.code === "42883"
+  ) {
+    return true;
+  }
+  const msg = (err.message ?? "").toLowerCase();
+  return (
+    msg.includes("could not find the function") ||
+    msg.includes("daily_replay_datasets") ||
+    msg.includes("daily_replay_attempts") ||
+    msg.includes("daily_replay_events") ||
+    msg.includes("dr_create_attempt") ||
+    msg.includes("dr_upload_candles") ||
+    msg.includes("dr_advance_attempt")
+  );
+}
+
+const DR_STORAGE_MISSING_MSG =
+  "Daily Replay storage is not enabled on this deployment yet.";
 
 function ReplayPageInner() {
   const searchParams = useSearchParams();
@@ -205,6 +303,43 @@ function ReplayPageInner() {
 
   useEffect(() => stopTimer, [stopTimer]);
 
+  /* ---------------- Daily Replay state ----------------
+   * Phases: off → preview (full day visible, unsealed by design) →
+   * active (engine built ONLY over the SealedCandleFeed's array) → done.
+   * The DR balance lives solely inside the DR engine's cash — the Trade
+   * Lab persistent balance (profiles.account_balance / BALANCE_KEY) is
+   * never read or written by any Daily Replay path. */
+  const [drPhase, setDrPhase] = useState<"off" | "preview" | "active" | "done">("off");
+  const drPhaseRef = useRef(drPhase);
+  drPhaseRef.current = drPhase;
+  const [drPreview, setDrPreview] = useState<{
+    candles: Candle[];
+    meta: SessionMeta;
+    warnings: string[];
+    selected: number;
+  } | null>(null);
+  const [drConfirm, setDrConfirm] = useState(false);
+  const [drBusy, setDrBusy] = useState(false);
+  const [drBuffering, setDrBuffering] = useState(false);
+  const [drError, setDrError] = useState<string | null>(null);
+  const [drInfo, setDrInfo] = useState<DrInfo | null>(null);
+  const drInfoRef = useRef<DrInfo | null>(null);
+  drInfoRef.current = drInfo;
+  const [drFinal, setDrFinal] = useState<{ realized: number; equity: number } | null>(null);
+  const [drSaveMsg, setDrSaveMsg] = useState<string | null>(null);
+  const drFeedRef = useRef<SealedCandleFeed | null>(null);
+  const drAdvancingRef = useRef(false);
+  const drCompletedRef = useRef(false);
+  const drOnErrorRef = useRef<(e: unknown) => void>(() => {});
+  /* Decision Timeline (DR-scoped): the recorder is fed from the same
+   * call sites where actions happen; fills are observed centrally. */
+  const [drEvents, setDrEvents] = useState<DrEvent[]>([]);
+  const drRecorderRef = useRef<DrEventRecorder | null>(null);
+  const drFlushedRef = useRef(0);
+  const drEventsMissingRef = useRef(false);
+  const drSeenFillsRef = useRef(0);
+  const drPlayStartedRef = useRef(false);
+
   // Trading-workspace mode: hide the site footer so the workspace owns the screen.
   useEffect(() => {
     document.body.classList.add("ws-active");
@@ -238,6 +373,28 @@ function ReplayPageInner() {
       // Fell behind by more than a second (hidden tab / sleep / pause in
       // devtools): resume from the live edge instead of bursting.
       if (now - nextTick > 1000) nextTick = now;
+      // Daily Replay: the engine may only form candles the sealed feed
+      // already holds. At the held end (engine.atEnd with more candles
+      // still sealed server-side), release the next batch instead of
+      // ticking — and pause ticking while that request is in flight.
+      if (drPhaseRef.current === "active") {
+        const feed = drFeedRef.current;
+        if (feed && eng.atEnd && !feed.finished) {
+          if (!drAdvancingRef.current) {
+            drAdvancingRef.current = true;
+            setDrBuffering(true);
+            feed
+              .advance(30)
+              .then(() => bump())
+              .catch((e) => drOnErrorRef.current(e))
+              .finally(() => {
+                drAdvancingRef.current = false;
+                setDrBuffering(false);
+              });
+          }
+          return;
+        }
+      }
       let ran = 0;
       let finished = false;
       const qtyBefore = eng.positionQty;
@@ -292,6 +449,253 @@ function ReplayPageInner() {
     setMeta(m);
     setSaveMsg(null);
     setDataOpen(false);
+    bump();
+  }, [bump, stopTimer]);
+
+  /* ---------------- Daily Replay handlers ---------------- */
+
+  const handleDrAdvanceError = useCallback(
+    (e: unknown) => {
+      stopTimer();
+      setDrError(
+        isDrStorageMissing(e)
+          ? DR_STORAGE_MISSING_MSG
+          : `Daily Replay paused: ${e instanceof Error ? e.message : "server request failed."}`
+      );
+    },
+    [stopTimer]
+  );
+  drOnErrorRef.current = handleDrAdvanceError;
+
+  // Step B: a validated Real Market Data load lands in the full-day
+  // preview. Any running session is torn down exactly like a fresh load.
+  const handleDrPreview = useCallback(
+    (cs: Candle[], m: SessionMeta, warnings: string[]) => {
+      stopTimer();
+      setEnded(false);
+      setSaveMsg(null);
+      engineRef.current = null;
+      savedSessionIdRef.current = null;
+      lastSavedPnlRef.current = 0;
+      setCandles(null);
+      setMeta(null);
+      setDrError(null);
+      setDrFinal(null);
+      setDrSaveMsg(null);
+      setDrPreview({
+        candles: cs,
+        meta: m,
+        warnings,
+        selected: Math.min(Math.max(m.startIndex, 0), cs.length - 1),
+      });
+      setDrConfirm(false);
+      setDrPhase("preview");
+      bump();
+    },
+    [bump, stopTimer]
+  );
+
+  const exitDrPreview = useCallback(() => {
+    setDrPreview(null);
+    setDrConfirm(false);
+    setDrError(null);
+    setDrPhase("off");
+    bump();
+  }, [bump]);
+
+  // Preview escape hatch: the pre-existing unsealed Trade Lab replay,
+  // unchanged (the full array the user just inspected, their start time).
+  const startStandardFromPreview = useCallback(() => {
+    const pv = drPreview;
+    if (!pv) return;
+    setDrPreview(null);
+    setDrPhase("off");
+    handleLoad(pv.candles, pv.meta);
+  }, [drPreview, handleLoad]);
+
+  // Step C: lock the starting candle. Uploads the dataset server-side,
+  // creates the sealed attempt, then DISCARDS the preview array — the
+  // active engine is built only from the feed's server-released prefix.
+  const confirmDrLock = useCallback(async () => {
+    const pv = drPreview;
+    if (!pv) return;
+    setDrBusy(true);
+    setDrError(null);
+    try {
+      if (!isSupabaseConfigured()) {
+        setDrError(DR_STORAGE_MISSING_MSG);
+        return;
+      }
+      const supabase = createClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) {
+        setDrError(
+          "Daily Replay keeps candles sealed on the server, stored per account — please sign in to lock a starting candle, or start a standard replay instead."
+        );
+        return;
+      }
+      const premarketUnavailable = pv.meta.premarketUnavailable;
+      // 1) Register the dataset (owner RLS applies).
+      const { data: ds, error: dsErr } = await supabase
+        .from("daily_replay_datasets")
+        .insert({
+          user_id: user.id,
+          ticker: pv.meta.ticker,
+          trade_date: pv.meta.tradeDate,
+          timeframe: 1,
+          source: "twelvedata",
+          candle_count: pv.candles.length,
+        })
+        .select("id")
+        .single();
+      if (dsErr || !ds) throw dsErr ?? new Error("Could not register the dataset.");
+      // 2) Upload the candles through the definer RPC (the candles
+      //    table itself accepts no direct writes at all).
+      const { error: upErr } = await supabase.rpc("dr_upload_candles", {
+        p_dataset_id: ds.id,
+        p_candles: pv.candles,
+      });
+      if (upErr) throw upErr;
+      // 3) Create the sealed attempt; the feed ingests ONLY the
+      //    server-released prefix [0..start].
+      const feed = new SealedCandleFeed(createDrTransport(supabase));
+      feed.setTotal(pv.candles.length);
+      await feed.create(ds.id, pv.selected);
+      const info: DrInfo = {
+        attemptId: feed.attemptId!,
+        datasetId: ds.id,
+        ticker: pv.meta.ticker,
+        tradeDate: pv.meta.tradeDate,
+        startIndex: pv.selected,
+        total: pv.candles.length,
+      };
+      // Decision Timeline starts here: attempt_created is event #1.
+      const startCandle = feed.candles[pv.selected];
+      const recorder = new DrEventRecorder();
+      drRecorderRef.current = recorder;
+      drFlushedRef.current = 0;
+      drEventsMissingRef.current = false;
+      drSeenFillsRef.current = 0;
+      drPlayStartedRef.current = false;
+      recorder.setListener(() => {
+        setDrEvents(recorder.all);
+        if (recorder.length - drFlushedRef.current >= 10) {
+          void flushDrEvents();
+        }
+      });
+      recorder.record(
+        "attempt_created",
+        {
+          ticker: info.ticker,
+          tradeDate: info.tradeDate,
+          startIndex: info.startIndex,
+          startEtTime: startCandle ? formatEtTime(startCandle.t) : "",
+          startingBalance: DAILY_REPLAY_STARTING_BALANCE,
+        },
+        {
+          marketIdx: info.startIndex,
+          marketTs: startCandle ? startCandle.t : null,
+        }
+      );
+      // 4) Drop every page-held reference to the full preview array.
+      //    From here on, the only candles in memory are the feed's.
+      drFeedRef.current = feed;
+      setDrInfo(info);
+      setDrPreview(null);
+      setDrConfirm(false);
+      drCompletedRef.current = false;
+      // 5) Engine over the sealed array, with the independent DR balance.
+      const eng = new ReplayEngine(
+        feed.candles,
+        DAILY_REPLAY_STARTING_BALANCE,
+        info.startIndex
+      );
+      engineRef.current = eng;
+      savedSessionIdRef.current = null;
+      lastSavedPnlRef.current = 0;
+      setCandles(feed.candles);
+      setMeta({
+        ticker: info.ticker,
+        tradeDate: info.tradeDate,
+        source: "twelvedata",
+        startIndex: info.startIndex,
+        premarketUnavailable,
+      });
+      setDrPhase("active");
+      try {
+        localStorage.setItem(
+          DAILY_REPLAY_STATE_KEY,
+          encodeDrResumeHint({
+            attemptId: info.attemptId,
+            datasetId: info.datasetId,
+            ticker: info.ticker,
+            tradeDate: info.tradeDate,
+            startIndex: info.startIndex,
+          })
+        );
+      } catch { /* non-authoritative UI hint only */ }
+      bump();
+    } catch (e) {
+      setDrError(
+        isDrStorageMissing(e)
+          ? DR_STORAGE_MISSING_MSG
+          : e instanceof Error
+            ? e.message
+            : "Could not start Daily Replay."
+      );
+    } finally {
+      setDrBusy(false);
+    }
+  }, [drPreview, bump]);
+
+  // Step button for Daily Replay: release more candles first when the
+  // engine sits at the sealed end.
+  const drStepNext = useCallback(async () => {
+    const eng = engineRef.current;
+    const feed = drFeedRef.current;
+    if (!eng || !feed) return;
+    if (eng.atEnd && !feed.finished) {
+      setDrBuffering(true);
+      try {
+        await feed.advance(30);
+      } catch (e) {
+        handleDrAdvanceError(e);
+        return;
+      } finally {
+        setDrBuffering(false);
+      }
+    }
+    if (!eng.atEnd) eng.step();
+    setEnded(eng.atEnd && feed.finished);
+    bump();
+  }, [bump, handleDrAdvanceError]);
+
+  // Leave Daily Replay. The server-side attempt stays 'active' (the
+  // client holds no position it could forge anyway); the local sealed
+  // array and engine are dropped.
+  const exitDailyReplay = useCallback(() => {
+    stopTimer();
+    // Timeline: record the exit and flush what we can before teardown.
+    const rec = drRecorderRef.current;
+    if (rec && drPhaseRef.current !== "done") {
+      rec.record("session_exited", {}, drCtx());
+    }
+    void flushDrEvents();
+    drRecorderRef.current = null;
+    drFeedRef.current = null;
+    drCompletedRef.current = false;
+    setDrEvents([]);
+    setDrInfo(null);
+    setDrFinal(null);
+    setDrSaveMsg(null);
+    setDrError(null);
+    setDrPhase("off");
+    engineRef.current = null;
+    setCandles(null);
+    setMeta(null);
+    setEnded(false);
     bump();
   }, [bump, stopTimer]);
 
@@ -599,29 +1003,51 @@ function ReplayPageInner() {
   const buyErr = (qty: number): string | null => {
     const eng = engineRef.current;
     if (!eng) return "Load a session first.";
-    if (!(qty > 0)) return "Enter a share quantity.";
+    const rec = drRec();
+    const q = Math.floor(qty);
+    if (!(qty > 0)) {
+      rec?.recordOrderRejected({ side: "buy", qty: q, reason: "Enter a share quantity." }, drCtx());
+      return "Enter a share quantity.";
+    }
     // Psychology Guard: block entries during lockout (engine also enforces).
     if (eng.tradeGuard) {
       const msg = eng.tradeGuard();
-      if (msg) return msg;
+      if (msg) {
+        rec?.recordOrderRejected({ side: "buy", qty: q, reason: msg }, drCtx());
+        return msg;
+      }
     }
-    const f = eng.buy(Math.floor(qty));
+    rec?.recordOrderSubmitted({ orderType: "market", side: "buy", qty: q }, drCtx());
+    const f = eng.buy(q);
     if (f) {
       // Activate any planned SL/TP on the new position.
       if (plannedSL != null || plannedTP != null) {
         eng.setBrackets(plannedSL, plannedTP);
+        drBracketsChanged(plannedSL, plannedTP, "control", "active");
+        drBracketsChanged(null, null, "control", "planned");
         setPlannedLevels(null, null);
       }
     }
     bump();
-    return f ? null : "Not enough virtual cash for that size.";
+    if (!f) {
+      rec?.recordOrderRejected({ side: "buy", qty: q, reason: "Not enough virtual cash for that size." }, drCtx());
+      return "Not enough virtual cash for that size.";
+    }
+    return null;
   };
   const sellErr = (qty: number): string | null => {
     const eng = engineRef.current;
     if (!eng) return "Load a session first.";
-    const f = eng.sell(Math.floor(qty));
+    const rec = drRec();
+    const q = Math.floor(qty);
+    rec?.recordOrderSubmitted({ orderType: "market", side: "sell", qty: q }, drCtx());
+    const f = eng.sell(q);
     bump();
-    return f ? null : "No open position to sell.";
+    if (!f) {
+      rec?.recordOrderRejected({ side: "sell", qty: q, reason: "No open position to sell." }, drCtx());
+      return "No open position to sell.";
+    }
+    return null;
   };
 
   // Guest trade limit gate: wraps buyErr for new positions (guests only).
@@ -711,11 +1137,22 @@ function ReplayPageInner() {
       }
     }
     const err = eng.placeLimitOrder(side, qty, price);
+    const rec = drRec();
+    if (err) {
+      rec?.recordOrderRejected({ side, qty, reason: err }, drCtx());
+    } else {
+      rec?.recordOrderSubmitted({ orderType: "limit", side, qty, requestedPrice: price }, drCtx());
+      rec?.recordLimitPlaced({ side, qty, limitPrice: price }, drCtx());
+    }
     bump();
     return err;
   };
 
   const saveSession = async (isAutoSave = false) => {
+    // Daily Replay has its own save path (see completeDailyReplay):
+    // routing a DR session through here would wrongly apply its P&L to
+    // the persistent Trade Lab balance as a delta.
+    if (drPhaseRef.current === "active" || drPhaseRef.current === "done") return;
     const eng = engineRef.current;
     if (!eng || !candles || !meta) return;
     if (!isSupabaseConfigured()) {
@@ -804,21 +1241,480 @@ function ReplayPageInner() {
     }
   };
 
+  /* Daily Replay completion: save the finished attempt to the journal
+   * via replay_sessions/session_trades like a normal session — by now
+   * every candle has been legitimately revealed to this user — but
+   * WITHOUT the profiles.account_balance delta (DR money is separate),
+   * then mark the attempt finished server-side with the session link. */
+  const completeDailyReplay = useCallback(async () => {
+    const eng = engineRef.current;
+    const feed = drFeedRef.current;
+    const info = drInfoRef.current;
+    if (!eng || !feed || !info) return;
+    drRecorderRef.current?.record(
+      "session_completed",
+      { realizedPnl: eng.realizedPnl, equity: eng.equity() },
+      drCtx()
+    );
+    setDrFinal({ realized: eng.realizedPnl, equity: eng.equity() });
+    setDrPhase("done");
+    try {
+      if (!isSupabaseConfigured()) {
+        setDrSaveMsg("Replay complete. (Session saving is unavailable — Supabase is not configured.)");
+        return;
+      }
+      const supabase = createClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) {
+        setDrSaveMsg("Replay complete. (Not signed in — session was not saved.)");
+        return;
+      }
+      const { data: s, error } = await supabase
+        .from("replay_sessions")
+        .insert({
+          user_id: user.id,
+          ticker: info.ticker,
+          trade_date: info.tradeDate,
+          source: "twelvedata",
+          candles: feed.candles,
+          start_index: info.startIndex,
+          final_cash: eng.cash,
+          realized_pnl: eng.realizedPnl,
+        })
+        .select("id")
+        .single();
+      if (error || !s) throw error ?? new Error("Daily Replay session save failed.");
+      if (eng.fills.length > 0) {
+        const { error: tErr } = await supabase.from("session_trades").insert(
+          eng.fills.map((f) => ({
+            session_id: s.id,
+            user_id: user.id,
+            side: f.side,
+            qty: f.qty,
+            price: f.price,
+            candle_index: f.candleIndex,
+            candle_time: new Date(f.time).toISOString(),
+            realized_pnl: f.realizedPnl,
+            note: f.note ?? null,
+          }))
+        );
+        if (tErr) throw tErr;
+      }
+      const { error: fErr } = await supabase.rpc("dr_finish_attempt", {
+        p_attempt_id: info.attemptId,
+        p_session_id: s.id,
+      });
+      if (fErr) throw fErr;
+      await flushDrEvents();
+      setDrSaveMsg("Saved to your journal — find it under My Sessions.");
+    } catch (e) {
+      setDrSaveMsg(
+        `Replay complete — journal save failed: ${e instanceof Error ? e.message : "unknown error"}`
+      );
+    }
+    // The timeline flushes regardless of how the journal save went.
+    await flushDrEvents();
+  }, []);
+
+  // Fires when the play/step flow reports the end. In Daily Replay that
+  // only counts once the feed is finished (every candle released); at
+  // the merely-held end it is a buffering state, not completion.
+  useEffect(() => {
+    if (!ended || drPhase !== "active") return;
+    const feed = drFeedRef.current;
+    if (!feed || !feed.finished) {
+      setEnded(false);
+      return;
+    }
+    if (drCompletedRef.current) return;
+    drCompletedRef.current = true;
+    void completeDailyReplay();
+  }, [ended, drPhase, completeDailyReplay]);
+
+  /* ---------------- Decision Timeline plumbing ----------------
+   * flushDrEvents / drSyncFills / drBracketsChanged / drCtx are plain
+   * closures (not hooks) used by handlers defined across this file;
+   * they only ever run in response to user actions or effects, after
+   * the component body has fully initialized. */
+
+  /** The recorder, only while a Daily Replay attempt is on screen. */
+  const drRec = (): DrEventRecorder | null =>
+    drPhaseRef.current === "active" || drPhaseRef.current === "done"
+      ? drRecorderRef.current
+      : null;
+
+  /** Current market-candle context for an event. */
+  const drCtx = (): { marketIdx: number | null; marketTs: number | null } => {
+    const e = engineRef.current;
+    if (!e) return { marketIdx: null, marketTs: null };
+    return {
+      marketIdx: e.index,
+      marketTs: e.candles[e.index]?.t ?? null,
+    };
+  };
+
+  /** Feed an SL/TP application (drag or control, planned or active). */
+  const drBracketsChanged = (
+    sl: number | null,
+    tp: number | null,
+    method: DrBracketMethod,
+    scope: DrBracketScope
+  ): void => {
+    const rec = drRec();
+    if (!rec) return;
+    const e = engineRef.current;
+    rec.recordBrackets(sl, tp, method, scope, drCtx(), {
+      avgEntry: e && e.positionQty > 0 ? e.positionAvg : null,
+      direction: "long", // the engine is long-only in this round
+    });
+  };
+
+  /**
+   * Persist recorded events in one small batch. If the events table is
+   * missing (migration not applied yet), remember that and stop trying
+   * — the timeline still works in-page and at completion, and nothing
+   * crashes. Other failures keep the events pending for the next flush.
+   */
+  const flushDrEvents = async (): Promise<void> => {
+    const rec = drRecorderRef.current;
+    const info = drInfoRef.current;
+    if (!rec || !info || drEventsMissingRef.current) return;
+    const pending = rec.all.slice(drFlushedRef.current);
+    if (pending.length === 0) return;
+    try {
+      if (!isSupabaseConfigured()) return;
+      const supabase = createClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return;
+      const { error } = await supabase.from("daily_replay_events").insert(
+        pending.map((e) => ({
+          attempt_id: info.attemptId,
+          user_id: user.id,
+          seq: e.seq,
+          type: e.type,
+          wall_ts: new Date(e.wallTs).toISOString(),
+          market_idx: e.marketIdx,
+          market_ts: e.marketTs,
+          payload: e.payload,
+        }))
+      );
+      if (error) throw error;
+      drFlushedRef.current += pending.length;
+    } catch (e) {
+      if (isDrStorageMissing(e)) {
+        drEventsMissingRef.current = true;
+      }
+      // otherwise: leave pending; a later flush retries. Never crash.
+    }
+  };
+
+  /**
+   * Observe engine fills centrally (market/limit fills from handlers,
+   * bracket triggers + limit fills from the tick loop) and feed them
+   * to the recorder exactly once each. A shrinking fills array means
+   * the engine was reset — the shadow restarts, history stays.
+   */
+  const drSyncFills = (): void => {
+    const e = engineRef.current;
+    const rec = drRecorderRef.current;
+    if (!e || !rec) return;
+    if (drPhaseRef.current !== "active" && drPhaseRef.current !== "done") return;
+    if (e.fills.length < drSeenFillsRef.current) {
+      drSeenFillsRef.current = 0;
+      rec.resetTradingState();
+    }
+    while (drSeenFillsRef.current < e.fills.length) {
+      const f = e.fills[drSeenFillsRef.current++];
+      const wasFlat = rec.positionQty === 0;
+      rec.recordFill({
+        side: f.side,
+        qty: f.qty,
+        price: f.price,
+        candleIndex: f.candleIndex,
+        time: f.time,
+        note: f.note,
+        realizedPnl: f.realizedPnl,
+      });
+      if (f.side === "buy" && wasFlat) {
+        // Risk snapshot at first entry, from the levels now in force.
+        const sl = e.stopLoss ?? plannedSL;
+        const tp = e.takeProfit ?? plannedTP;
+        const risk =
+          sl != null ? Math.abs(f.price - sl) * f.qty : null;
+        const rr =
+          sl != null && tp != null && Math.abs(f.price - sl) > 0
+            ? Math.abs(tp - f.price) / Math.abs(f.price - sl)
+            : null;
+        rec.recordRiskSnapshot(
+          {
+            entry: f.price,
+            qty: f.qty,
+            stopLoss: sl,
+            takeProfit: tp,
+            plannedRisk: risk,
+            rewardRisk: rr,
+          },
+          { marketIdx: f.candleIndex, marketTs: f.time }
+        );
+      }
+    }
+  };
+
+  // Fills can appear on any bump (tick batch, step, order) — sync after
+  // every render in which the version advanced.
+  useEffect(() => {
+    drSyncFills();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [version]);
+
   const eng = engineRef.current;
   const daily = snap ? snap.realized + snap.unreal : 0;
+  const isDr = drPhase === "active" || drPhase === "done";
+  // In Daily Replay the chart session key must be stable while the
+  // sealed array grows — the standard key embeds candles.length.
+  const chartSessionKey =
+    isDr && drInfo
+      ? `dr|${drInfo.attemptId}|${timeframe}`
+      : `${meta?.ticker}|${meta?.tradeDate}|${meta?.source}|${candles?.length}|${timeframe}`;
 
   return (
     <div className="ws">
-      {(!eng || !candles || !meta || !snap) && (
+      {drPhase === "preview" && drPreview && (
+        <div className="ws-welcome" style={{ maxWidth: 1120, margin: "0 auto", width: "100%" }}>
+          <div
+            style={{
+              background: "rgba(251,191,36,0.10)",
+              border: "1px solid rgba(251,191,36,0.45)",
+              borderRadius: 8,
+              padding: "10px 14px",
+              fontWeight: 800,
+              letterSpacing: "0.04em",
+              color: "#fbbf24",
+              fontSize: 14,
+              textAlign: "center",
+            }}
+          >
+            FULL-DAY PREVIEW — FUTURE CANDLES ARE VISIBLE
+          </div>
+          <p className="hint" style={{ marginTop: 10 }}>
+            {drPreview.meta.ticker} · {drPreview.meta.tradeDate} · 1-minute candles ·{" "}
+            {drPreview.candles.length} candles loaded. This preview is intentionally
+            unsealed so you can inspect the whole day and choose where to begin —
+            it is <b>not</b> a blind replay, and trading is disabled here. Click a
+            candle on the chart (or set “Replay starts at” before loading) to choose
+            your starting candle, then lock it: from that moment the server releases
+            candles only as you advance.
+          </p>
+          {drPreview.warnings.length > 0 && (
+            <div
+              style={{
+                background: "rgba(251,191,36,0.06)",
+                border: "1px solid rgba(251,191,36,0.25)",
+                borderRadius: 8,
+                padding: "8px 12px",
+                marginBottom: 10,
+                fontSize: 12.5,
+              }}
+            >
+              <b>Data warnings</b> (nothing was filled in or invented):
+              <ul style={{ margin: "6px 0 0 0", paddingLeft: 18 }}>
+                {drPreview.warnings.map((w, i) => (
+                  <li key={i}>{w}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <div className="ws-chart" style={{ position: "relative", height: 440 }}>
+            <LwcChart
+              candles={drPreview.candles}
+              revealedCount={drPreview.candles.length}
+              sessionKey={`dr-preview|${drPreview.meta.ticker}|${drPreview.meta.tradeDate}|${drPreview.candles.length}`}
+              countdown={null}
+              lastPrice={drPreview.candles[drPreview.selected].c}
+              brackets={DR_EMPTY_BRACKETS}
+              fitOnLoad
+              onCandleClick={(timeSec) => {
+                const t = timeSec * 1000;
+                let best = 0;
+                let bestDist = Infinity;
+                drPreview.candles.forEach((c, i) => {
+                  const d = Math.abs(c.t - t);
+                  if (d < bestDist) { bestDist = d; best = i; }
+                });
+                setDrPreview((p) => (p ? { ...p, selected: best } : p));
+              }}
+              onPlannedDrag={() => {}}
+              onActiveDrag={() => {}}
+              drawings={[]}
+              onDrawingsChange={() => {}}
+              drawingTool="select"
+              onDrawingToolChange={() => {}}
+            />
+          </div>
+          {(() => {
+            const sel = drPreview.candles[drPreview.selected];
+            return (
+              <div
+                style={{
+                  display: "flex", flexWrap: "wrap", gap: 14, alignItems: "center",
+                  marginTop: 12, padding: "10px 14px",
+                  background: "rgba(255,255,255,0.03)",
+                  border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8,
+                  fontSize: 13,
+                }}
+              >
+                <span>
+                  <b>Starting candle:</b> {drPreview.meta.tradeDate}{" "}
+                  {formatEtTime(sel.t)} ET (#{drPreview.selected + 1} of{" "}
+                  {drPreview.candles.length})
+                </span>
+                <span className="num">O {sel.o.toFixed(2)}</span>
+                <span className="num">H {sel.h.toFixed(2)}</span>
+                <span className="num">L {sel.l.toFixed(2)}</span>
+                <span className="num">C {sel.c.toFixed(2)}</span>
+                <span className="num">V {sel.v.toLocaleString()}</span>
+              </div>
+            );
+          })()}
+          <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+            <button
+              className="btn primary big"
+              onClick={() => { setDrError(null); setDrConfirm(true); }}
+            >
+              Lock Starting Candle
+            </button>
+            <button className="btn big" onClick={startStandardFromPreview}>
+              Start standard replay instead
+            </button>
+            <button className="btn big" onClick={exitDrPreview}>
+              Back to data sources
+            </button>
+          </div>
+          {drError && <div className="err" style={{ marginTop: 10 }}>{drError}</div>}
+          {drConfirm && (
+            <div
+              style={{
+                marginTop: 12, padding: "12px 14px",
+                background: "rgba(16,185,129,0.06)",
+                border: "1px solid rgba(16,185,129,0.35)", borderRadius: 8,
+                fontSize: 13.5,
+              }}
+            >
+              <b>Start Daily Replay?</b>
+              <div style={{ margin: "8px 0", lineHeight: 1.7 }}>
+                <div>Ticker: <b>{drPreview.meta.ticker}</b></div>
+                <div>Date: <b>{drPreview.meta.tradeDate}</b></div>
+                <div>Timeframe: <b>1 minute</b></div>
+                <div>
+                  Starting candle:{" "}
+                  <b>
+                    {drPreview.meta.tradeDate}{" "}
+                    {formatEtTime(drPreview.candles[drPreview.selected].t)} ET
+                  </b>
+                </div>
+                <div>
+                  Starting balance: <b>{formatMoney(DAILY_REPLAY_STARTING_BALANCE)}</b>{" "}
+                  (separate Daily Replay account — your Trade Lab balance is untouched)
+                </div>
+                <div style={{ color: "var(--muted)" }}>
+                  Once locked, the starting point cannot be changed for this attempt,
+                  and candles after it stay sealed on the server until you reach them.
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="btn primary" onClick={confirmDrLock} disabled={drBusy}>
+                  {drBusy ? "Locking…" : "Confirm — start Daily Replay"}
+                </button>
+                <button className="btn" onClick={() => setDrConfirm(false)} disabled={drBusy}>
+                  Back
+                </button>
+              </div>
+              {drError && <div className="err" style={{ marginTop: 8 }}>{drError}</div>}
+            </div>
+          )}
+        </div>
+      )}
+
+      {drPhase !== "preview" && (!eng || !candles || !meta || !snap) && (
         <div className="ws-welcome">
           {loadingSession && <div className="hint">Loading saved session…</div>}
-          <DataSourcePanel candles={candles} meta={meta} onLoad={handleLoad} />
+          <DataSourcePanel candles={candles} meta={meta} onLoad={handleLoad} onPreview={handleDrPreview} />
           {saveMsg && <div className="err" style={{ marginTop: 12 }}>{saveMsg}</div>}
         </div>
       )}
 
       {eng && candles && meta && snap && (
         <>
+          {/* Daily Replay status banner */}
+          {isDr && drInfo && (
+            <div
+              style={{
+                display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center",
+                padding: "8px 12px", marginBottom: 8,
+                background: "rgba(16,185,129,0.08)",
+                border: "1px solid rgba(16,185,129,0.35)", borderRadius: 8,
+                fontSize: 12.5,
+              }}
+            >
+              <b style={{ color: "var(--emerald-bright)", letterSpacing: "0.04em" }}>
+                {drPhase === "done" ? "DAILY REPLAY COMPLETE" : "DAILY REPLAY ACTIVE"}
+              </b>
+              <span>
+                {drInfo.ticker} · {drInfo.tradeDate} · started{" "}
+                {formatEtTime(eng.candles[drInfo.startIndex]?.t ?? 0)} ET
+              </span>
+              <span>
+                Candle {Math.min(eng.index + 1, drInfo.total)} of {drInfo.total}
+                {eng.candles[eng.index] ? ` · ${formatEtTime(eng.candles[eng.index].t)} ET` : ""}
+              </span>
+              <span title="Daily Replay uses its own $100,000 account — the Trade Lab balance is not touched">
+                DR balance: cash {formatMoney(snap.cash)} · equity {formatMoney(snap.equity)}
+              </span>
+              {drBuffering && <span style={{ color: "#fbbf24" }}>Loading next candles…</span>}
+              {drFeedRef.current?.lastError && (
+                <span style={{ color: "#fbbf24" }}>{drFeedRef.current.lastError}</span>
+              )}
+              <button className="btn" style={{ marginLeft: "auto" }} onClick={exitDailyReplay}>
+                Exit Daily Replay
+              </button>
+            </div>
+          )}
+          {isDr && drError && (
+            <div className="err" style={{ marginBottom: 8 }}>
+              {drError}{" "}
+              <button className="btn" onClick={() => setDrError(null)}>Dismiss</button>
+            </div>
+          )}
+          {drPhase === "done" && drFinal && (
+            <div
+              style={{
+                padding: "12px 14px", marginBottom: 8,
+                background: "rgba(16,185,129,0.06)",
+                border: "1px solid rgba(16,185,129,0.3)", borderRadius: 8,
+                fontSize: 13.5, lineHeight: 1.6,
+              }}
+            >
+              <b>Daily Replay complete</b> — {drInfo?.ticker} {drInfo?.tradeDate}. Final
+              realized P&amp;L{" "}
+              <b className={drFinal.realized >= 0 ? "pos" : "neg"}>
+                {formatSigned(drFinal.realized)}
+              </b>{" "}
+              · final equity <b>{formatMoney(drFinal.equity)}</b>.
+              {drSaveMsg && <div>{drSaveMsg}</div>}
+              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                <a className="btn" href="/sessions" style={{ textDecoration: "none" }}>
+                  My Sessions
+                </a>
+                <button className="btn primary" onClick={exitDailyReplay}>
+                  New session
+                </button>
+              </div>
+            </div>
+          )}
           {/* top strip: instrument + price + actions */}
           <div className="ws-top">
             <div className="ws-sym">
@@ -833,7 +1729,10 @@ function ReplayPageInner() {
               <span className="hod-line">HOD <b className="num">{formatMoney(eng.hod)}</b></span>
             </div>
             <div className="ws-top-actions">
-              {/* Persistent account balance */}
+              {/* Persistent account balance — hidden in Daily Replay,
+                  whose balance is separate (see the DR banner). */}
+              {!isDr && (
+              <>
               <span
                 title="Account balance — carries P&L across sessions. Click ↺ to reset to $100,000."
                 style={{ fontSize: 12, color: "var(--muted)", display: "flex", alignItems: "center", gap: 6 }}
@@ -856,7 +1755,10 @@ function ReplayPageInner() {
                   <span className="err" style={{ fontSize: 12 }}>{saveMsg}</span>
                 )
               )}
+              </>
+              )}
               <button className="btn" onClick={() => setDataOpen((v) => !v)}>Data</button>
+              {!isDr && (
               <label
                 title="Auto-save session for signed-in users (saves after each closed trade)"
                 style={{ fontSize: 12, color: "var(--muted)", display: "flex", alignItems: "center", gap: 4, cursor: "pointer", userSelect: "none" }}
@@ -869,9 +1771,12 @@ function ReplayPageInner() {
                 />
                 Auto-save
               </label>
+              )}
+              {!isDr && (
               <button className="btn primary" onClick={() => saveSession(false)} disabled={saving}>
                 {saving ? "Saving…" : "Save"}
               </button>
+              )}
             </div>
           </div>
 
@@ -881,18 +1786,29 @@ function ReplayPageInner() {
               <ReplayControls
                 compact
                 playing={playing}
-                canPlay={!eng.atEnd}
+                canPlay={isDr ? drPhase === "active" : !eng.atEnd}
                 ended={ended}
-                onPlay={() => { setEnded(false); setPlayNonce((n) => n + 1); setPlaying(true); }}
-                onPause={stopTimer}
-                onNext={() => { eng.step(); setEnded(eng.atEnd); bump(); }}
-                onReset={() => { const wasPlaying = playing; stopTimer(); setEnded(false); eng.reset(); bump(); if (wasPlaying) { setPlayNonce((n) => n + 1); setPlaying(true); } }}
-                onRestart={() => { stopTimer(); setEnded(false); eng.reset(); bump(); setPlayNonce((n) => n + 1); setPlaying(true); }}
+                onPlay={() => {
+                  setEnded(false); setPlayNonce((n) => n + 1); setPlaying(true);
+                  const rec = drRec();
+                  if (rec) {
+                    if (!drPlayStartedRef.current) {
+                      drPlayStartedRef.current = true;
+                      rec.record("session_started", {}, drCtx());
+                    } else {
+                      rec.record("session_resumed", {}, drCtx());
+                    }
+                  }
+                }}
+                onPause={() => { stopTimer(); drRec()?.record("session_paused", {}, drCtx()); }}
+                onNext={isDr ? () => { void drStepNext(); } : () => { eng.step(); setEnded(eng.atEnd); bump(); }}
+                onReset={() => { const wasPlaying = playing; stopTimer(); setEnded(false); eng.reset(); drRec()?.record("session_reset", {}, drCtx()); bump(); if (wasPlaying) { setPlayNonce((n) => n + 1); setPlaying(true); } }}
+                onRestart={() => { stopTimer(); setEnded(false); eng.reset(); drRec()?.record("session_reset", {}, drCtx()); bump(); setPlayNonce((n) => n + 1); setPlaying(true); }}
                 speed={speed}
                 onSpeed={setSpeed}
                 index={eng.index}
-                total={candles.length}
-                progress={(eng.index + eng.formationProgress + 1) / Math.max(1, candles.length)}
+                total={isDr && drInfo ? drInfo.total : candles.length}
+                progress={(eng.index + eng.formationProgress + 1) / Math.max(1, isDr && drInfo ? drInfo.total : candles.length)}
               />
               <div className="ws-chart" style={{ position: "relative" }}>
                 {/* Timeframe selector — display only, never touches engine state.
@@ -977,7 +1893,7 @@ function ReplayPageInner() {
                   candles={chartCandles ?? eng.displayCandles}
                   revealedCount={(chartCandles ?? eng.displayCandles).length}
                   historyCount={meta.startIndex}
-                  sessionKey={`${meta.ticker}|${meta.tradeDate}|${meta.source}|${candles.length}|${timeframe}`}
+                  sessionKey={chartSessionKey}
                   overlays={{
                     hod: eng.hod,
                     stopLoss: eng.stopLoss,
@@ -992,14 +1908,14 @@ function ReplayPageInner() {
                   <LwcChart
                     candles={chartCandles ?? eng.displayCandles}
                     revealedCount={(chartCandles ?? eng.displayCandles).length}
-                    sessionKey={`${meta.ticker}|${meta.tradeDate}|${meta.source}|${candles.length}|${timeframe}`}
+                    sessionKey={chartSessionKey}
                     countdown={tfCountdown}
                     lastPrice={snap.price}
                     brackets={brackets}
-                    onPlannedDrag={(sl, tp) => { setPlannedLevels(sl, tp); }}
+                    onPlannedDrag={(sl, tp) => { setPlannedLevels(sl, tp); drBracketsChanged(sl, tp, "drag", "planned"); }}
                     onActiveDrag={(sl, tp) => {
                       const e = engineRef.current;
-                      if (e) { e.setBrackets(sl, tp); bump(); }
+                      if (e) { e.setBrackets(sl, tp); drBracketsChanged(sl, tp, "drag", "active"); bump(); }
                     }}
                     drawings={drawings}
                     onDrawingsChange={setDrawings}
@@ -1113,7 +2029,16 @@ function ReplayPageInner() {
                 onBuy={gateBuy}
                 onSell={sellErr}
                 onPlaceLimit={placeLimitErr}
-                onCancelOrder={(id) => { eng.cancelOrder(id); bump(); }}
+                onCancelOrder={(id) => {
+                  const o = eng.pendingOrders.find((x) => x.id === id);
+                  if (eng.cancelOrder(id) && o) {
+                    drRec()?.recordOrderCancelled(
+                      { orderId: id, side: o.side, qty: o.qty, limitPrice: o.limitPrice },
+                      drCtx()
+                    );
+                  }
+                  bump();
+                }}
                 onSetBrackets={(sl, tp) => {
                   const eng = engineRef.current;
                   if (!eng) return;
@@ -1123,9 +2048,11 @@ function ReplayPageInner() {
                   if (eng.positionQty > 0) {
                     // Position open: active brackets on the engine.
                     eng.setBrackets(nSL, nTP);
+                    drBracketsChanged(nSL, nTP, "control", "active");
                   } else {
                     // Flat: planned levels only (dashed, no engine effect).
                     setPlannedLevels(nSL, nTP);
+                    drBracketsChanged(nSL, nTP, "control", "planned");
                   }
                   bump();
                 }}
@@ -1146,13 +2073,21 @@ function ReplayPageInner() {
                 positionQty={eng.positionQty}
                 positionRealized={positionRealized}
                 unrealizedPnl={snap.unreal}
-                onPlannedChange={(sl, tp) => { setPlannedLevels(sl != null ? normalizePrice(sl) : null, tp != null ? normalizePrice(tp) : null); }}
+                onPlannedChange={(sl, tp) => {
+                  const nSL = sl != null ? normalizePrice(sl) : null;
+                  const nTP = tp != null ? normalizePrice(tp) : null;
+                  setPlannedLevels(nSL, nTP);
+                  drBracketsChanged(nSL, nTP, "control", "planned");
+                }}
                 onActiveChange={(sl, tp) => {
                   const e = engineRef.current;
-                  if (e) { e.setBrackets(sl != null ? normalizePrice(sl) : null, tp != null ? normalizePrice(tp) : null); bump(); }
+                  const nSL = sl != null ? normalizePrice(sl) : null;
+                  const nTP = tp != null ? normalizePrice(tp) : null;
+                  if (e) { e.setBrackets(nSL, nTP); drBracketsChanged(nSL, nTP, "control", "active"); bump(); }
                 }}
                 onApplyBrackets={(sl, tp) => {
                   setPlannedLevels(sl, tp);
+                  drBracketsChanged(sl, tp, "control", "planned");
                   bump();
                 }}
                 onBuySized={gateBuy}
@@ -1179,6 +2114,40 @@ function ReplayPageInner() {
             </aside>
           </div>
 
+          {/* Daily Replay — Decision Timeline (review) */}
+          {isDr && (
+            <details
+              open={drPhase === "done"}
+              style={{
+                marginTop: 10, padding: "8px 12px",
+                background: "rgba(255,255,255,0.02)",
+                border: "1px solid rgba(255,255,255,0.07)", borderRadius: 8,
+              }}
+            >
+              <summary style={{ cursor: "pointer", fontWeight: 700, fontSize: 13 }}>
+                Decision Timeline ({drEvents.length} events)
+                {drEventsMissingRef.current && (
+                  <span style={{ color: "var(--muted)", fontWeight: 400, fontSize: 12 }}>
+                    {" "}— on this device until Daily Replay storage is enabled
+                  </span>
+                )}
+              </summary>
+              <div style={{ marginTop: 8, maxHeight: 260, overflowY: "auto", fontSize: 12.5, lineHeight: 1.9 }}>
+                {drEvents.map((e) => (
+                  <div key={e.seq} style={{ display: "flex", gap: 8 }}>
+                    <span style={{ color: "var(--muted)", whiteSpace: "nowrap" }}>
+                      {formatDrClock(e.marketTs ?? e.wallTs)}
+                    </span>
+                    <span>{describeDrEvent(e)}</span>
+                  </div>
+                ))}
+                {drEvents.length === 0 && (
+                  <div className="hint">No events recorded yet.</div>
+                )}
+              </div>
+            </details>
+          )}
+
           {/* Guest daily limit modal */}
           {showGuestModal && (
             <GuestLimitModal
@@ -1194,7 +2163,7 @@ function ReplayPageInner() {
           {dataOpen && (
             <div className="ws-data-pop" role="dialog" aria-label="Data source">
               <button className="mini-x ws-data-x" onClick={() => setDataOpen(false)} title="Close">✕</button>
-              <DataSourcePanel candles={candles} meta={meta} onLoad={handleLoad} />
+              <DataSourcePanel candles={candles} meta={meta} onLoad={handleLoad} onPreview={handleDrPreview} />
             </div>
           )}
           {searchParams.get("diag") === "1" && eng && (
