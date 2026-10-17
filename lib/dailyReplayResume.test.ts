@@ -306,8 +306,8 @@ async function reconstructionTests() {
   check("recon: seq continues from the restored maximum", marker.seq === maxSeq + 1);
   check("recon: restored history untouched by the new event",
     recon.recorder.all.slice(0, events.length).every((e, i) => e.seq === events[i].seq && e.type === events[i].type));
-  check("recon: pending limit orders are NOT restored (documented limitation)",
-    e2.pendingOrders.length === 0 && eng.pendingOrders.length === 1);
+  check("recon: events alone restore no orders (no server order rows passed — daily_replay_orders is the authoritative source)",
+    e2.pendingOrders.length === 0 && eng.pendingOrders.length === 1 && recon.restoredOrders.length === 0);
 
   // The resumed engine keeps working over the feed's array.
   check("recon: engine continues stepping after resume", (() => { e2.step(); return e2.index > 40; })());
