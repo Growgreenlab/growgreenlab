@@ -305,10 +305,24 @@ export class DrEventRecorder {
   /* ---------------- orders & fills ---------------- */
 
   recordOrderSubmitted(
-    o: { orderType: "market" | "limit"; side: "buy" | "sell"; qty: number; requestedPrice?: number | null },
+    o: {
+      orderType: "market" | "limit";
+      side: "buy" | "sell";
+      qty: number;
+      requestedPrice?: number | null;
+      /** Persistent order id (daily_replay_orders uuid) for limit
+       *  orders; absent on events recorded before order persistence
+       *  existed — readers must tolerate its absence. */
+      orderUuid?: string;
+    },
     ctx: DrMarketCtx = {},
   ): void {
-    this.record("order_submitted", { ...o }, ctx);
+    const { orderUuid, ...rest } = o;
+    this.record(
+      "order_submitted",
+      { ...rest, ...(orderUuid ? { orderUuid } : {}) },
+      ctx,
+    );
   }
 
   recordOrderRejected(
@@ -319,14 +333,34 @@ export class DrEventRecorder {
   }
 
   recordLimitPlaced(
-    o: { side: "buy" | "sell"; qty: number; limitPrice: number },
+    o: {
+      side: "buy" | "sell";
+      qty: number;
+      limitPrice: number;
+      /** Persistent order id (daily_replay_orders uuid); absent on
+       *  events recorded before order persistence existed. */
+      orderUuid?: string;
+    },
     ctx: DrMarketCtx = {},
   ): void {
-    this.record("limit_placed", { ...o }, ctx);
+    const { orderUuid, ...rest } = o;
+    this.record(
+      "limit_placed",
+      { ...rest, ...(orderUuid ? { orderUuid } : {}) },
+      ctx,
+    );
   }
 
   recordOrderCancelled(
-    o: { orderId: number; side?: string; qty?: number; limitPrice?: number },
+    o: {
+      orderId: number;
+      side?: string;
+      qty?: number;
+      limitPrice?: number;
+      /** Persistent order id (daily_replay_orders uuid), when the
+       *  cancelled order was a persisted Daily Replay order. */
+      orderUuid?: string;
+    },
     ctx: DrMarketCtx = {},
   ): void {
     this.record("order_cancelled", { ...o }, ctx);
@@ -348,6 +382,10 @@ export class DrEventRecorder {
       time: number;
       note?: string | null;
       realizedPnl?: number;
+      /** Persistent order id when this fill executed a persisted
+       *  Daily Replay limit order (matched by the page's order
+       *  tracker); absent for market/bracket fills and older events. */
+      orderUuid?: string;
     },
   ): void {
     const ctx: DrMarketCtx = { marketIdx: f.candleIndex, marketTs: f.time };
@@ -364,6 +402,7 @@ export class DrEventRecorder {
         price: f.price,
         candleIndex: f.candleIndex,
         ...(f.note ? { note: f.note } : {}),
+        ...(f.orderUuid ? { orderUuid: f.orderUuid } : {}),
       },
       ctx,
     );
