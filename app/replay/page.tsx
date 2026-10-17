@@ -2099,6 +2099,8 @@ function ReplayPageInner() {
               lastPrice={drPreview.candles[drPreview.selected].c}
               brackets={DR_EMPTY_BRACKETS}
               fitOnLoad
+              fitAnchorIndex={drPreview.selected}
+              showFitAll
               highlightTimeSec={drPreviewBand?.timeSec ?? null}
               highlightSpanSec={drPreviewBand?.spanSec ?? 60}
               onCandleClick={(timeSec) => {
@@ -2531,6 +2533,7 @@ function ReplayPageInner() {
                     countdown={tfCountdown}
                     lastPrice={snap.price}
                     brackets={brackets}
+                    showFitAll={isDr}
                     highlightTimeSec={isDr ? (drActiveBand?.timeSec ?? null) : undefined}
                     highlightSpanSec={drActiveBand?.spanSec ?? 60}
                     onPlannedDrag={(sl, tp) => { setPlannedLevels(sl, tp); drBracketsChanged(sl, tp, "drag", "planned"); }}

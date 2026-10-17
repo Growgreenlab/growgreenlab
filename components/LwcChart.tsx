@@ -28,6 +28,11 @@ import {
 import type { CanvasRenderingTarget2D } from "fancy-canvas";
 import type { Candle } from "../lib/types";
 import { planBarPush, type BarPushState } from "../lib/chartPush";
+import {
+  CANDLE_SCALE_MARGINS,
+  VOLUME_SCALE_MARGINS,
+  readableWindow,
+} from "../lib/chartFit";
 import { resolveHighlightBar, type HighlightDisplayBar } from "../lib/dailyReplay";
 import { diag } from "../lib/diag";
 import { normalizePrice, formatPrice } from "../lib/price";
@@ -242,6 +247,21 @@ interface Props {
   referenceLevels?: ChartReferenceLevel[];
   /** If true, fit the time scale to content on initial data load (drills). */
   fitOnLoad?: boolean;
+  /** Optional (Daily Replay preview): index of the candle the initial
+   *  fit must keep visible — the selected starting candle. Passing it
+   *  opts into the narrow-screen readable window (lib/chartFit): when
+   *  a full fit would squeeze bars below readable spacing on a phone,
+   *  the initial view opens on a window containing this index
+   *  (session start when the index is the opening candle) instead of
+   *  the whole session at sub-pixel spacing. Omit = fitContent
+   *  exactly as before (drills, every existing parent). Read at
+   *  full-load time only; later selection changes never re-window. */
+  fitAnchorIndex?: number;
+  /** Optional (Daily Replay): render a "Fit all" pill, bottom-left
+   *  above the time axis, that fits the whole (revealed) dataset on
+   *  tap — the way back from the readable window or any zoom.
+   *  Omit = no control (drills, standard Trade Lab). */
+  showFitAll?: boolean;
   /** Optional: notified with the clicked candle's time (seconds) on chart
    *  click. Used by Daily Replay's full-day preview to pick the starting
    *  candle. Omit = no behavior (all existing parents). */
@@ -264,7 +284,7 @@ interface Props {
   onDrawingToolChange: (tool: DrawingTool) => void;
 }
 
-export default function LwcChart({ candles, revealedCount, sessionKey, countdown, lastPrice, brackets, referenceLevels, fitOnLoad, onCandleClick, highlightTimeSec, highlightSpanSec, onPlannedDrag, onActiveDrag, drawings, onDrawingsChange, drawingTool, onDrawingToolChange }: Props) {
+export default function LwcChart({ candles, revealedCount, sessionKey, countdown, lastPrice, brackets, referenceLevels, fitOnLoad, fitAnchorIndex, showFitAll, onCandleClick, highlightTimeSec, highlightSpanSec, onPlannedDrag, onActiveDrag, drawings, onDrawingsChange, drawingTool, onDrawingToolChange }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const elRef = useRef<HTMLDivElement>(null);
   const countdownRef = useRef<HTMLDivElement>(null);
@@ -287,6 +307,10 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
   // which runs once — a ref keeps inline parent closures safe).
   const onCandleClickRef = useRef(onCandleClick);
   onCandleClickRef.current = onCandleClick;
+  // Latest fit anchor (read inside the data-push effect at full-load
+  // time only — a ref keeps later selection changes from re-windowing).
+  const fitAnchorIndexRef = useRef(fitAnchorIndex);
+  fitAnchorIndexRef.current = fitAnchorIndex;
   // Drawing state.
   const [selectedDrawingId, setSelectedDrawingId] = useState<string | null>(null);
   const drawingsRef = useRef(drawings);
@@ -397,7 +421,14 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
         vertLines: { color: "rgba(255,255,255,0.04)" },
         horzLines: { color: "rgba(255,255,255,0.04)" },
       },
-      rightPriceScale: { borderColor: "rgba(255,255,255,0.08)" },
+      rightPriceScale: {
+        borderColor: "rgba(255,255,255,0.08)",
+        // Readability: the library default margins (0.2/0.2) squeeze the
+        // session's price range into the middle 60% of the pane. These
+        // margins (lib/chartFit) give it 78%, boundary-aligned with the
+        // volume strip below. Mapping stays linear and exact.
+        scaleMargins: CANDLE_SCALE_MARGINS,
+      },
       timeScale: {
         borderColor: "rgba(255,255,255,0.08)",
         timeVisible: true,
@@ -454,7 +485,7 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       priceScaleId: "",
       priceFormat: { type: "volume" },
     });
-    chart.priceScale("").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+    chart.priceScale("").applyOptions({ scaleMargins: VOLUME_SCALE_MARGINS });
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
     volumeSeriesRef.current = volumeSeries;
@@ -598,7 +629,27 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
         // For drills: fit the viewport to the revealed data so history
         // fills the chart instead of clustering on the right.
         if (fitOnLoad && chartRef.current) {
-          chartRef.current.timeScale().fitContent();
+          const ts = chartRef.current.timeScale();
+          ts.fitContent();
+          // Opt-in readable window (Daily Replay preview passes
+          // fitAnchorIndex): on a narrow screen, a full-session fit
+          // squeezes bars to sub-pixel spacing and hairline candles,
+          // so open instead on a readable window that contains the
+          // selected candle — the session start when the selection
+          // is the opening candle. The rest of the day is one pan
+          // away, and the "Fit all" pill restores the full view.
+          // Parents that don't pass an anchor (drills) and desktop
+          // widths keep the plain full fit above, untouched.
+          const anchor = fitAnchorIndexRef.current;
+          if (anchor != null) {
+            const win = readableWindow({
+              plotWidthPx: ts.width(),
+              barCount: n,
+              containerWidthPx: wrapRef.current?.clientWidth ?? 0,
+              anchorIndex: anchor,
+            });
+            if (win) ts.setVisibleLogicalRange(win);
+          }
         }
         pushedRef.current = plan.state;
       } else if (plan) {
@@ -1208,6 +1259,39 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
           }}
         >
           🗑 Delete
+        </button>
+      )}
+      {/* "Fit all" pill (opt-in, Daily Replay): bottom-left above the
+          time axis — clear of the drawing toolbar (top-left), the
+          countdown pill (right), and the attribution logo (axis row).
+          Returns from the readable window / any zoom to the full
+          (revealed) session. stopPropagation mirrors the floating
+          delete button so the tap never reaches chart pointer logic. */}
+      {showFitAll && (
+        <button
+          onPointerDown={(e) => e.stopPropagation()}
+          onPointerUp={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            chartRef.current?.timeScale().fitContent();
+          }}
+          title="Fit the whole session"
+          style={{
+            position: "absolute",
+            left: 8,
+            bottom: 30,
+            zIndex: 6,
+            background: "rgba(15,23,42,0.92)",
+            border: "1px solid rgba(255,255,255,0.14)",
+            borderRadius: 6,
+            padding: "4px 10px",
+            fontSize: 11,
+            color: "#e2e8f0",
+            cursor: "pointer",
+            whiteSpace: "nowrap",
+          }}
+        >
+          ⤢ Fit all
         </button>
       )}
       <div
