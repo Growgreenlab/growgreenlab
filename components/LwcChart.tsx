@@ -32,6 +32,7 @@ import {
   CANDLE_SCALE_MARGINS,
   VOLUME_SCALE_MARGINS,
   readableWindow,
+  initialActiveWindow,
   paddedPriceRange,
   expandPriceRange,
   priceRangesClose,
@@ -308,6 +309,29 @@ interface Props {
    *  click. Used by Daily Replay's full-day preview to pick the starting
    *  candle. Omit = no behavior (all existing parents). */
   onCandleClick?: (timeSec: number) => void;
+  /** Optional (Daily Replay preview): notified on every visible
+   *  logical-range change with the range and the bar spacing derived
+   *  from it (plot width / range span). The parent records the latest
+   *  spacing so the workspace chart that replaces this one at lock
+   *  time can preserve the user's candle size via `initialView`.
+   *  Omit = no subscription, no behavior (all other parents). */
+  onViewChange?: (view: { spacingPx: number; from: number; to: number }) => void;
+  /** Optional (Daily Replay workspace): the initial visible window
+   *  for this mount's first full data load under a new `viewKey`
+   *  (the attempt id). Without it, a fresh chart falls back to the
+   *  library default view — 6px/bar, right-anchored, extending into
+   *  whitespace before the first bar whenever the revealed prefix is
+   *  narrower than the plot — discarding the framing and candle size
+   *  the user had in the preview at lock time. With it, the first
+   *  full load opens on lib/chartFit's initialActiveWindow: the
+   *  preview's bar spacing preserved (floored at readable spacing),
+   *  the window ending at the forming candle (always the last pushed
+   *  bar for this parent) for deep locks and starting at the session
+   *  start for early ones. Applied at most once per viewKey, so
+   *  timeframe switches (same attempt, new session key) and later
+   *  full loads keep the user's own zoom. Omit = library default
+   *  exactly as before (drills, standard Trade Lab, DR resume). */
+  initialView?: { targetSpacingPx: number; viewKey: string };
   /** Optional: epoch-seconds timestamp of ONE candle to mark (Daily
    *  Replay's selected/locked starting candle): a faint emerald band
    *  behind its time slot plus a glowing emerald outline hugging the
@@ -326,7 +350,7 @@ interface Props {
   onDrawingToolChange: (tool: DrawingTool) => void;
 }
 
-export default function LwcChart({ candles, revealedCount, sessionKey, countdown, lastPrice, brackets, referenceLevels, fitOnLoad, fitAnchorIndex, showFitAll, stableScale, onCandleClick, highlightTimeSec, highlightSpanSec, onPlannedDrag, onActiveDrag, drawings, onDrawingsChange, drawingTool, onDrawingToolChange }: Props) {
+export default function LwcChart({ candles, revealedCount, sessionKey, countdown, lastPrice, brackets, referenceLevels, fitOnLoad, fitAnchorIndex, showFitAll, stableScale, onCandleClick, onViewChange, initialView, highlightTimeSec, highlightSpanSec, onPlannedDrag, onActiveDrag, drawings, onDrawingsChange, drawingTool, onDrawingToolChange }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const elRef = useRef<HTMLDivElement>(null);
   const countdownRef = useRef<HTMLDivElement>(null);
@@ -353,6 +377,17 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
   // time only — a ref keeps later selection changes from re-windowing).
   const fitAnchorIndexRef = useRef(fitAnchorIndex);
   fitAnchorIndexRef.current = fitAnchorIndex;
+  // Latest view-change callback (read inside the chart-creation
+  // effect's range subscription, which is installed once).
+  const onViewChangeRef = useRef(onViewChange);
+  onViewChangeRef.current = onViewChange;
+  // Latest initial-view request (Daily Replay workspace) + the viewKey
+  // it was last applied for: applied at most once per key, on a full
+  // data load, so later loads under the same attempt (timeframe
+  // switches) never reset the user's zoom.
+  const initialViewRef = useRef(initialView);
+  initialViewRef.current = initialView;
+  const initialViewAppliedKeyRef = useRef<string | null>(null);
   // Stable-scale (Daily Replay) state: read through refs inside the
   // data-push effect (which re-runs on every parent bump) so the
   // manager never depends on effect ordering or stale closures.
@@ -679,6 +714,25 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     };
     chart.subscribeClick(handleChartClick);
 
+    // Optional visible-range reporting (Daily Replay preview): the
+    // parent records the bar spacing so the workspace chart that
+    // replaces this one at lock time can preserve the candle size
+    // (see the initialView prop). Installed only when a parent
+    // actually passed a callback at creation — every other parent
+    // keeps literally zero added behavior.
+    const handleViewChange = (range: LogicalRange | null) => {
+      const cb = onViewChangeRef.current;
+      if (!cb || !range || !(range.to > range.from)) return;
+      const w = chart.timeScale().width();
+      if (w > 0) {
+        cb({ spacingPx: w / (range.to - range.from), from: range.from, to: range.to });
+      }
+    };
+    const viewSubscribed = onViewChangeRef.current != null;
+    if (viewSubscribed) {
+      chart.timeScale().subscribeVisibleLogicalRangeChange(handleViewChange);
+    }
+
     const ro = new ResizeObserver(() => {
       chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
       setChartSize({ w: el.clientWidth, h: el.clientHeight });
@@ -689,6 +743,9 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
       ro.disconnect();
       clearSettleTimers();
       chart.unsubscribeClick(handleChartClick);
+      if (viewSubscribed) {
+        chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleViewChange);
+      }
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
@@ -870,6 +927,33 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
               anchorIndex: anchor,
             });
             if (win) ts.setVisibleLogicalRange(win);
+          }
+        }
+        // Opt-in initial window (Daily Replay workspace): open on a
+        // window that preserves the bar spacing the user had in the
+        // preview at lock time instead of the library default view
+        // (6px/bar, right-anchored, extending into leading whitespace
+        // whenever the revealed prefix is narrower than the plot).
+        // Applied at most once per viewKey, so timeframe switches and
+        // later full loads under the same attempt never reset the
+        // user's own zoom. The anchor is the last pushed bar — for
+        // this parent always the forming candle.
+        const iv = initialViewRef.current;
+        if (
+          iv &&
+          iv.viewKey !== initialViewAppliedKeyRef.current &&
+          chartRef.current
+        ) {
+          const ts = chartRef.current.timeScale();
+          const win = initialActiveWindow({
+            plotWidthPx: ts.width(),
+            barCount: n,
+            anchorIndex: n - 1,
+            targetSpacingPx: iv.targetSpacingPx,
+          });
+          if (win) {
+            ts.setVisibleLogicalRange(win);
+            initialViewAppliedKeyRef.current = iv.viewKey;
           }
         }
         pushedRef.current = plan.state;

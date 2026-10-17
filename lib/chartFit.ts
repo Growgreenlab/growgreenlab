@@ -96,6 +96,76 @@ export function readableWindow(input: ReadableWindowInput): LogicalRange | null 
   return { from: start, to: start + count - 1 };
 }
 
+/* ---------- Initial active window (Daily Replay lock transition) ----------
+ * The preview -> active transition replaces the chart instance: the
+ * preview's framing (a full-day fitContent on desktop, ~2.7px/bar) is
+ * discarded and, without an explicit initial range, the fresh
+ * workspace chart falls back to the library default — 6px/bar,
+ * right-anchored, with the visible range extending into whitespace
+ * before the first bar whenever the revealed prefix is narrower than
+ * the plot (measured at lock #90, 1440px desktop: range [-58, 91] —
+ * 58 bars of void, candles in the right ~61% of the plot). The candle
+ * SIZE the user had at lock time is lost either way the default
+ * lands.
+ *
+ * The workspace therefore opens on an explicit window that PRESERVES
+ * the bar spacing the user had in the preview at lock time: the
+ * narrower container shows FEWER candles, not smaller ones. The
+ * window holds floor(plotWidth / spacing) bars, positioned like
+ * readableWindow's (a quarter-window of lead-in before the anchor,
+ * clamped to the data at both ends) around the anchor — the forming
+ * candle, always the last revealed bar — so a deep lock ends the
+ * window at the forming candle instead of squeezing hundreds of
+ * earlier bars in, and an early lock (fewer revealed bars than the
+ * window holds) shows the whole prefix from the session start with
+ * no leading void. The spacing target is floored at
+ * READABLE_WINDOW_TARGET_SPACING_PX: the workspace never opens below
+ * readable spacing, even if the user had zoomed the preview further
+ * out. When the revealed prefix is smaller than the window, the
+ * achieved spacing lands ABOVE the target — larger candles, never
+ * smaller ones; that is the only non-void layout in that corner. */
+
+export interface InitialActiveWindowInput {
+  /** Width of the plotting area (time-scale width, excl. price axis), px. */
+  plotWidthPx: number;
+  /** Number of bars pushed to the series (the revealed prefix). */
+  barCount: number;
+  /** Index the window must contain (the forming candle: barCount - 1). */
+  anchorIndex: number;
+  /** Bar spacing (px/bar) the user had in the preview at lock time. */
+  targetSpacingPx: number;
+}
+
+/**
+ * The workspace chart's initial visible logical range, or null when
+ * the inputs can't support one (the caller then leaves the library
+ * default standing — the pre-fix behavior). See the block comment
+ * above for the contract.
+ */
+export function initialActiveWindow(
+  input: InitialActiveWindowInput,
+): LogicalRange | null {
+  const { plotWidthPx, barCount } = input;
+  if (!Number.isFinite(barCount) || barCount <= 0) return null;
+  if (!Number.isFinite(plotWidthPx) || plotWidthPx <= 0) return null;
+  if (!Number.isFinite(input.targetSpacingPx)) return null;
+  const target = Math.max(
+    input.targetSpacingPx,
+    READABLE_WINDOW_TARGET_SPACING_PX,
+  );
+  const count = Math.floor(plotWidthPx / target);
+  if (count < 1) return null;
+  if (count >= barCount) return { from: 0, to: barCount - 1 };
+  const anchorRaw = input.anchorIndex;
+  const anchor = Number.isFinite(anchorRaw) ? Math.floor(anchorRaw) : barCount - 1;
+  const clampedAnchor = Math.min(Math.max(anchor, 0), barCount - 1);
+  const start = Math.min(
+    Math.max(clampedAnchor - Math.floor(count / 4), 0),
+    barCount - count,
+  );
+  return { from: start, to: start + count - 1 };
+}
+
 /* ---------- Managed price range (Daily Replay playback stability) ----------
  * During tick-by-tick playback, lightweight-charts' autoscale re-derives
  * the price range from the visible bars on EVERY update — including the
