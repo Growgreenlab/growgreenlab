@@ -8,6 +8,7 @@ import {
   VOLUME_SCALE_MARGINS,
   NARROW_CONTAINER_MAX_PX,
   readableWindow,
+  initialActiveWindow,
   paddedPriceRange,
   expandPriceRange,
   priceRangesClose,
@@ -221,6 +222,60 @@ function eqRange(
   // is the visible span / 0.78, not the session span / 0.78.
   check("refit padding derives from the visible range itself",
     quietWin !== null && Math.abs((quietWin.to - quietWin.from) - 3.5 / 0.78) < 1e-9);
+}
+
+/* ---------------- initial active window (DR lock transition) ---------------- */
+{
+  // Desktop lock #90 measured live: preview spacing 2.71px/bar at
+  // plot 1056; workspace plot 900 with 92 revealed bars. The window
+  // (332 bars at target) exceeds the prefix -> whole prefix, no void.
+  eqRange("initial window: prefix smaller than window -> whole prefix from 0",
+    initialActiveWindow({ plotWidthPx: 900, barCount: 92, anchorIndex: 91, targetSpacingPx: 2.71 }),
+    0, 91);
+  // Deep lock: 390 revealed, target 2.71 -> count 332, window ends
+  // exactly at the forming candle (no hundreds of earlier bars).
+  eqRange("initial window: deep data ends at the forming candle",
+    initialActiveWindow({ plotWidthPx: 900, barCount: 390, anchorIndex: 389, targetSpacingPx: 2.71 }),
+    58, 389);
+  // Achieved spacing within 10% of the target when data is plentiful.
+  const deep = initialActiveWindow({ plotWidthPx: 900, barCount: 390, anchorIndex: 389, targetSpacingPx: 2.71 });
+  check("initial window: achieved spacing within 10% of preview spacing",
+    deep !== null && Math.abs(900 / (deep.to - deep.from) - 2.71) / 2.71 < 0.1);
+  // The user zoomed the preview IN (6px/bar): window shrinks to
+  // floor(900/6)=150 bars ending at the forming candle.
+  eqRange("initial window: preserves a zoomed-in preview spacing",
+    initialActiveWindow({ plotWidthPx: 900, barCount: 390, anchorIndex: 389, targetSpacingPx: 6 }),
+    240, 389);
+  // The user zoomed the preview far OUT (1px/bar): the readable floor
+  // wins — count uses 2.2px/bar (409 bars at plot 900), which covers
+  // this dataset, so the whole prefix shows instead of a 1px squeeze.
+  eqRange("initial window: target below the readable floor is floored",
+    initialActiveWindow({ plotWidthPx: 900, barCount: 390, anchorIndex: 389, targetSpacingPx: 1 }),
+    0, 389);
+  const floored = initialActiveWindow({ plotWidthPx: 900, barCount: 1000, anchorIndex: 999, targetSpacingPx: 1 });
+  check("initial window: floored window holds floor(plot/2.2) bars",
+    floored !== null && floored.to - floored.from + 1 === Math.floor(900 / 2.2) && floored.to === 999);
+  // Mid-data anchor: quarter-window lead-in before the anchor.
+  eqRange("initial window: mid anchor gets a quarter-window lead-in",
+    initialActiveWindow({ plotWidthPx: 900, barCount: 390, anchorIndex: 200, targetSpacingPx: 6 }),
+    200 - Math.floor(150 / 4), 200 - Math.floor(150 / 4) + 149);
+  // Early lock: session start preserved.
+  eqRange("initial window: early lock keeps the session start",
+    initialActiveWindow({ plotWidthPx: 900, barCount: 27, anchorIndex: 26, targetSpacingPx: 2.71 }),
+    0, 26);
+  // Anchor always contained; window never exceeds the data.
+  const w = initialActiveWindow({ plotWidthPx: 332, barCount: 92, anchorIndex: 91, targetSpacingPx: 2.2 });
+  check("initial window: mobile-width window contains the forming candle",
+    w !== null && w.from <= 91 && w.to >= 91 && w.from >= 0 && w.to <= 91);
+  // Invalid inputs -> null (caller leaves the library default).
+  check("initial window: null on empty data",
+    initialActiveWindow({ plotWidthPx: 900, barCount: 0, anchorIndex: 0, targetSpacingPx: 3 }) === null);
+  check("initial window: null on zero plot width",
+    initialActiveWindow({ plotWidthPx: 0, barCount: 92, anchorIndex: 91, targetSpacingPx: 3 }) === null);
+  check("initial window: null on non-finite target",
+    initialActiveWindow({ plotWidthPx: 900, barCount: 92, anchorIndex: 91, targetSpacingPx: NaN }) === null);
+  check("initial window: single bar dataset",
+    (() => { const r = initialActiveWindow({ plotWidthPx: 900, barCount: 1, anchorIndex: 0, targetSpacingPx: 3 }); return r !== null && r.from === 0 && r.to === 0; })());
 }
 
 console.log(`\n=== CHART FIT RESULT: ${passed} passed, ${failed} failed ===`);

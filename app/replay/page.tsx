@@ -358,6 +358,16 @@ function ReplayPageInner() {
   const [drFinal, setDrFinal] = useState<{ realized: number; equity: number } | null>(null);
   const [drSaveMsg, setDrSaveMsg] = useState<string | null>(null);
   const drFeedRef = useRef<SealedCandleFeed | null>(null);
+  /* Preview -> workspace framing handoff: the preview chart reports
+   * its visible range (and the bar spacing derived from it) on every
+   * change; at lock-confirm time the latest spacing is captured into
+   * drInitialViewRef, keyed by attempt id, and passed to the
+   * workspace chart as its initialView — so the active chart opens
+   * with the candle size the user had in the preview instead of the
+   * library default view. Resume never sets it: a resumed attempt
+   * keeps the library-default initial view, as before. */
+  const drPreviewViewRef = useRef<{ spacingPx: number; from: number; to: number } | null>(null);
+  const drInitialViewRef = useRef<{ targetSpacingPx: number; viewKey: string } | null>(null);
   const drAdvancingRef = useRef(false);
   const drCompletedRef = useRef(false);
   const drOnErrorRef = useRef<(e: unknown) => void>(() => {});
@@ -691,6 +701,15 @@ function ReplayPageInner() {
       // 4) Drop every page-held reference to the full preview array.
       //    From here on, the only candles in memory are the feed's.
       drFeedRef.current = feed;
+      // Framing handoff: capture the bar spacing the user had in the
+      // preview at this moment (continuously reported via
+      // onViewChange); the workspace chart's initialView preserves
+      // it. A missing capture degrades to the readable-spacing floor
+      // inside lib/chartFit's initialActiveWindow.
+      drInitialViewRef.current = {
+        targetSpacingPx: drPreviewViewRef.current?.spacingPx ?? 0,
+        viewKey: info.attemptId,
+      };
       setDrInfo(info);
       setDrPreview(null);
       setDrConfirm(false);
@@ -783,6 +802,7 @@ function ReplayPageInner() {
     // for a later resume — only the local tracking is dropped.
     drOrderTrackerRef.current = null;
     drFeedRef.current = null;
+    drInitialViewRef.current = null;
     drCompletedRef.current = false;
     setDrEvents([]);
     setDrHistoryNote(null);
@@ -808,6 +828,9 @@ function ReplayPageInner() {
   const resumeDailyReplay = useCallback(async () => {
     const offer = drResume;
     if (!offer || drResuming) return;
+    // Resume keeps the library-default initial view (no preview was
+    // involved) — make sure no earlier attempt's framing leaks in.
+    drInitialViewRef.current = null;
     setDrResuming(true);
     setDrError(null);
     try {
@@ -2133,6 +2156,7 @@ function ReplayPageInner() {
               brackets={DR_EMPTY_BRACKETS}
               fitOnLoad
               fitAnchorIndex={drPreview.selected}
+              onViewChange={(v) => { drPreviewViewRef.current = v; }}
               showFitAll
               highlightTimeSec={drPreviewBand?.timeSec ?? null}
               highlightSpanSec={drPreviewBand?.spanSec ?? 60}
@@ -2568,6 +2592,14 @@ function ReplayPageInner() {
                     brackets={brackets}
                     showFitAll={isDr}
                     stableScale={isDr}
+                    initialView={
+                      isDr && drInitialViewRef.current
+                        ? {
+                            targetSpacingPx: drInitialViewRef.current.targetSpacingPx,
+                            viewKey: drInitialViewRef.current.viewKey,
+                          }
+                        : undefined
+                    }
                     highlightTimeSec={isDr ? (drActiveBand?.timeSec ?? null) : undefined}
                     highlightSpanSec={drActiveBand?.spanSec ?? 60}
                     onPlannedDrag={(sl, tp) => { setPlannedLevels(sl, tp); drBracketsChanged(sl, tp, "drag", "planned"); }}
