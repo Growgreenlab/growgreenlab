@@ -463,8 +463,11 @@ table.ledger tbody tr:last-child td { border-bottom: none; }
   margin-left: -20px;
   margin-right: -20px;
   max-width: 100vw;
-  height: calc(100dvh - 60px); /* viewport minus sticky site header */
-  min-height: 600px;
+  /* A floor, not a cap: the workspace is at least the viewport under
+     the sticky header (66px), but GROWS — the page scrolls — rather
+     than compressing the chart when the stacked chrome (DR banner,
+     sections) needs more room than a short laptop viewport offers. */
+  min-height: calc(100dvh - 66px);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -489,6 +492,22 @@ body.ws-active .footer { display: none; }
 .ws-quote .price-now { font-size: 20px; }
 .ws-top-actions { display: flex; align-items: center; gap: 8px; }
 
+/* Daily Replay session banner — exactly ONE line at laptop widths:
+   the fact spans ellipsize inside their flexible strip; the title and
+   the action buttons never shrink, wrap, or clip. */
+.dr-banner {
+  display: flex; flex-wrap: nowrap; align-items: center; gap: 10px;
+  padding: 6px 10px; margin-bottom: 8px;
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.35); border-radius: 8px;
+  font-size: 12.5px;
+  overflow: hidden;
+}
+.dr-banner-title { flex: 0 0 auto; white-space: nowrap; color: var(--emerald-bright); letter-spacing: 0.04em; }
+.dr-banner-facts { flex: 1 1 auto; min-width: 0; display: flex; gap: 10px; align-items: center; overflow: hidden; }
+.dr-banner-facts > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.dr-banner .btn { flex: 0 0 auto; padding: 6px 12px; font-size: 12.5px; }
+
 /* main grid */
 .ws-main {
   flex: 1 1 auto; min-height: 0;
@@ -512,7 +531,9 @@ body.ws-active .footer { display: none; }
 
 /* chart */
 .ws-chart {
-  flex: 1 1 auto; min-height: 0; min-width: 0;
+  /* 430px floor: the chart is the last thing that shrinks. On short
+     viewports the workspace grows past the fold instead (see .ws). */
+  flex: 1 1 auto; min-height: 430px; min-width: 0;
   position: relative;
   isolation: isolate; /* contain chart rendering */
   background: var(--bg2);
@@ -623,6 +644,7 @@ body.ws-active .footer { display: none; }
   .ws-top { flex-wrap: wrap; row-gap: 8px; }
 }
 @media (max-width: 640px) {
+  .dr-banner { flex-wrap: wrap; } /* small phones: old wrapping behavior beats a zero-width facts strip */
   .pnl-cell { flex: 1 1 45%; }
   .ws-top-actions { width: 100%; justify-content: flex-end; }
 }

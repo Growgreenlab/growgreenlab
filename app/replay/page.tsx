@@ -3242,40 +3242,33 @@ function ReplayPageInner() {
         <>
           {/* Daily Replay status banner */}
           {isDr && drInfo && (
-            <div
-              style={{
-                display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center",
-                padding: "8px 12px", marginBottom: 8,
-                background: "rgba(16,185,129,0.08)",
-                border: "1px solid rgba(16,185,129,0.35)", borderRadius: 8,
-                fontSize: 12.5,
-              }}
-            >
-              <b style={{ color: "var(--emerald-bright)", letterSpacing: "0.04em" }}>
+            <div className="dr-banner">
+              <b className="dr-banner-title">
                 {drPhase === "done" ? "DAILY REPLAY COMPLETE" : "DAILY REPLAY ACTIVE"}
               </b>
-              <span>
-                {drInfo.ticker} · {drInfo.tradeDate} · started{" "}
-                {formatEtTime(eng.candles[drInfo.startIndex]?.t ?? 0)} ET
-              </span>
-              <span title="The strategy version this attempt was locked under">
-                Strategy: <b>{drInfo.strategyLabel ?? "None recorded"}</b>
-              </span>
-              <span>
-                Candle {Math.min(eng.index + 1, drInfo.total)} of {drInfo.total}
-                {eng.candles[eng.index] ? ` · ${formatEtTime(eng.candles[eng.index].t)} ET` : ""}
-              </span>
-              <span title="Daily Replay uses its own $100,000 account — the Trade Lab balance is not touched">
-                DR balance: cash {formatMoney(snap.cash)} · equity {formatMoney(snap.equity)}
-              </span>
-              {drBuffering && <span style={{ color: "#fbbf24" }}>Loading next candles…</span>}
-              {drFeedRef.current?.lastError && (
-                <span style={{ color: "#fbbf24" }}>{drFeedRef.current.lastError}</span>
-              )}
+              <div className="dr-banner-facts">
+                <span>
+                  {drInfo.ticker} · {drInfo.tradeDate} · started{" "}
+                  {formatEtTime(eng.candles[drInfo.startIndex]?.t ?? 0)} ET
+                </span>
+                <span title="The strategy version this attempt was locked under">
+                  Strategy: <b>{drInfo.strategyLabel ?? "None recorded"}</b>
+                </span>
+                <span>
+                  Candle {Math.min(eng.index + 1, drInfo.total)} of {drInfo.total}
+                  {eng.candles[eng.index] ? ` · ${formatEtTime(eng.candles[eng.index].t)} ET` : ""}
+                </span>
+                <span title="Daily Replay uses its own $100,000 account — the Trade Lab balance is not touched">
+                  DR balance: cash {formatMoney(snap.cash)} · equity {formatMoney(snap.equity)}
+                </span>
+                {drBuffering && <span style={{ color: "#fbbf24" }}>Loading next candles…</span>}
+                {drFeedRef.current?.lastError && (
+                  <span style={{ color: "#fbbf24" }}>{drFeedRef.current.lastError}</span>
+                )}
+              </div>
               {drPhase === "active" && (
                 <button
                   className="btn primary"
-                  style={{ marginLeft: "auto" }}
                   onClick={() => setDrCompleteConfirm(true)}
                   disabled={drBuffering}
                   title="End this session at the current candle and save its closed trades to your journal now"
@@ -3283,11 +3276,7 @@ function ReplayPageInner() {
                   Complete session now
                 </button>
               )}
-              <button
-                className="btn"
-                style={drPhase === "active" ? undefined : { marginLeft: "auto" }}
-                onClick={exitDailyReplay}
-              >
+              <button className="btn" onClick={exitDailyReplay}>
                 Exit Daily Replay
               </button>
             </div>
