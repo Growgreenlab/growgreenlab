@@ -35,6 +35,7 @@ import {
   STRATEGY_PRESETS,
   classificationOptionsFor,
   effectiveClassification,
+  familyOfClassificationSlug,
   findMaterializedStrategy,
   isClassificationFamily,
   resolveStrategyFamily,
@@ -171,7 +172,11 @@ export default function StrategyTradedField(props: {
   const { strategies, versions, value, onChange } = props;
   const [needsSelection, setNeedsSelection] = useState(false);
 
-  /** The family the classification vocabulary follows right now. */
+  /** The family the classification vocabulary follows right now.
+   *  With a strategy selected, ITS family governs. With none
+   *  selected, the vocabulary follows the recorded classification
+   *  itself (a legacy HOD classification keeps its HOD options, so
+   *  it displays as-is until the trader picks a strategy). */
   const family: ClassificationFamily = useMemo(() => {
     if (value.mode === "existing") {
       return familyOfStrategy(strategies.find((s) => s.id === value.strategyId) ?? null, versions);
@@ -180,8 +185,8 @@ export default function StrategyTradedField(props: {
       return STRATEGY_PRESETS.find((p) => p.slug === value.presetSlug)?.family ?? "generic";
     }
     if (value.mode === "new") return value.customFamily;
-    return "generic";
-  }, [value.mode, value.strategyId, value.presetSlug, value.customFamily, strategies, versions]);
+    return familyOfClassificationSlug(value.setupClass) ?? "generic";
+  }, [value.mode, value.strategyId, value.presetSlug, value.customFamily, value.setupClass, strategies, versions]);
 
   const options = useMemo(() => classificationOptionsFor(family), [family]);
   /** Presets not yet materialized as registry rows (same guard the

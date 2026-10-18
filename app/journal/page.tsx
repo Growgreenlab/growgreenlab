@@ -2198,11 +2198,17 @@ function ReviewTab({ tradeKey, simTrade, realTrade, meta, onSaved, onEditReal, o
       if (annotationAvailable && tsValue) {
         // Strategy annotation (lit mode only): persist by stable ID;
         // hod_class is not written by the new flow (see DrDraftReview).
-        payload.strategy_id = await resolveTradedStrategyId(supabase, user.id, tsValue, strategies ?? [], strategyVersions ?? []);
+        const resolvedId = await resolveTradedStrategyId(supabase, user.id, tsValue, strategies ?? [], strategyVersions ?? []);
+        payload.strategy_id = resolvedId;
         payload.setup_class = tsValue.setupClass;
         payload.strategy_custom_label = tsValue.customLabel;
         payload.entry_trigger = tsValue.entryTrigger;
         delete payload.hod_class;
+        // Point the form at the materialized row so a second save
+        // short-circuits on the existing ID (idempotent).
+        if (resolvedId && tsValue.mode !== "existing") {
+          setTsValue({ ...tsValue, mode: "existing", strategyId: resolvedId, presetSlug: null, customName: "" });
+        }
       }
       const { error } = await supabase.from("journal_trade_meta").upsert(payload, { onConflict: "user_id,trade_key" });
       if (error) throw new Error(error.message);

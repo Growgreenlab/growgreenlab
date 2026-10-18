@@ -478,11 +478,18 @@ export default function DrDraftReview(props: {
         // then persist by stable ID. hod_class is NOT written by the
         // new flow — the recorded slug supersedes it at read time
         // via the coalesce, and the legacy value stays untouched.
-        payload.strategy_id = await resolveTradedStrategyId(client, user.id, tsValue, strategies, strategyVersions);
+        const resolvedId = await resolveTradedStrategyId(client, user.id, tsValue, strategies, strategyVersions);
+        payload.strategy_id = resolvedId;
         payload.setup_class = tsValue.setupClass;
         payload.strategy_custom_label = tsValue.customLabel;
         payload.entry_trigger = tsValue.entryTrigger;
         delete payload.hod_class;
+        // Point the form at the materialized row: a second save then
+        // short-circuits on the existing ID instead of re-running
+        // the materialization guard against a stale strategy list.
+        if (resolvedId && tsValue.mode !== "existing") {
+          setTsValue({ ...tsValue, mode: "existing", strategyId: resolvedId, presetSlug: null, customName: "" });
+        }
       }
       const { error } = await client
         .from("journal_trade_meta")
