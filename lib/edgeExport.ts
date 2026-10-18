@@ -221,6 +221,54 @@ export function todayLocalStr(now = new Date()): string {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 }
 
+/** A full export selection (period + source) in the panel's own
+ *  state shape, derived from the journal page's current filters. */
+export interface JournalScopedSelection {
+  mode: ExportPeriodMode;
+  anchorDate: string;
+  customStart: string;
+  customEnd: string;
+  source: ExportSource;
+}
+
+/**
+ * Map the journal page's current source filter + period preset to
+ * the export panel's selection, so the Analytics tab's export counts
+ * describe the SAME eligible set the user is looking at (2026-10-18
+ * consistency fix: the panel previously defaulted to All sources /
+ * current month regardless of the page's Daily Replay filter, so
+ * Analytics appeared to count 11 closed trades while the journal
+ * showed the 1 finalized trade in scope). The resolved range equals
+ * the page filter's range under each preset's own semantics:
+ * today = today; week = the Sunday-start week (the page's Week);
+ * month = the calendar month; 30d / 90d / ytd = start..today;
+ * all = unbounded, represented by an epoch floor start.
+ * The user can still re-scope the panel afterwards; the page
+ * re-syncs it whenever the page filters change.
+ */
+export function exportSelectionFromJournal(
+  sourceFilter: string,
+  period: string,
+  today: string,
+): JournalScopedSelection {
+  const source: ExportSource =
+    sourceFilter === "real" ? "real"
+    : sourceFilter === "simulator" ? "simulator"
+    : sourceFilter === "daily_replay" ? "daily_replay"
+    : "all";
+  const base = { anchorDate: today, customStart: today, customEnd: today, source };
+  switch (period) {
+    case "today": return { ...base, mode: "daily" };
+    case "week": return { ...base, mode: "weekly" };
+    case "month": return { ...base, mode: "monthly" };
+    case "30d": return { ...base, mode: "custom", customStart: addDays(today, -30) };
+    case "90d": return { ...base, mode: "custom", customStart: addDays(today, -90) };
+    case "ytd": return { ...base, mode: "custom", customStart: `${today.slice(0, 4)}-01-01` };
+    case "all":
+    default: return { ...base, mode: "custom", customStart: "1970-01-01" };
+  }
+}
+
 /**
  * Resolve a period selection to an inclusive date range.
  * - daily:   the anchor date itself.

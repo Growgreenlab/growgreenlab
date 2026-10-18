@@ -1344,7 +1344,7 @@ export default function JournalPage() {
       {tab === "trades" && <TradesTab trades={filtered} metas={metas} onSelect={(k) => openDrawer(k)} onSelectShots={(k) => openDrawer(k, true)} onRealTradeSaved={handleRealTradeSaved} showRealForm={showRealForm} setShowRealForm={setShowRealForm} showImport={showImport} setShowImport={setShowImport} editingReal={editingReal} onEditReal={startEditReal} onDeleteReal={startDeleteReal} onCancelEdit={cancelEdit} />}
       {tab === "review" && <ReviewTab tradeKey={selectedKey} simTrade={!isRealSelected ? (selected as GroupedTrade | null) : null} realTrade={isRealSelected ? (selected as RealTrade | null) : null} meta={selectedMeta} onSaved={load} onEditReal={startEditReal} onDeleteReal={startDeleteReal} drInfo={selectedDrInfo} drDraftKey={selectedKey ? (draftForTrade(selectedKey, unified.find((t) => t.key === selectedKey)?.attemptId ?? null)?.draftKey ?? null) : null} drAutoCapture={selectedKey ? (draftForTrade(selectedKey, unified.find((t) => t.key === selectedKey)?.attemptId ?? null)?.autoCapture ?? null) : null} />}
       {tab === "calendar" && <CalendarTab trades={closedFiltered} metas={metas} selectedDay={selectedCalDay} onSelectDay={setSelectedCalDay} onSelectTrade={(k) => openDrawer(k)} />}
-      {tab === "analytics" && <AnalyticsTab trades={analyticsTrades} onSelect={(k) => openDrawer(k)} exportInput={{
+      {tab === "analytics" && <AnalyticsTab trades={analyticsTrades} onSelect={(k) => openDrawer(k)} pageSource={sourceFilter} pagePeriod={period} exportInput={{
         unified, metas, realTrades, simTrades: [...trades, ...drData.preTrades],
         drAttempts: drData.attemptsExport,
         drEvidence: drData.evidenceByKey,
@@ -3147,7 +3147,7 @@ function InsightCard({ title, insight }: { title: string; insight: Insight }) {
   );
 }
 
-function AnalyticsTab({ trades, onSelect, exportInput }: { trades: AnalyticsTrade[]; onSelect: (k: string) => void; exportInput?: ExportSnapshotInput }) {
+function AnalyticsTab({ trades, onSelect, exportInput, pageSource, pagePeriod }: { trades: AnalyticsTrade[]; onSelect: (k: string) => void; exportInput?: ExportSnapshotInput; pageSource?: string; pagePeriod?: string }) {
   const [dim, setDim] = useState<BreakdownDimension>("setup");
   const [expanded, setExpanded] = useState<string | null>(null);
   // Breakdown-table scroll affordance: show a right-edge fade while more
@@ -3166,7 +3166,7 @@ function AnalyticsTab({ trades, onSelect, exportInput }: { trades: AnalyticsTrad
   if (trades.length === 0) {
     return (
       <div style={{ display: "grid", gap: 20 }}>
-        {exportInput && <EdgeExportPanel input={exportInput} />}
+        {exportInput && <EdgeExportPanel input={exportInput} pageSource={pageSource} pagePeriod={pagePeriod} />}
         <div className="card" style={{ padding: 32, textAlign: "center" }}>
           <p className="hint" style={{ margin: 0 }}>No data — analytics need closed trades in the current filter selection. Adjust the source/period filters above, or log and close some trades first.</p>
         </div>
@@ -3191,7 +3191,7 @@ function AnalyticsTab({ trades, onSelect, exportInput }: { trades: AnalyticsTrad
 
   return (
     <div style={{ display: "grid", gap: 20 }}>
-      {exportInput && <EdgeExportPanel input={exportInput} />}
+      {exportInput && <EdgeExportPanel input={exportInput} pageSource={pageSource} pagePeriod={pagePeriod} />}
       {/* ---- Risk & Consistency ---- */}
       <section style={{ minWidth: 0 }}>
         <h3 style={{ margin: "0 0 10px" }}>Risk &amp; Consistency</h3>

@@ -17,7 +17,7 @@ import { mapStrategyRow, mapStrategyVersionRow } from "./strategies";
 import {
   buildAnalyticsJson, buildChatGptPrompt, buildDecisionTimelineCsv, buildExportSnapshot, buildReadme,
   buildScreenshotManifest, buildStrategyJson, buildTradesCsv, computeDrExportHints, CSV_COLUMNS,
-  cumulativePnlSeries, exportIdForTradeKey, resolveExportRange, summarizeScreenshotCoverage,
+  cumulativePnlSeries, exportIdForTradeKey, exportSelectionFromJournal, resolveExportRange, summarizeScreenshotCoverage,
   tradeLevelDrawdownSeries, ROUNDING_NOTE,
   type ExportDrAttemptInput, type ExportDrEventInput, type ExportMetaInput,
   type ExportRealTradeInput, type ExportSnapshotInput, type ExportUnifiedInput,
@@ -75,6 +75,38 @@ function parseCsv(text: string): string[][] {
   threw = false;
   try { resolveExportRange({ mode: "daily", anchorDate: "2026-02-30" }); } catch { threw = true; }
   check("impossible date throws", threw);
+}
+
+/* ============ journal-scope -> export selection mapping ============
+ * Regression for the 2026-10-18 Analytics divergence: the export
+ * panel defaulted to All sources / current month while the journal
+ * was filtered to Daily Replay, so Analytics counted every closed
+ * trade in the month (11) while the journal showed the 1 eligible
+ * trade in scope. The mapped selection must resolve to exactly the
+ * page filter's range for every preset. Today = Sunday 2026-10-18. */
+{
+  const T = "2026-10-18";
+  const rng = (sf: string, p: string) => resolveExportRange(exportSelectionFromJournal(sf, p, T));
+  check("scope source mapping (all/simulator/real/daily_replay)",
+    exportSelectionFromJournal("all", "all", T).source === "all"
+    && exportSelectionFromJournal("simulator", "all", T).source === "simulator"
+    && exportSelectionFromJournal("real", "all", T).source === "real"
+    && exportSelectionFromJournal("daily_replay", "all", T).source === "daily_replay");
+  const t = rng("daily_replay", "today");
+  check("scope today -> [today, today]", t.start === "2026-10-18" && t.end === "2026-10-18");
+  const w = rng("all", "week");
+  check("scope week -> Sunday..Saturday of this week", w.start === "2026-10-18" && w.end === "2026-10-24");
+  const m = rng("all", "month");
+  check("scope month -> calendar month", m.start === "2026-10-01" && m.end === "2026-10-31");
+  const d30 = rng("all", "30d");
+  check("scope 30d -> [today-30, today]", d30.start === "2026-09-18" && d30.end === "2026-10-18");
+  const d90 = rng("all", "90d");
+  check("scope 90d -> [today-90, today]", d90.start === "2026-07-20" && d90.end === "2026-10-18");
+  const y = rng("all", "ytd");
+  check("scope ytd -> [Jan 1, today]", y.start === "2026-01-01" && y.end === "2026-10-18");
+  const a = rng("daily_replay", "all");
+  check("scope all -> [epoch floor, today] (unbounded past)", a.start === "1970-01-01" && a.end === "2026-10-18");
+  check("scope unknown period falls back to all", exportSelectionFromJournal("all", "bogus", T).mode === "custom");
 }
 
 /* ================= stable IDs ================= */

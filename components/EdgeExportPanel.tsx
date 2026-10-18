@@ -13,7 +13,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createClient, isSupabaseConfigured } from "../lib/supabaseClient";
 import {
-  buildExportSnapshot, computeDrExportHints, formatRangeText, resolveExportRange, sourceLabel, todayLocalStr,
+  buildExportSnapshot, computeDrExportHints, exportSelectionFromJournal, formatRangeText, resolveExportRange, sourceLabel, todayLocalStr,
   type ExportPeriodMode, type ExportSnapshot, type ExportSnapshotInput, type ExportSource,
 } from "../lib/edgeExport";
 
@@ -22,16 +22,44 @@ import { resolveRepresentative } from "../lib/drRepresentative";
 
 const MAX_AUTO_SCREENSHOT_TRADES = 60;
 
-export default function EdgeExportPanel({ input }: { input: ExportSnapshotInput }) {
+export default function EdgeExportPanel({ input, pageSource, pagePeriod }: {
+  input: ExportSnapshotInput;
+  /** The journal page's current source filter + period preset. The
+   *  panel's selection INITIALIZES from them and RE-SYNCS whenever
+   *  they change, so the counts shown in Analytics always describe
+   *  the same eligible set + scope as the journal the user is
+   *  looking at (2026-10-18 consistency fix). The user can still
+   *  re-scope the panel freely afterwards. */
+  pageSource?: string;
+  pagePeriod?: string;
+}) {
   const today = useMemo(() => todayLocalStr(), []);
-  const [mode, setMode] = useState<ExportPeriodMode>("monthly");
-  const [anchor, setAnchor] = useState(today);
+  const journalScope = useMemo(
+    () => (pageSource !== undefined && pagePeriod !== undefined
+      ? exportSelectionFromJournal(pageSource, pagePeriod, today)
+      : null),
+    [pageSource, pagePeriod, today],
+  );
+  const [mode, setMode] = useState<ExportPeriodMode>(() => journalScope?.mode ?? "monthly");
+  const [anchor, setAnchor] = useState(() => journalScope?.anchorDate ?? today);
   const [customStart, setCustomStart] = useState(() => {
+    if (journalScope) return journalScope.customStart;
     const d = new Date(); d.setDate(d.getDate() - 30);
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   });
-  const [customEnd, setCustomEnd] = useState(today);
-  const [source, setSource] = useState<ExportSource>("all");
+  const [customEnd, setCustomEnd] = useState(() => journalScope?.customEnd ?? today);
+  const [source, setSource] = useState<ExportSource>(() => journalScope?.source ?? "all");
+  // Re-sync when the journal's filters change (the memo above only
+  // recomputes then, so this never fights the user's own panel
+  // adjustments between page-filter changes).
+  useEffect(() => {
+    if (!journalScope) return;
+    setMode(journalScope.mode);
+    setAnchor(journalScope.anchorDate);
+    setCustomStart(journalScope.customStart);
+    setCustomEnd(journalScope.customEnd);
+    setSource(journalScope.source);
+  }, [journalScope]);
   const [includeScreenshots, setIncludeScreenshots] = useState(true);
   const [includePdf, setIncludePdf] = useState(true);
   // Daily Replay narrowing (export-panel-only, per the approved design):
