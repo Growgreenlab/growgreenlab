@@ -171,6 +171,10 @@ create table if not exists public.journal_trade_meta (
   trade_key text not null,
   setup_tag text,
   hod_class text check (hod_class in ('clean', 'weak', 'failed', 'anticipation')),
+  strategy_id uuid, -- FK to public.strategies(id) is added by supabase/migrations/journal-strategy-annotation-v1.sql
+  setup_class text,
+  strategy_custom_label text,
+  entry_trigger text,
   exec_grade text check (exec_grade in ('A', 'B', 'C', 'D')),
   entry_reasoning text,
   exit_reasoning text,
