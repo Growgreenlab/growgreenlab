@@ -1457,7 +1457,7 @@ export default function JournalPage() {
       {tab === "trades" && <TradesTab trades={filtered} metas={metas} onSelect={(k) => openDrawer(k)} onSelectShots={(k) => openDrawer(k, true)} onRealTradeSaved={handleRealTradeSaved} showRealForm={showRealForm} setShowRealForm={setShowRealForm} showImport={showImport} setShowImport={setShowImport} editingReal={editingReal} onEditReal={startEditReal} onDeleteReal={startDeleteReal} onCancelEdit={cancelEdit} strategies={drData.strategies} strategyVersions={drData.strategyVersions} annotationAvailable={annotationAvailable} />}
       {tab === "review" && <ReviewTab tradeKey={selectedKey} simTrade={!isRealSelected ? (selected as GroupedTrade | null) : null} realTrade={isRealSelected ? (selected as RealTrade | null) : null} meta={selectedMeta} onSaved={load} onEditReal={startEditReal} onDeleteReal={startDeleteReal} drInfo={selectedDrInfo} drDraftKey={selectedKey ? (draftForTrade(selectedKey, unified.find((t) => t.key === selectedKey)?.attemptId ?? null)?.draftKey ?? null) : null} drAutoCapture={selectedKey ? (draftForTrade(selectedKey, unified.find((t) => t.key === selectedKey)?.attemptId ?? null)?.autoCapture ?? null) : null} strategies={drData.strategies} strategyVersions={drData.strategyVersions} annotationAvailable={annotationAvailable} boundStrategyId={selectedKey ? (unified.find((t) => t.key === selectedKey)?.strategyId ?? null) : null} />}
       {tab === "calendar" && <CalendarTab trades={closedFiltered} metas={metas} selectedDay={selectedCalDay} onSelectDay={setSelectedCalDay} onSelectTrade={(k) => openDrawer(k)} />}
-      {tab === "analytics" && <AnalyticsTab trades={analyticsTrades} onSelect={(k) => openDrawer(k)} pageSource={sourceFilter} pagePeriod={period} exportInput={{
+      {tab === "analytics" && <AnalyticsTab trades={analyticsTrades} onSelect={(k) => openDrawer(k)} pageSource={sourceFilter} pagePeriod={period} annotationAvailable={annotationAvailable} exportInput={{
         unified, metas, realTrades, simTrades: [...trades, ...drData.preTrades],
         drAttempts: drData.attemptsExport,
         drEvidence: drData.evidenceByKey,
@@ -3339,7 +3339,7 @@ function InsightCard({ title, insight }: { title: string; insight: Insight }) {
   );
 }
 
-function AnalyticsTab({ trades, onSelect, exportInput, pageSource, pagePeriod }: { trades: AnalyticsTrade[]; onSelect: (k: string) => void; exportInput?: ExportSnapshotInput; pageSource?: string; pagePeriod?: string }) {
+function AnalyticsTab({ trades, onSelect, exportInput, pageSource, pagePeriod, annotationAvailable }: { trades: AnalyticsTrade[]; onSelect: (k: string) => void; exportInput?: ExportSnapshotInput; pageSource?: string; pagePeriod?: string; annotationAvailable?: boolean }) {
   const [dim, setDim] = useState<BreakdownDimension>("setup");
   const [expanded, setExpanded] = useState<string | null>(null);
   // Breakdown-table scroll affordance: show a right-edge fade while more
@@ -3355,6 +3355,10 @@ function AnalyticsTab({ trades, onSelect, exportInput, pageSource, pagePeriod }:
   // journal's analyticsTrades), grouped by the recorded "Strategy
   // traded" annotation with the attempt binding as fallback.
   const strategyRows = useMemo(() => breakdown(trades, "strategyTraded"), [trades]);
+  // Dark until the annotation migration lands: the new dimensions
+  // stay out of the breakdown picker and the Strategy Performance
+  // section does not render, so this tab is unchanged pre-migration.
+  const dimOptions = annotationAvailable ? DIMENSION_OPTIONS : DIMENSION_OPTIONS.filter((o) => o.key !== "strategyTraded" && o.key !== "setupClass" && o.key !== "execGrade");
   const days = useMemo(() => dailyPnl(trades), [trades]);
 
   useEffect(() => { updateBdMore(); window.addEventListener("resize", updateBdMore); return () => window.removeEventListener("resize", updateBdMore); }, [rows, dim, trades]);
@@ -3443,7 +3447,7 @@ function AnalyticsTab({ trades, onSelect, exportInput, pageSource, pagePeriod }:
         <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
           <h3 style={{ margin: 0 }}>Performance Breakdowns</h3>
           <select className="input" style={{ width: "auto" }} value={dim} onChange={(e) => { setDim(e.target.value as BreakdownDimension); setExpanded(null); }}>
-            {DIMENSION_OPTIONS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+            {dimOptions.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
           </select>
           <span className="hint" style={{ marginLeft: "auto", fontSize: 11.5 }}>Scroll the table sideways for Avg R, Expectancy, Profit Factor →</span>
         </div>
@@ -3452,7 +3456,7 @@ function AnalyticsTab({ trades, onSelect, exportInput, pageSource, pagePeriod }:
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
             <thead>
               <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)", textAlign: "left" }}>
-                {[DIMENSION_OPTIONS.find((o) => o.key === dim)?.label ?? "Bucket", "Trades", "Win %", "Net P&L", "Avg Win", "Avg Loss", "Avg R", "Expectancy", "Profit Factor", "Avg Hold"].map((h, i) => (
+                {[dimOptions.find((o) => o.key === dim)?.label ?? "Bucket", "Trades", "Win %", "Net P&L", "Avg Win", "Avg Loss", "Avg R", "Expectancy", "Profit Factor", "Avg Hold"].map((h, i) => (
                   <th key={h} style={{ padding: "10px 12px", color: "var(--muted)", fontWeight: 600, fontSize: 11, textTransform: "uppercase", whiteSpace: "nowrap", ...(i === 0 ? { position: "sticky" as const, left: 0, background: "var(--bg2)", zIndex: 2, boxShadow: "1px 0 0 rgba(255,255,255,0.08)" } : {}) }}>{h}</th>
                 ))}
               </tr>
@@ -3508,7 +3512,8 @@ function AnalyticsTab({ trades, onSelect, exportInput, pageSource, pagePeriod }:
         <p className="hint" style={{ margin: "8px 0 0" }}>Win % here excludes breakeven trades from the denominator. Net P&L for single-value breakdowns sums exactly to the Overview total for the same filters.</p>
       </section>
 
-      {/* ---- Strategy Performance ---- */}
+      {/* ---- Strategy Performance (dark until the annotation migration) ---- */}
+      {annotationAvailable && (
       <section style={{ minWidth: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
           <h3 style={{ margin: 0 }}>Strategy Performance</h3>
@@ -3547,6 +3552,7 @@ function AnalyticsTab({ trades, onSelect, exportInput, pageSource, pagePeriod }:
         </div>
         <p className="hint" style={{ margin: "8px 0 0" }}>Rows under 5 trades are marked “small sample”: a high win rate — or a few winners — on a handful of trades does not make a strategy profitable or validated. Judge a strategy on expectancy, profit factor, drawdown and sample size together.</p>
       </section>
+      )}
 
       {/* ---- Edge Finder ---- */}
       <section style={{ minWidth: 0 }}>
