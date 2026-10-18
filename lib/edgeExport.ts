@@ -38,6 +38,7 @@ import { resolveRepresentative, type RepresentativeSource } from "./drRepresenta
 import {
   strategyVersionLabel, type Strategy, type StrategyVersion,
 } from "./strategies";
+import { effectiveClassification } from "./strategyClassification";
 
 /**
  * Export schema version. 2.0 (Daily Replay Strategy & AI Edge Export):
@@ -47,6 +48,12 @@ import {
  * decision_timeline.csv and strategy.json are new files, present only
  * when Daily Replay trades are in the selection. A 1.0 consumer
  * reading a 2.0 package sees the same fields it always did.
+ *
+ * Still 2.0 (2026-10-18, strategy annotation): trades.csv appends
+ * strategy_traded_id / strategy_traded / setup_class /
+ * setup_class_label after the Daily Replay columns; analytics.json
+ * breakdowns gain strategyTraded / setupClass / execGrade and every
+ * breakdown row gains avgRSampleCount + maxDrawdownUSD. All additive.
  */
 export const EDGE_EXPORT_SCHEMA_VERSION = "2.0";
 
@@ -89,6 +96,13 @@ export interface ExportMetaInput {
   original_stop_loss: number | null;
   original_target: number | null;
   plan_history: PlanChange[] | null;
+  /* Strategy annotation (migration journal-strategy-annotation-v1,
+   * prepared only). Absent pre-migration — every consumer treats
+   * undefined exactly like null ("not recorded"). */
+  strategy_id?: string | null;
+  setup_class?: string | null;
+  strategy_custom_label?: string | null;
+  entry_trigger?: string | null;
 }
 
 export interface ExportRealTradeInput {
@@ -390,6 +404,18 @@ export interface ExportTradeRecord {
   /* Trade DNA annotations (meta), nulls when never recorded */
   hodClass: string | null;
   execGrade: string | null;
+  /** Recorded "Strategy traded" annotation (stable registry ID +
+   *  resolved name); null when never recorded — distinct from the
+   *  Daily Replay attempt binding below, never derived from it. */
+  strategyTradedId: string | null;
+  strategyTradedName: string | null;
+  /** Recorded classification slug (meta.setup_class). */
+  setupClass: string | null;
+  /** Effective classification label: the recorded slug's label,
+   *  else the legacy hod_class label via the read coalesce. */
+  setupClassLabel: string | null;
+  strategyCustomLabel: string | null;
+  entryTrigger: string | null;
   followedPlan: boolean | null;
   confidence: number | null;
   emotionalTags: string[];
@@ -464,10 +490,24 @@ export interface ExportSnapshot {
   warnings: string[];
 }
 
-function metaFields(meta: ExportMetaInput | undefined) {
+function metaFields(meta: ExportMetaInput | undefined, strategyById?: Map<string, Strategy>) {
+  const effClass = effectiveClassification({
+    setup_class: meta?.setup_class ?? null,
+    hod_class: meta?.hod_class ?? null,
+  });
   return {
     hodClass: meta?.hod_class ?? null,
     execGrade: meta?.exec_grade ?? null,
+    /* Strategy annotation: the recorded strategy (by stable ID,
+     * name resolved from the registry), the recorded classification
+     * slug, and its effective display label (recorded slug, else the
+     * legacy hod_class coalesce — read-only, never backfilled). */
+    strategyTradedId: meta?.strategy_id ?? null,
+    strategyTradedName: meta?.strategy_id ? (strategyById?.get(meta.strategy_id)?.name ?? null) : null,
+    setupClass: meta?.setup_class ?? null,
+    setupClassLabel: effClass?.label ?? null,
+    strategyCustomLabel: meta?.strategy_custom_label ?? null,
+    entryTrigger: meta?.entry_trigger ?? null,
     followedPlan: meta?.followed_plan ?? null,
     confidence: meta?.confidence ?? null,
     emotionalTags: meta?.emotional_tags ?? [],
@@ -538,7 +578,7 @@ export function buildExportSnapshot(
 
   for (const t of selected) {
     const meta = input.metas[t.key];
-    const mf = metaFields(meta);
+    const mf = metaFields(meta, strategyById);
     let rec: ExportTradeRecord;
     let initialRisk: number | null = null;
     let stopForAnalytics: number | null = null;
@@ -692,6 +732,10 @@ export function buildExportSnapshot(
         strategyVersionId: rec.strategyVersionId,
         strategyName: rec.strategyName,
         strategyVersionLabel: rec.strategyLabel,
+        tradedStrategyId: rec.strategyTradedId,
+        tradedStrategyName: rec.strategyTradedName,
+        setupClass: rec.setupClass,
+        execGrade: rec.execGrade,
       });
     }
   }
@@ -1183,6 +1227,11 @@ export const CSV_COLUMNS = [
   // Schema 2.0 appends — the original 46 columns above keep their
   // order and meaning; these four are Daily Replay linkage.
   "daily_replay_attempt_id", "strategy_name", "strategy_version", "strategy_version_id",
+  // Strategy annotation appends (2026-10-18, still schema 2.0): the
+  // per-trade "Strategy traded" annotation recorded in Trade Review —
+  // stable ID, registry name, recorded classification slug and its
+  // effective label. Appended only; nothing above moved.
+  "strategy_traded_id", "strategy_traded", "setup_class", "setup_class_label",
 ] as const;
 
 /** CSV number: fixed decimals, trailing zeros trimmed; null → "". */
@@ -1284,6 +1333,10 @@ export function buildTradesCsv(snapshot: ExportSnapshot, manifest: ScreenshotMan
       rec.strategyName ?? rec.strategy ?? "",
       rec.strategyVersion != null ? String(rec.strategyVersion) : "",
       rec.strategyVersionId ?? "",
+      rec.strategyTradedId ?? "",
+      rec.strategyTradedName ?? "",
+      rec.setupClass ?? "",
+      rec.setupClassLabel ?? "",
     ];
     rows.push(cells.map(csvEscape).join(","));
   }
@@ -1461,6 +1514,10 @@ const ALL_DIMENSIONS: BreakdownDimension[] = [
   "setup", "hodClass", "symbol", "mistake", "emotion", "plan",
   "source", "session", "timeOfDay", "hold", "side", "keyLevel", "interaction",
   "strategy", "strategyVersion",
+  // Strategy annotation dimensions (2026-10-18, additive): the
+  // recorded "Strategy traded", the effective setup classification,
+  // and the execution grade.
+  "strategyTraded", "setupClass", "execGrade",
 ];
 
 function breakdownForJson(trades: AnalyticsTrade[], dim: BreakdownDimension) {
@@ -1477,6 +1534,10 @@ function breakdownForJson(trades: AnalyticsTrade[], dim: BreakdownDimension) {
     avgWin: r.avgWin,
     avgLoss: r.avgLoss,
     avgR: r.avgR,
+    // Additive (2026-10-18): how many trades the avgR rests on, and
+    // the group's own peak-to-trough drawdown.
+    avgRSampleCount: r.avgRSampleCount,
+    maxDrawdownUSD: r.maxDrawdownUSD,
     expectancy: r.expectancy,
     profitFactor: r.profitFactor,
     avgHoldMinutes: r.avgHoldMinutes,
@@ -1668,7 +1729,7 @@ export function buildAnalyticsJson(
         ] : []),
       ],
       metricsIncluded: [
-        "overall performance", "breakdowns (setup, HOD class, symbol, mistake, emotion, plan, source, session, time of day, hold time, side, key level, interaction, strategy, strategy version)",
+        "overall performance", "breakdowns (setup, HOD class, symbol, mistake, emotion, plan, source, session, time of day, hold time, side, key level, interaction, strategy, strategy version, strategy traded, setup classification, execution grade)",
         "risk metrics (drawdown, streaks, R distribution, average risk)", "daily P&L", "performance by day of week",
         "entry/exit and partial-exit summary", "Edge Finder (edgeInsights)", "per-source subtotals when All Trades is selected",
         ...(snapshot.dailyReplay ? ["Daily Replay block (attempts, bound strategies, per-attempt results)"] : []),
@@ -1736,6 +1797,11 @@ export function buildAnalyticsJson(
       source: r.source === "real" ? "Real Market" : r.isDailyReplay ? "Daily Replay / Backtest" : "Simulator",
       tradeDate: r.tradeDate,
       status: r.status,
+      // Additive (2026-10-18): the recorded strategy annotation.
+      strategyTradedId: r.strategyTradedId,
+      strategyTraded: r.strategyTradedName,
+      setupClass: r.setupClass,
+      setupClassLabel: r.setupClassLabel,
       screenshots: manifest.filter((e) => e.tradeId === r.exportId && e.status === "included").map((e) => e.fileName),
     })),
   };
@@ -1919,6 +1985,10 @@ const CSV_COLUMN_DOCS: [string, string][] = [
   ["strategy_name", "Schema 2.0: name of the strategy the trade's attempt was bound to at lock time. For real trades this is the trade's recorded strategy text. Empty when no strategy was recorded."],
   ["strategy_version", "Schema 2.0: the immutable strategy VERSION number the attempt was bound to (e.g. 2 means version 2). Empty when the attempt recorded no strategy version."],
   ["strategy_version_id", "Schema 2.0: stable ID of that strategy version - joins to strategy.json. Empty when no version was bound."],
+  ["strategy_traded_id", "The stable ID of the strategy the trader recorded for THIS trade in Trade Review (\"Strategy traded\"). A review-time annotation on any source, distinct from the attempt binding above. Empty when not recorded - never backfilled."],
+  ["strategy_traded", "Name of that recorded strategy, resolved from the journal's strategy registry. Empty when not recorded."],
+  ["setup_class", "The recorded setup classification slug for the strategy traded (strategy-family vocabulary, e.g. clean_breakout, strong_support_reaction). Empty when no classification was recorded."],
+  ["setup_class_label", "Display label of the trade's effective setup classification: the recorded setup_class label, or - for trades classified before setup_class existed - the legacy HOD classification label. Empty when neither was recorded."],
 ];
 
 export function buildReadme(
@@ -1969,6 +2039,7 @@ export function buildReadme(
     "- decision_timeline.csv and strategy.json are new files, present only when Daily Replay trades are in the selection.",
     "- Daily Replay trades can now carry screenshots (journal-attached, like real trades) and recorded original plans (from the risk snapshot at entry). Trade Lab simulator trades are unchanged: no screenshots, no original plan, R unavailable.",
     "- Representative screenshots (additive within schema 2.0): each Daily Replay trade contributes ONE representative screenshot — its recorded entry-time capture, or one the trader explicitly selected — identified in screenshots-manifest.json by role, representativeSource, candleIndex and candleTime. The trade's other screenshots stay in the journal and are listed in the manifest as not-included. chart_context.csv (when present) carries the trade's stored OHLCV sectioned at the entry candle: entry_context (candles completed before the entry), entry_candle_final (the entry candle's final OHLCV, finalized after the fill) and post_entry_development (candles while the position was open).",
+    "- Strategy annotation (additive within schema 2.0): trades.csv appends strategy_traded_id, strategy_traded, setup_class and setup_class_label — the strategy and setup classification the trader recorded per trade in Trade Review, distinct from the attempt-bound strategy above. analytics.json breakdowns gain three dimensions (strategyTraded, setupClass, execGrade) and every breakdown row gains avgRSampleCount and maxDrawdownUSD. Trades recorded before the feature existed honestly export these empty — no strategy is ever backfilled.",
     ...(hasDr ? [
       "",
       "DAILY REPLAY IN THIS PACKAGE",
@@ -1985,7 +2056,7 @@ export function buildReadme(
     ...CSV_COLUMN_DOCS.map(([c, d]) => `- ${c}: ${d}`),
     "",
     "ANALYTICS.JSON - SCHEMA AND METRIC DEFINITIONS",
-    "Top-level sections: metadata (selection, counts, definitions, missing-data summary, screenshot manifest, Edge Finder configuration), overall, perSource (only when All Trades is selected), dailyReplay (per-attempt results; unavailable flag when no Daily Replay trades are selected), breakdowns (15 dimensions), dailyPnl, performanceByDayOfWeek, entryExit, riskPsychology, edgeFinder, simulator, tradesIndex.",
+    "Top-level sections: metadata (selection, counts, definitions, missing-data summary, screenshot manifest, Edge Finder configuration), overall, perSource (only when All Trades is selected), dailyReplay (per-attempt results; unavailable flag when no Daily Replay trades are selected), breakdowns (18 dimensions), dailyPnl, performanceByDayOfWeek, entryExit, riskPsychology, edgeFinder, simulator, tradesIndex.",
     "All metrics are computed by the same functions the journal Analytics tab uses (lib/journalAnalytics.ts + lib/journal.ts), on the same trade set, so the export and the UI agree.",
     ...Object.entries(METRIC_DEFINITIONS).map(([k, v]) => `- ${k}: ${v}`),
     "Non-finite values: JSON cannot represent unbounded numbers. An unbounded metric (e.g. profit factor with winners and no losers) is serialized as null with a sibling \"<metric>Unbounded\": true flag.",

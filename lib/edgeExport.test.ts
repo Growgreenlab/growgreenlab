@@ -277,7 +277,7 @@ const RANGE = { start: "2026-10-01", end: "2026-10-31" };
   check("json perSource present for All", doc.perSource?.mixedSource === true);
   approx("json perSource real net = -7", doc.perSource.real.netRealizedPnl, -7);
   approx("json perSource sim net = 50", doc.perSource.simulator.netRealizedPnl, 50);
-  check("json breakdowns has 15 dims", Object.keys(doc.breakdowns).length === 15);
+  check("json breakdowns has 18 dims", Object.keys(doc.breakdowns).length === 18);
   const setupRows = doc.breakdowns.setup as any[];
   const hodRow = setupRows.find((r) => r.label === "HOD breakout");
   check("json setup breakdown sums to closed count", setupRows.reduce((s, r) => s + r.count, 0) === 4 && !!hodRow);
@@ -588,17 +588,70 @@ const RANGE = { start: "2026-10-01", end: "2026-10-31" };
   const byAttempt = buildExportSnapshot(drInput, { range: range2, mode: "custom", source: "all", attemptId: ATT2 });
   check("2.0 attempt filter: only ATT2's trade", byAttempt.counts.total === 1 && byAttempt.trades[0].attemptId === ATT2);
 
-  /* --- CSV: 51 columns, original 47 keep order --- */
-  check("2.0 CSV has 50 columns", CSV_COLUMNS.length === 50);
-  check("2.0 CSV appended columns", CSV_COLUMNS.slice(46).join("|") === "daily_replay_attempt_id|strategy_name|strategy_version|strategy_version_id");
+  /* --- CSV: original 46 keep order; 2.0 appends follow --- */
+  check("2.0 CSV has 54 columns", CSV_COLUMNS.length === 54);
+  check("2.0 CSV appended columns", CSV_COLUMNS.slice(46, 50).join("|") === "daily_replay_attempt_id|strategy_name|strategy_version|strategy_version_id");
+  check("annotation CSV appends come last", CSV_COLUMNS.slice(50).join("|") === "strategy_traded_id|strategy_traded|setup_class|setup_class_label");
   const manifest0 = buildScreenshotManifest(drOnly, new Map());
   const csvRows = parseCsv(buildTradesCsv(drOnly, manifest0));
-  check("2.0 CSV header arity 50", csvRows[0].length === 50);
+  check("2.0 CSV header arity 54", csvRows[0].length === 54);
   const cIdx = (n: string) => csvRows[0].indexOf(n);
   const drRow = csvRows.find((r) => r[cIdx("daily_replay_attempt_id")] === ATT1)!;
   check("2.0 CSV DR source cell", drRow[cIdx("source")] === "Daily Replay / Backtest");
   check("2.0 CSV DR strategy cells", drRow[cIdx("strategy_name")] === "HOD Breakout" && drRow[cIdx("strategy_version")] === "2" && drRow[cIdx("strategy_version_id")] === VER2);
   check("2.0 CSV DR original stop exported", drRow[cIdx("original_stop_loss")] === "9.5" && drRow[cIdx("r_multiple")] === "2");
+
+  /* --- strategy annotation (2026-10-18): additive, never backfilled --- */
+  const STRAT_SUP = "strat-sup";
+  const supStrategy = mapStrategyRow({ id: STRAT_SUP, user_id: "u", name: "Support Bounce", notes: null, archived_at: null, created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-01T00:00:00Z", classification_family: "support" });
+  const annMeta: ExportMetaInput = {
+    ...r1Meta,
+    strategy_id: STRAT_SUP, setup_class: "strong_support_reaction",
+    strategy_custom_label: null, entry_trigger: "Reversal candle at support",
+  };
+  const annInput: ExportSnapshotInput = {
+    unified: [realUnified(r1)], metas: { [`real:${R1_ID}`]: annMeta },
+    realTrades: [r1], simTrades: [], strategies: [supStrategy], strategyVersions: [],
+  };
+  const annSnap = buildExportSnapshot(annInput, { range: RANGE, mode: "custom", source: "all" });
+  const annRec = annSnap.trades[0];
+  check("annotation: record carries ID + resolved name + slug + label",
+    annRec.strategyTradedId === STRAT_SUP && annRec.strategyTradedName === "Support Bounce"
+    && annRec.setupClass === "strong_support_reaction" && annRec.setupClassLabel === "Strong Support Reaction"
+    && annRec.entryTrigger === "Reversal candle at support");
+  check("annotation: analytics trade carries the annotation",
+    annSnap.analyticsTrades[0].tradedStrategyId === STRAT_SUP && annSnap.analyticsTrades[0].tradedStrategyName === "Support Bounce"
+    && annSnap.analyticsTrades[0].setupClass === "strong_support_reaction" && annSnap.analyticsTrades[0].execGrade === "B");
+  const annCsv = parseCsv(buildTradesCsv(annSnap, buildScreenshotManifest(annSnap, new Map())));
+  const aIdx = (n: string) => annCsv[0].indexOf(n);
+  const annRow = annCsv[1];
+  check("annotation: CSV cells carry ID/name/slug/label",
+    annRow[aIdx("strategy_traded_id")] === STRAT_SUP && annRow[aIdx("strategy_traded")] === "Support Bounce"
+    && annRow[aIdx("setup_class")] === "strong_support_reaction" && annRow[aIdx("setup_class_label")] === "Strong Support Reaction");
+  check("annotation: CSV binding columns untouched (real trade has none)",
+    annRow[aIdx("strategy_name")] === "" && annRow[aIdx("strategy_version_id")] === "");
+  const annDoc = buildAnalyticsJson(annSnap, [], summarizeScreenshotCoverage(annSnap, [], false)) as any;
+  check("annotation: analytics.json strategyTraded breakdown groups by annotation",
+    annDoc.breakdowns.strategyTraded.some((r: any) => r.label === "Support Bounce" && r.count === 1));
+  check("annotation: analytics.json setupClass breakdown uses the effective label",
+    annDoc.breakdowns.setupClass.some((r: any) => r.label === "Strong Support Reaction" && r.count === 1));
+  check("annotation: breakdown rows expose R sample count + drawdown",
+    annDoc.breakdowns.strategyTraded.every((r: any) => typeof r.avgRSampleCount === "number" && typeof r.maxDrawdownUSD === "number"));
+  check("annotation: tradesIndex carries the annotation",
+    annDoc.tradesIndex[0].strategyTradedId === STRAT_SUP && annDoc.tradesIndex[0].setupClassLabel === "Strong Support Reaction");
+  // Backward compatibility: the SAME trade without annotation fields
+  // exports the new cells empty — except setup_class_label, which
+  // honestly reflects the legacy hod_class via the read coalesce.
+  const baseSnap = buildExportSnapshot(
+    { unified: [realUnified(r1)], metas: { [`real:${R1_ID}`]: r1Meta }, realTrades: [r1], simTrades: [] },
+    { range: RANGE, mode: "custom", source: "all" },
+  );
+  const baseCsv = parseCsv(buildTradesCsv(baseSnap, buildScreenshotManifest(baseSnap, new Map())));
+  const bIdx = (n: string) => baseCsv[0].indexOf(n);
+  check("annotation: unannotated trade exports empty ID/name/slug",
+    baseCsv[1][bIdx("strategy_traded_id")] === "" && baseCsv[1][bIdx("strategy_traded")] === "" && baseCsv[1][bIdx("setup_class")] === "");
+  check("annotation: legacy hod_class still labels via coalesce (no data invented)",
+    baseCsv[1][bIdx("setup_class_label")] === "Clean Breakout" && baseSnap.trades[0].strategyTradedId === null);
 
   /* --- screenshots: DR eligible, Trade Lab excluded --- */
   const listed = new Map([[drGrouped[0].tradeKey, ["u/dr/shot1.png"]], [s1Grouped[0].tradeKey, ["u/tl/shot.png"]]]);
