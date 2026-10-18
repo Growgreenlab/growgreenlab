@@ -23,6 +23,12 @@ import { formatSigned } from "../../lib/engine";
 import { representativeSourceLabel, resolveRepresentative } from "../../lib/drRepresentative";
 import DrDraftReview from "../../components/DrDraftReview";
 import DrFinalizeConfirm from "../../components/DrFinalizeConfirm";
+import { probeStrategyAnnotationSupport } from "../../lib/strategyClassification";
+import StrategyTradedField, {
+  resolveTradedStrategyId,
+  tradedValueFromMeta,
+  type TradedStrategyValue,
+} from "../../components/StrategyTradedField";
 
 type Tab = "overview" | "trades" | "review" | "calendar" | "analytics";
 type Period = "today" | "week" | "month" | "30d" | "90d" | "ytd" | "all";
@@ -46,6 +52,14 @@ interface TradeMeta {
   original_stop_loss: number | null;
   original_target: number | null;
   plan_history: PlanChange[] | null;
+  /* Strategy annotation (migration journal-strategy-annotation-v1,
+   * prepared only — the columns are ABSENT until it is applied, so
+   * these stay undefined in dark mode and every annotation surface
+   * self-disables via the probe). */
+  strategy_id?: string | null;
+  setup_class?: string | null;
+  strategy_custom_label?: string | null;
+  entry_trigger?: string | null;
 }
 
 interface RealTrade {
@@ -190,6 +204,12 @@ export default function JournalPage() {
     evidenceByKey: new Map(), evidenceByAttempt: new Map(), eventsByAttempt: new Map(), attemptsExport: [],
     preTrades: [], withheldFinalized: [], undisplayedFinalized: [], tickerByAttempt: new Map(),
   });
+  /* Strategy annotation availability (migration
+   * journal-strategy-annotation-v1, prepared only): probed on every
+   * load. False = the columns do not exist on this database yet and
+   * every annotation surface stays dark — the journal behaves
+   * exactly as it did before the feature. */
+  const [annotationAvailable, setAnnotationAvailable] = useState(false);
   // Daily Replay per-cycle trade drafts (Phase D): the durable draft
   // rows for ALL of the user's attempts (linked and unlinked), plus the
   // per-attempt session_reset counts derived from the loaded events.
@@ -350,6 +370,12 @@ export default function JournalPage() {
             strategyVersions = (vRes.data ?? []).map((r: any) => mapStrategyVersionRow(r));
           }
         } catch { /* strategies migration not applied yet */ }
+        // Annotation columns probe (independent of the strategies
+        // fetch above — the annotation migration is separate). The
+        // cast bridges the probe's minimal structural type and the
+        // Supabase client's thenable query builder.
+        try { setAnnotationAvailable(await probeStrategyAnnotationSupport(supabase as unknown as Parameters<typeof probeStrategyAnnotationSupport>[0])); }
+        catch { setAnnotationAvailable(false); }
 
         const linked = attempts.filter((a) => a.sessionId && sessionById.has(a.sessionId));
         // Pre-completion candidates (2026-10-18 workflow fix):
@@ -796,13 +822,20 @@ export default function JournalPage() {
         if (t.source !== "simulator" || isDailyReplayTrade(t)) return false;
       } else if (sourceFilter !== "all" && t.source !== sourceFilter) return false;
       if (strategyFilter) {
+        // A trade matches a strategy when EITHER its Daily Replay
+        // attempt binding OR its recorded "Strategy traded"
+        // annotation references it — the annotation deliberately
+        // widens the filter (audit §3.3.7), so hand-classified
+        // trades appear under their strategy even when the attempt
+        // ran unbound. "none" means neither is recorded.
+        const annotatedId = metaForTrade(t.key, t.attemptId)?.strategy_id ?? null;
         if (strategyFilter === "none") {
-          if (t.strategyVersionId != null) return false;
+          if (t.strategyVersionId != null || annotatedId != null) return false;
         } else if (strategyFilter.startsWith("version:")) {
           if (t.strategyVersionId !== strategyFilter.slice("version:".length)) return false;
         } else {
           const version = drData.strategyVersions.find((v) => v.id === t.strategyVersionId);
-          if (!version || version.strategyId !== strategyFilter) return false;
+          if (annotatedId !== strategyFilter && (!version || version.strategyId !== strategyFilter)) return false;
         }
       }
       if (startStr && t.tradeDate < startStr) return false;
@@ -875,6 +908,15 @@ export default function JournalPage() {
         strategyVersionId: t.strategyVersionId,
         strategyName: t.strategyName,
         strategyVersionLabel: t.strategyLabel,
+        // Strategy annotation (per-trade, review-time): the name is
+        // resolved from the same registry; nulls in dark mode / when
+        // nothing was recorded — never backfilled from the binding.
+        tradedStrategyId: meta?.strategy_id ?? null,
+        tradedStrategyName: meta?.strategy_id
+          ? (drData.strategies.find((s) => s.id === meta.strategy_id)?.name ?? null)
+          : null,
+        setupClass: meta?.setup_class ?? null,
+        execGrade: meta?.exec_grade ?? null,
       };
     });
   }, [closedFiltered, trades, realTrades, metas, drData, drDrafts, drResetCounts]);
@@ -1412,8 +1454,8 @@ export default function JournalPage() {
       )}
 
       {tab === "overview" && <OverviewTab metrics={metrics} simMetrics={simMetrics} realMetrics={realMetrics} drMetrics={drMetrics} cumPnl={cumPnl} trades={filtered} sourceTotalCount={sourceTotalCount} sourceClosedCount={sourceClosedCount} sourceFilter={sourceFilter} maxDrawdown={analyticsRisk.maxDrawdownUSD} onSelect={(k) => openDrawer(k)} onAddRealTrade={() => { setEditingReal(null); setTab("trades"); setShowRealForm(true); }} onImportBroker={() => { setTab("trades"); setShowImport(true); }} />}
-      {tab === "trades" && <TradesTab trades={filtered} metas={metas} onSelect={(k) => openDrawer(k)} onSelectShots={(k) => openDrawer(k, true)} onRealTradeSaved={handleRealTradeSaved} showRealForm={showRealForm} setShowRealForm={setShowRealForm} showImport={showImport} setShowImport={setShowImport} editingReal={editingReal} onEditReal={startEditReal} onDeleteReal={startDeleteReal} onCancelEdit={cancelEdit} />}
-      {tab === "review" && <ReviewTab tradeKey={selectedKey} simTrade={!isRealSelected ? (selected as GroupedTrade | null) : null} realTrade={isRealSelected ? (selected as RealTrade | null) : null} meta={selectedMeta} onSaved={load} onEditReal={startEditReal} onDeleteReal={startDeleteReal} drInfo={selectedDrInfo} drDraftKey={selectedKey ? (draftForTrade(selectedKey, unified.find((t) => t.key === selectedKey)?.attemptId ?? null)?.draftKey ?? null) : null} drAutoCapture={selectedKey ? (draftForTrade(selectedKey, unified.find((t) => t.key === selectedKey)?.attemptId ?? null)?.autoCapture ?? null) : null} />}
+      {tab === "trades" && <TradesTab trades={filtered} metas={metas} onSelect={(k) => openDrawer(k)} onSelectShots={(k) => openDrawer(k, true)} onRealTradeSaved={handleRealTradeSaved} showRealForm={showRealForm} setShowRealForm={setShowRealForm} showImport={showImport} setShowImport={setShowImport} editingReal={editingReal} onEditReal={startEditReal} onDeleteReal={startDeleteReal} onCancelEdit={cancelEdit} strategies={drData.strategies} strategyVersions={drData.strategyVersions} annotationAvailable={annotationAvailable} />}
+      {tab === "review" && <ReviewTab tradeKey={selectedKey} simTrade={!isRealSelected ? (selected as GroupedTrade | null) : null} realTrade={isRealSelected ? (selected as RealTrade | null) : null} meta={selectedMeta} onSaved={load} onEditReal={startEditReal} onDeleteReal={startDeleteReal} drInfo={selectedDrInfo} drDraftKey={selectedKey ? (draftForTrade(selectedKey, unified.find((t) => t.key === selectedKey)?.attemptId ?? null)?.draftKey ?? null) : null} drAutoCapture={selectedKey ? (draftForTrade(selectedKey, unified.find((t) => t.key === selectedKey)?.attemptId ?? null)?.autoCapture ?? null) : null} strategies={drData.strategies} strategyVersions={drData.strategyVersions} annotationAvailable={annotationAvailable} boundStrategyId={selectedKey ? (unified.find((t) => t.key === selectedKey)?.strategyId ?? null) : null} />}
       {tab === "calendar" && <CalendarTab trades={closedFiltered} metas={metas} selectedDay={selectedCalDay} onSelectDay={setSelectedCalDay} onSelectTrade={(k) => openDrawer(k)} />}
       {tab === "analytics" && <AnalyticsTab trades={analyticsTrades} onSelect={(k) => openDrawer(k)} pageSource={sourceFilter} pagePeriod={period} exportInput={{
         unified, metas, realTrades, simTrades: [...trades, ...drData.preTrades],
@@ -1494,7 +1536,7 @@ export default function JournalPage() {
               <span style={{ fontSize: 13, fontWeight: 600 }}>Trade Detail</span>
               <button className="btn" style={{ padding: "2px 10px", fontSize: 15, lineHeight: 1.2 }} onClick={closeDrawer} aria-label="Close trade detail">×</button>
             </div>
-            <ReviewTab tradeKey={selectedKey} simTrade={!isRealSelected ? (selected as GroupedTrade | null) : null} realTrade={isRealSelected ? (selected as RealTrade | null) : null} meta={selectedMeta} onSaved={load} onEditReal={(k) => { closeDrawer(); startEditReal(k); }} onDeleteReal={(k) => { closeDrawer(); startDeleteReal(k); }} drInfo={selectedDrInfo} drDraftKey={selectedKey ? (draftForTrade(selectedKey, unified.find((t) => t.key === selectedKey)?.attemptId ?? null)?.draftKey ?? null) : null} drAutoCapture={selectedKey ? (draftForTrade(selectedKey, unified.find((t) => t.key === selectedKey)?.attemptId ?? null)?.autoCapture ?? null) : null} />
+            <ReviewTab tradeKey={selectedKey} simTrade={!isRealSelected ? (selected as GroupedTrade | null) : null} realTrade={isRealSelected ? (selected as RealTrade | null) : null} meta={selectedMeta} onSaved={load} onEditReal={(k) => { closeDrawer(); startEditReal(k); }} onDeleteReal={(k) => { closeDrawer(); startDeleteReal(k); }} drInfo={selectedDrInfo} drDraftKey={selectedKey ? (draftForTrade(selectedKey, unified.find((t) => t.key === selectedKey)?.attemptId ?? null)?.draftKey ?? null) : null} drAutoCapture={selectedKey ? (draftForTrade(selectedKey, unified.find((t) => t.key === selectedKey)?.attemptId ?? null)?.autoCapture ?? null) : null} strategies={drData.strategies} strategyVersions={drData.strategyVersions} annotationAvailable={annotationAvailable} boundStrategyId={selectedKey ? (unified.find((t) => t.key === selectedKey)?.strategyId ?? null) : null} />
           </div>
         </div>
       )}
@@ -1506,6 +1548,9 @@ export default function JournalPage() {
           tradeDate={activeDraftExport?.tradeDate ?? (activeDraft ? drData.tickerByAttempt.get(activeDraft.attemptId)?.tradeDate ?? null : null)}
           attemptStatus={activeDraftAttempt?.status ?? null}
           events={activeDraftEvents}
+          boundStrategyId={activeDraftAttempt?.strategyVersionId
+            ? (resolveVersionContext(activeDraftAttempt.strategyVersionId, drData.strategies, drData.strategyVersions)?.strategy.id ?? null)
+            : null}
           onClose={() => setReviewDraft(null)}
           onChanged={() => load()}
           onViewInJournal={() => { setReviewDraft(null); revealFinalizedTrade(); }}
@@ -1738,7 +1783,7 @@ function OverviewTab({ metrics, simMetrics, realMetrics, drMetrics, cumPnl, trad
 /* ---------------- All Trades ---------------- */
 type TradeSortKey = "date" | "symbol" | "entry" | "qty" | "pnl";
 
-function TradesTab({ trades, metas, onSelect, onSelectShots, onRealTradeSaved, showRealForm, setShowRealForm, showImport, setShowImport, editingReal, onEditReal, onDeleteReal, onCancelEdit }: {
+function TradesTab({ trades, metas, onSelect, onSelectShots, onRealTradeSaved, showRealForm, setShowRealForm, showImport, setShowImport, editingReal, onEditReal, onDeleteReal, onCancelEdit, strategies, strategyVersions, annotationAvailable }: {
   trades: UnifiedTrade[]; metas: Record<string, TradeMeta>;
   onSelect: (k: string) => void;
   /** Open the trade's detail with the screenshots gallery scrolled
@@ -1751,6 +1796,11 @@ function TradesTab({ trades, metas, onSelect, onSelectShots, onRealTradeSaved, s
   onEditReal: (k: string) => void;
   onDeleteReal: (k: string) => void;
   onCancelEdit: () => void;
+  /** Strategy annotation wiring for the real-trade form (dark when
+   *  annotationAvailable is false — the form then renders as before). */
+  strategies?: Strategy[];
+  strategyVersions?: StrategyVersion[];
+  annotationAvailable?: boolean;
 }) {
   // Client-side sorting + pagination over the page-level filtered
   // set. Default sort (date desc) matches the incoming order exactly.
@@ -1820,6 +1870,9 @@ function TradesTab({ trades, metas, onSelect, onSelectShots, onRealTradeSaved, s
           editing={editingReal}
           onCancel={onCancelEdit}
           onSaved={(notice) => { setShowRealForm(false); onRealTradeSaved(notice); }}
+          strategies={strategies}
+          strategyVersions={strategyVersions}
+          annotationAvailable={annotationAvailable}
         />
       )}
       {showImport && (
@@ -2059,7 +2112,7 @@ function DrAttemptCard({ info, tradeKeyVal }: { info: DrReviewInfo; tradeKeyVal:
   );
 }
 
-function ReviewTab({ tradeKey, simTrade, realTrade, meta, onSaved, onEditReal, onDeleteReal, drInfo, drDraftKey, drAutoCapture }: {
+function ReviewTab({ tradeKey, simTrade, realTrade, meta, onSaved, onEditReal, onDeleteReal, drInfo, drDraftKey, drAutoCapture, strategies, strategyVersions, annotationAvailable, boundStrategyId }: {
   tradeKey: string | null;
   simTrade: GroupedTrade | null;
   realTrade: RealTrade | null;
@@ -2075,14 +2128,24 @@ function ReviewTab({ tradeKey, simTrade, realTrade, meta, onSaved, onEditReal, o
    *  resolves and badges the representative from it (same resolver
    *  as the export, so UI and package can never disagree). */
   drAutoCapture?: Record<string, unknown> | null;
+  /** Strategy registry + annotation availability for the "Strategy
+   *  traded" field. When annotationAvailable is false the field is
+   *  never rendered and saves omit the new columns entirely. */
+  strategies?: Strategy[];
+  strategyVersions?: StrategyVersion[];
+  annotationAvailable?: boolean;
+  /** The trade's Daily Replay attempt-bound strategy (suggestion). */
+  boundStrategyId?: string | null;
 }) {
   const [form, setForm] = useState<Partial<TradeMeta>>({});
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  const [tsValue, setTsValue] = useState<TradedStrategyValue | null>(null);
 
   useEffect(() => {
     if (meta) setForm(meta);
     else setForm({});
+    setTsValue(tradedValueFromMeta(meta ?? null, { suggestedStrategyId: boundStrategyId ?? null }));
     setMsg(null);
   }, [tradeKey]);
 
@@ -2111,7 +2174,7 @@ function ReviewTab({ tradeKey, simTrade, realTrade, meta, onSaved, onEditReal, o
       const supabase = createClient();
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Not signed in.");
-      const payload = {
+      const payload: Record<string, unknown> = {
         user_id: user.id,
         // Pre-completion Daily Replay trades have no session yet
         // (sessionId "") — the meta row records null, like draft
@@ -2132,6 +2195,15 @@ function ReviewTab({ tradeKey, simTrade, realTrade, meta, onSaved, onEditReal, o
         would_take_again: form.would_take_again ?? null,
         updated_at: new Date().toISOString(),
       };
+      if (annotationAvailable && tsValue) {
+        // Strategy annotation (lit mode only): persist by stable ID;
+        // hod_class is not written by the new flow (see DrDraftReview).
+        payload.strategy_id = await resolveTradedStrategyId(supabase, user.id, tsValue, strategies ?? [], strategyVersions ?? []);
+        payload.setup_class = tsValue.setupClass;
+        payload.strategy_custom_label = tsValue.customLabel;
+        payload.entry_trigger = tsValue.entryTrigger;
+        delete payload.hod_class;
+      }
       const { error } = await supabase.from("journal_trade_meta").upsert(payload, { onConflict: "user_id,trade_key" });
       if (error) throw new Error(error.message);
       setMsg("Saved.");
@@ -2240,6 +2312,14 @@ function ReviewTab({ tradeKey, simTrade, realTrade, meta, onSaved, onEditReal, o
       <div className="card" style={{ padding: 16 }}>
         <h4 style={{ margin: "0 0 12px" }}>Trade DNA</h4>
         <div style={{ display: "grid", gap: 12 }}>
+          {annotationAvailable && tsValue && (
+            <StrategyTradedField
+              strategies={strategies ?? []}
+              versions={strategyVersions ?? []}
+              value={tsValue}
+              onChange={setTsValue}
+            />
+          )}
           <div className="field">
             <label>Setup</label>
             <select className="input" value={form.setup_tag ?? ""} onChange={(e) => setForm({ ...form, setup_tag: e.target.value || null })}>
@@ -2248,13 +2328,15 @@ function ReviewTab({ tradeKey, simTrade, realTrade, meta, onSaved, onEditReal, o
             </select>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            <div className="field">
-              <label>HOD Classification</label>
-              <select className="input" value={form.hod_class ?? ""} onChange={(e) => setForm({ ...form, hod_class: e.target.value || null })}>
-                <option value="">—</option>
-                {HOD_CLASSES.map((c) => <option key={c} value={c}>{c}</option>)}
-              </select>
-            </div>
+            {!annotationAvailable && (
+              <div className="field">
+                <label>HOD Classification</label>
+                <select className="input" value={form.hod_class ?? ""} onChange={(e) => setForm({ ...form, hod_class: e.target.value || null })}>
+                  <option value="">—</option>
+                  {HOD_CLASSES.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
+            )}
             <div className="field">
               <label>Execution Grade</label>
               <select className="input" value={form.exec_grade ?? ""} onChange={(e) => setForm({ ...form, exec_grade: e.target.value || null })}>
@@ -2604,12 +2686,17 @@ function FillTimePicker({ value, onChange }: { value: string; onChange: (v: stri
   );
 }
 
-function RealTradeForm({ onSaved, editing, onCancel }: {
+function RealTradeForm({ onSaved, editing, onCancel, strategies, strategyVersions, annotationAvailable }: {
   /** Called after a successful save; `notice` carries non-fatal issues
    *  (e.g. screenshot upload failures) for the page to surface. */
   onSaved: (notice?: string) => void;
   editing?: { trade: RealTrade; meta: TradeMeta | null } | null;
   onCancel?: () => void;
+  /** Strategy annotation wiring (dark when annotationAvailable is
+   *  false — the form then renders and saves exactly as before). */
+  strategies?: Strategy[];
+  strategyVersions?: StrategyVersion[];
+  annotationAvailable?: boolean;
 }) {
   const et = editing?.trade ?? null;
   const em = editing?.meta ?? null;
@@ -2655,6 +2742,9 @@ function RealTradeForm({ onSaved, editing, onCancel }: {
   const updateLevel = (i: number, k: string, v: string) =>
     setLevels(levels.map((l, j) => (j === i ? { ...l, [k]: v } : l)));
   const levelsError = validateKeyLevels(levels);
+  // Strategy annotation — initialized from the trade's stored meta;
+  // null in dark mode (field unmounted, payload omits the columns).
+  const [tsValue, setTsValue] = useState<TradedStrategyValue>(() => tradedValueFromMeta(em ?? null));
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   // Screenshots: newly staged files (object-URL previews), screenshots
@@ -2816,7 +2906,7 @@ function RealTradeForm({ onSaved, editing, onCancel }: {
 
       // Save Trade DNA annotations via shared meta table
       const tradeKey = `real:${tradeId}`;
-      const { error: mErr } = await supabase.from("journal_trade_meta").upsert({
+      const metaPayload: Record<string, unknown> = {
         user_id: user.id,
         session_id: null,
         trade_key: tradeKey,
@@ -2833,7 +2923,17 @@ function RealTradeForm({ onSaved, editing, onCancel }: {
         original_target: planState.original_target,
         plan_history: planState.plan_history,
         updated_at: new Date().toISOString(),
-      }, { onConflict: "user_id,trade_key" });
+      };
+      if (annotationAvailable) {
+        // Strategy annotation (lit mode only): persist by stable ID;
+        // hod_class is not written by the new flow (see DrDraftReview).
+        metaPayload.strategy_id = await resolveTradedStrategyId(supabase, user.id, tsValue, strategies ?? [], strategyVersions ?? []);
+        metaPayload.setup_class = tsValue.setupClass;
+        metaPayload.strategy_custom_label = tsValue.customLabel;
+        metaPayload.entry_trigger = tsValue.entryTrigger;
+        delete metaPayload.hod_class;
+      }
+      const { error: mErr } = await supabase.from("journal_trade_meta").upsert(metaPayload, { onConflict: "user_id,trade_key" });
       if (mErr) throw new Error(mErr.message);
 
       // Screenshots last: a storage failure must not fail the trade
@@ -2975,13 +3075,26 @@ function RealTradeForm({ onSaved, editing, onCancel }: {
         )}
       </div>
 
+      {annotationAvailable && (
+        <div style={{ marginBottom: 16 }}>
+          <StrategyTradedField
+            strategies={strategies ?? []}
+            versions={strategyVersions ?? []}
+            value={tsValue}
+            onChange={setTsValue}
+          />
+        </div>
+      )}
+
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 12, marginBottom: 16 }}>
         <div className="field" style={field}><label>Stop Loss</label><input className="input num" type="number" step="any" value={stopLoss} onChange={(e) => setStopLoss(e.target.value)} /></div>
         <div className="field" style={field}><label>Target</label><input className="input num" type="number" step="any" value={target} onChange={(e) => setTarget(e.target.value)} /></div>
         <div className="field" style={field}><label>Float</label><input className="input num" type="number" step="any" value={floatShares} onChange={(e) => setFloatShares(e.target.value)} placeholder="—" /></div>
         <div className="field" style={field}><label>Rel Volume</label><input className="input num" type="number" step="any" value={rvol} onChange={(e) => setRvol(e.target.value)} placeholder="—" /></div>
         <div className="field" style={field}><label>Setup</label><select className="input" value={setup} onChange={(e) => setSetup(e.target.value)}><option value="">—</option>{SETUPS.map((s) => <option key={s} value={s}>{s}</option>)}</select></div>
-        <div className="field" style={field}><label>HOD Class</label><select className="input" value={hodClass} onChange={(e) => setHodClass(e.target.value)}><option value="">—</option>{HOD_CLASSES.map((c) => <option key={c} value={c}>{c}</option>)}</select></div>
+        {!annotationAvailable && (
+          <div className="field" style={field}><label>HOD Class</label><select className="input" value={hodClass} onChange={(e) => setHodClass(e.target.value)}><option value="">—</option>{HOD_CLASSES.map((c) => <option key={c} value={c}>{c}</option>)}</select></div>
+        )}
         <div className="field" style={field}><label>Exec Grade</label><select className="input" value={grade} onChange={(e) => setGrade(e.target.value)}><option value="">—</option>{GRADES.map((g) => <option key={g} value={g}>{g}</option>)}</select></div>
       </div>
 
@@ -3174,6 +3287,9 @@ const DIMENSION_OPTIONS: { key: BreakdownDimension; label: string }[] = [
   { key: "interaction", label: "Trade Interaction" },
   { key: "strategy", label: "Strategy" },
   { key: "strategyVersion", label: "Strategy Version" },
+  { key: "strategyTraded", label: "Strategy Traded" },
+  { key: "setupClass", label: "Setup Classification" },
+  { key: "execGrade", label: "Execution Grade" },
 ];
 
 function fmtR(v: number | null): string {
@@ -3235,6 +3351,10 @@ function AnalyticsTab({ trades, onSelect, exportInput, pageSource, pagePeriod }:
   const risk = useMemo(() => riskMetrics(trades), [trades]);
   const insights = useMemo(() => edgeInsights(trades), [trades]);
   const rows = useMemo(() => breakdown(trades, dim), [trades, dim]);
+  // Strategy Performance: the same eligible set (`trades` IS the
+  // journal's analyticsTrades), grouped by the recorded "Strategy
+  // traded" annotation with the attempt binding as fallback.
+  const strategyRows = useMemo(() => breakdown(trades, "strategyTraded"), [trades]);
   const days = useMemo(() => dailyPnl(trades), [trades]);
 
   useEffect(() => { updateBdMore(); window.addEventListener("resize", updateBdMore); return () => window.removeEventListener("resize", updateBdMore); }, [rows, dim, trades]);
@@ -3386,6 +3506,46 @@ function AnalyticsTab({ trades, onSelect, exportInput, pageSource, pagePeriod }:
           <p className="hint" style={{ margin: "8px 0 0" }}>A trade counts under each of its tags, so rows can add up to more than the total number of trades. Trades with no tags recorded appear in no row.</p>
         )}
         <p className="hint" style={{ margin: "8px 0 0" }}>Win % here excludes breakeven trades from the denominator. Net P&L for single-value breakdowns sums exactly to the Overview total for the same filters.</p>
+      </section>
+
+      {/* ---- Strategy Performance ---- */}
+      <section style={{ minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
+          <h3 style={{ margin: 0 }}>Strategy Performance</h3>
+          <span className="hint" style={{ fontSize: 11.5 }}>By the strategy recorded on each trade in Trade Review (“Strategy traded”); a Daily Replay trade without one groups under the strategy its attempt ran. Same eligible trades as every other number on this tab.</span>
+        </div>
+        <div className="card tablescroll" style={{ padding: 0, overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)", textAlign: "left" }}>
+                {["Strategy", "Trades", "Win %", "Net P&L", "Avg Win", "Avg Loss", "Avg R", "R Sample", "Max Drawdown", "Expectancy", "Profit Factor"].map((h) => (
+                  <th key={h} style={{ padding: "10px 12px", color: "var(--muted)", fontWeight: 600, fontSize: 11, textTransform: "uppercase", whiteSpace: "nowrap" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {strategyRows.map((r) => (
+                <tr key={r.key} style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+                  <td style={{ padding: "10px 12px", fontWeight: 600 }}>{r.label}{r.count < 5 && <span className="hint" style={{ fontWeight: 400 }}> · small sample</span>}</td>
+                  <td className="num" style={{ padding: "10px 12px" }}>{r.count}</td>
+                  <td className="num" style={{ padding: "10px 12px" }}>{r.winRate == null ? "—" : fmtPct(r.winRate)}</td>
+                  <td className="num" style={{ padding: "10px 12px", fontWeight: 700, color: pnlColor(r.netPnl) }}>{fmtPnl(r.netPnl)}</td>
+                  <td className="num" style={{ padding: "10px 12px" }}>{r.avgWin == null ? "—" : fmtPnl(r.avgWin)}</td>
+                  <td className="num" style={{ padding: "10px 12px" }}>{r.avgLoss == null ? "—" : fmtPnl(r.avgLoss)}</td>
+                  <td className="num" style={{ padding: "10px 12px" }}>{fmtR(r.avgR)}</td>
+                  <td className="num" style={{ padding: "10px 12px" }}>{r.avgRSampleCount}</td>
+                  <td className="num" style={{ padding: "10px 12px" }}>{r.maxDrawdownUSD > 0 ? fmtPnl(-r.maxDrawdownUSD) : fmtPnl(0)}</td>
+                  <td className="num" style={{ padding: "10px 12px" }}>{r.expectancy == null ? "—" : fmtPnl(r.expectancy)}</td>
+                  <td className="num" style={{ padding: "10px 12px" }}>{fmtPf(r.profitFactor)}</td>
+                </tr>
+              ))}
+              {strategyRows.length === 0 && (
+                <tr><td colSpan={11} style={{ padding: 20, textAlign: "center" }} className="hint">No trades in the current filters.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        <p className="hint" style={{ margin: "8px 0 0" }}>Rows under 5 trades are marked “small sample”: a high win rate — or a few winners — on a handful of trades does not make a strategy profitable or validated. Judge a strategy on expectancy, profit factor, drawdown and sample size together.</p>
       </section>
 
       {/* ---- Edge Finder ---- */}

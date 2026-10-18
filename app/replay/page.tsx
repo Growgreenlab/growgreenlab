@@ -4051,6 +4051,12 @@ function ReplayPageInner() {
               tradeDate={drInfo?.tradeDate ?? null}
               attemptStatus={drPhase === "done" ? "finished" : "active"}
               events={drEvents}
+              boundStrategyId={(() => {
+                const link = drAttemptsList.find((a) => a.id === drReviewRow.attemptId);
+                return link?.strategyVersionId
+                  ? (resolveVersionContext(link.strategyVersionId, drStrategies, drStrategyVersions)?.strategy.id ?? null)
+                  : null;
+              })()}
               onClose={() => setDrReviewDraftKey(null)}
               onChanged={() => { void refreshDrDraftRows(); }}
             />

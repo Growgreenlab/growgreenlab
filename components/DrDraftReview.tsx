@@ -47,6 +47,18 @@ import {
   resolveRepresentative,
   withRepresentativeSelection,
 } from "../lib/drRepresentative";
+import {
+  mapStrategyRow,
+  mapStrategyVersionRow,
+  type Strategy,
+  type StrategyVersion,
+} from "../lib/strategies";
+import { probeStrategyAnnotationSupport } from "../lib/strategyClassification";
+import StrategyTradedField, {
+  resolveTradedStrategyId,
+  tradedValueFromMeta,
+  type TradedStrategyValue,
+} from "./StrategyTradedField";
 import DrFinalizeConfirm from "./DrFinalizeConfirm";
 
 /* Annotation option lists — mirrored EXACTLY from app/journal/page.tsx
@@ -154,8 +166,13 @@ export default function DrDraftReview(props: {
    *  confirmation's success state (journal hosts). Defaults to a
    *  plain /journal link inside the dialog. */
   onViewInJournal?: () => void;
+  /** The strategy the draft's attempt was BOUND to at lock time
+   *  (strategies.id), when known. Pre-selects the "Strategy traded"
+   *  annotation as a suggestion only — the annotation is the
+   *  trader's to override and never rewrites the binding. */
+  boundStrategyId?: string | null;
 }) {
-  const { draft, ticker, tradeDate, attemptStatus, events, onClose, onChanged, onViewInJournal } = props;
+  const { draft, ticker, tradeDate, attemptStatus, events, onClose, onChanged, onViewInJournal, boundStrategyId } = props;
 
   /* ---- cycle resolution ---- */
   const cycle = useMemo(() => {
@@ -355,10 +372,43 @@ export default function DrDraftReview(props: {
   const [savingMeta, setSavingMeta] = useState(false);
   const [metaMsg, setMetaMsg] = useState<string | null>(null);
 
+  /* ---- strategy annotation (dark until its migration lands) ----
+   * The probe decides whether the "Strategy traded" fields exist on
+   * this database at all. Until they do, this drawer renders and
+   * saves EXACTLY as before — the new selectors never mount and the
+   * save payload never names the new columns. */
+  const [annotationAvailable, setAnnotationAvailable] = useState(false);
+  const [strategies, setStrategies] = useState<Strategy[]>([]);
+  const [strategyVersions, setStrategyVersions] = useState<StrategyVersion[]>([]);
+  const [tsValue, setTsValue] = useState<TradedStrategyValue | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      if (!isSupabaseConfigured()) return;
+      try {
+        const client = createClient();
+        const ok = await probeStrategyAnnotationSupport(client as unknown as Parameters<typeof probeStrategyAnnotationSupport>[0]);
+        if (!alive) return;
+        setAnnotationAvailable(ok);
+        if (!ok) return;
+        const [sRes, vRes] = await Promise.all([
+          client.from("strategies").select("*").limit(200),
+          client.from("strategy_versions").select("*").limit(1000),
+        ]);
+        if (!alive) return;
+        if (!sRes.error && sRes.data) setStrategies((sRes.data as Record<string, unknown>[]).map((r) => mapStrategyRow(r)));
+        if (!vRes.error && vRes.data) setStrategyVersions((vRes.data as Record<string, unknown>[]).map((r) => mapStrategyVersionRow(r)));
+      } catch { if (alive) setAnnotationAvailable(false); }
+    })();
+    return () => { alive = false; };
+  }, []);
+
   useEffect(() => {
     let alive = true;
     (async () => {
       setForm(EMPTY_FORM);
+      setTsValue(null);
       setMetaMsg(null);
       if (!isSupabaseConfigured()) return;
       try {
@@ -368,8 +418,15 @@ export default function DrDraftReview(props: {
           .select("*")
           .eq("trade_key", draft.draftKey)
           .maybeSingle();
-        if (!alive || !data) return;
+        if (!alive) return;
+        if (!data) {
+          // No annotation row yet — the form still starts from the
+          // bound-strategy suggestion so the field can be saved.
+          setTsValue(tradedValueFromMeta(null, { suggestedStrategyId: boundStrategyId ?? null }));
+          return;
+        }
         const r = data as Record<string, unknown>;
+        setTsValue(tradedValueFromMeta(r, { suggestedStrategyId: boundStrategyId ?? null }));
         setForm({
           setup_tag: typeof r.setup_tag === "string" ? r.setup_tag : null,
           hod_class: typeof r.hod_class === "string" ? r.hod_class : null,
@@ -387,7 +444,7 @@ export default function DrDraftReview(props: {
       } catch { /* no meta yet — the empty form is the honest state */ }
     })();
     return () => { alive = false; };
-  }, [draft.draftKey]);
+  }, [draft.draftKey, boundStrategyId]);
 
   const saveMeta = async () => {
     setSavingMeta(true);
@@ -397,7 +454,7 @@ export default function DrDraftReview(props: {
       const client = createClient();
       const { data: { user } } = await client.auth.getUser();
       if (!user) throw new Error("Not signed in.");
-      const payload = {
+      const payload: Record<string, unknown> = {
         user_id: user.id,
         session_id: null,
         trade_key: draft.draftKey,
@@ -415,6 +472,18 @@ export default function DrDraftReview(props: {
         would_take_again: form.would_take_again ?? null,
         updated_at: new Date().toISOString(),
       };
+      if (annotationAvailable && tsValue) {
+        // Strategy annotation (lit mode only): resolve the registry
+        // row first (presets/customs materialize here, idempotently),
+        // then persist by stable ID. hod_class is NOT written by the
+        // new flow — the recorded slug supersedes it at read time
+        // via the coalesce, and the legacy value stays untouched.
+        payload.strategy_id = await resolveTradedStrategyId(client, user.id, tsValue, strategies, strategyVersions);
+        payload.setup_class = tsValue.setupClass;
+        payload.strategy_custom_label = tsValue.customLabel;
+        payload.entry_trigger = tsValue.entryTrigger;
+        delete payload.hod_class;
+      }
       const { error } = await client
         .from("journal_trade_meta")
         .upsert(payload, { onConflict: "user_id,trade_key" });
@@ -679,6 +748,14 @@ export default function DrDraftReview(props: {
         <div style={{ marginTop: 14, borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 12 }}>
           <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8 }}>Trade DNA</div>
           <div style={{ display: "grid", gap: 12 }}>
+            {annotationAvailable && tsValue && (
+              <StrategyTradedField
+                strategies={strategies}
+                versions={strategyVersions}
+                value={tsValue}
+                onChange={setTsValue}
+              />
+            )}
             <div className="field">
               <label>Setup</label>
               <select className="input" value={form.setup_tag ?? ""} onChange={(e) => setForm({ ...form, setup_tag: e.target.value || null })}>
@@ -687,13 +764,15 @@ export default function DrDraftReview(props: {
               </select>
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-              <div className="field">
-                <label>HOD Classification</label>
-                <select className="input" value={form.hod_class ?? ""} onChange={(e) => setForm({ ...form, hod_class: e.target.value || null })}>
-                  <option value="">—</option>
-                  {HOD_CLASSES.map((c) => <option key={c} value={c}>{c}</option>)}
-                </select>
-              </div>
+              {!annotationAvailable && (
+                <div className="field">
+                  <label>HOD Classification</label>
+                  <select className="input" value={form.hod_class ?? ""} onChange={(e) => setForm({ ...form, hod_class: e.target.value || null })}>
+                    <option value="">—</option>
+                    {HOD_CLASSES.map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </div>
+              )}
               <div className="field">
                 <label>Execution Grade</label>
                 <select className="input" value={form.exec_grade ?? ""} onChange={(e) => setForm({ ...form, exec_grade: e.target.value || null })}>
