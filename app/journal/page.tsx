@@ -125,6 +125,11 @@ interface DrJournalData {
    *  appears here ONLY while it has no session row — at completion
    *  the canonical session row replaces these, never coexists. */
   preTrades: GroupedTrade[];
+  /** Dataset identity per attempt (ticker / trade date) for display
+   *  lookups — covers candidates and every draft-owning attempt, so
+   *  Needs Review rows and the draft drawer can name their symbol
+   *  even when the attempt has no session and no finalized draft. */
+  tickerByAttempt: Map<string, { ticker: string; tradeDate: string }>;
   /** Finalized drafts whose pre-completion row was WITHHELD because
    *  the cycle could not be reconciled with the draft's anchors —
    *  surfaced to the export panel as a named hint, never silent. */
@@ -175,7 +180,7 @@ export default function JournalPage() {
   const [drData, setDrData] = useState<DrJournalData>({
     attempts: [], strategies: [], strategyVersions: [], strategiesAvailable: false,
     evidenceByKey: new Map(), evidenceByAttempt: new Map(), eventsByAttempt: new Map(), attemptsExport: [],
-    preTrades: [], withheldFinalized: [],
+    preTrades: [], withheldFinalized: [], tickerByAttempt: new Map(),
   });
   // Daily Replay per-cycle trade drafts (Phase D): the durable draft
   // rows for ALL of the user's attempts (linked and unlinked), plus the
@@ -184,7 +189,16 @@ export default function JournalPage() {
   // is then byte-identical to the pre-drafts journal.
   const [drDrafts, setDrDrafts] = useState<DrDraftRow[]>([]);
   const [drResetCounts, setDrResetCounts] = useState<Map<string, number>>(new Map());
-  const [drDraftsView, setDrDraftsView] = useState(false);
+  // Trade detail drawer (hosts the same ReviewTab content as the
+  // Trade Review tab) + header Import menu + filter-bar Advanced
+  // panel + Needs Review panel visibility.
+  const [drawerKey, setDrawerKey] = useState<string | null>(null);
+  const [drawerFocusShots, setDrawerFocusShots] = useState(false);
+  const [importMenuOpen, setImportMenuOpen] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [needsReviewOpen, setNeedsReviewOpen] = useState(false);
+  const needsReviewRef = useRef<HTMLDivElement | null>(null);
+  const needsReviewInitRef = useRef(false);
   const [reviewDraft, setReviewDraft] = useState<DrDraftRow | null>(null);
   // Draft awaiting finalize confirmation (the shared dialog).
   const [finalizeTarget, setFinalizeTarget] = useState<DrDraftRow | null>(null);
@@ -344,11 +358,17 @@ export default function JournalPage() {
           (a) => finalizedAttemptIds.has(a.id) && !(a.sessionId && sessionById.has(a.sessionId)),
         );
         // Dataset identity (ticker / trade date) for candidates —
-        // their trades have no session row to read it from.
+        // their trades have no session row to read it from. The same
+        // lookup also covers every attempt that owns a draft, so the
+        // Needs Review rows can name their symbol even before any
+        // draft on the attempt is finalized (display-only; the export
+        // attempt list is unchanged).
         const datasetById = new Map<string, { ticker: string; tradeDate: string }>();
-        if (candidates.length > 0) {
+        const draftAttemptIds = new Set(fetchedDrafts.map((d) => d.attemptId));
+        const identityAttempts = [...candidates, ...attempts.filter((a) => draftAttemptIds.has(a.id))];
+        if (identityAttempts.length > 0) {
           try {
-            const dsIds = [...new Set(candidates.map((a) => attemptDatasetId.get(a.id)).filter(Boolean))] as string[];
+            const dsIds = [...new Set(identityAttempts.map((a) => attemptDatasetId.get(a.id)).filter(Boolean))] as string[];
             if (dsIds.length > 0) {
               const { data: dsRows, error: dsErr } = await supabase
                 .from("daily_replay_datasets")
@@ -471,7 +491,13 @@ export default function JournalPage() {
             };
           }),
         ];
-        setDrData({ attempts, strategies, strategyVersions, strategiesAvailable, evidenceByKey, evidenceByAttempt, eventsByAttempt, attemptsExport, preTrades, withheldFinalized });
+        const tickerByAttempt = new Map<string, { ticker: string; tradeDate: string }>();
+        for (const a of attempts) {
+          const dsId = attemptDatasetId.get(a.id);
+          const ds = dsId ? datasetById.get(dsId) : undefined;
+          if (ds) tickerByAttempt.set(a.id, ds);
+        }
+        setDrData({ attempts, strategies, strategyVersions, strategiesAvailable, evidenceByKey, evidenceByAttempt, eventsByAttempt, attemptsExport, preTrades, withheldFinalized, tickerByAttempt });
 
         // Reset counts per event-loaded attempt (session_reset events
         // in the loaded stream) — the final generation coordinate the
@@ -710,6 +736,11 @@ export default function JournalPage() {
     return unified.filter((t) => {
       if (sourceFilter === "daily_replay") {
         if (!isDailyReplayTrade(t)) return false;
+      } else if (sourceFilter === "simulator") {
+        // The four source buckets are mutually exclusive (redesign):
+        // "Simulator" excludes Daily Replay trades, which have their
+        // own bucket — same separation the per-source metrics apply.
+        if (t.source !== "simulator" || isDailyReplayTrade(t)) return false;
       } else if (sourceFilter !== "all" && t.source !== sourceFilter) return false;
       if (strategyFilter) {
         if (strategyFilter === "none") {
@@ -855,6 +886,7 @@ export default function JournalPage() {
   const matchesSourceFilter = (t: UnifiedTrade) =>
     sourceFilter === "all" ? true
     : sourceFilter === "daily_replay" ? isDailyReplayTrade(t)
+    : sourceFilter === "simulator" ? (t.source === "simulator" && !isDailyReplayTrade(t))
     : t.source === sourceFilter;
   const sourceTotalCount = useMemo(
     () => unified.filter(matchesSourceFilter).length,
@@ -916,6 +948,87 @@ export default function JournalPage() {
     if (noticeText) setNotice(noticeText);
     load();
   };
+
+  // Trade detail drawer: row clicks across the page open the existing
+  // Trade Review content in a right-side drawer. The drawer drives
+  // the same selectedKey/selected derivations as the Review tab,
+  // which keeps working full-page exactly as before.
+  const openDrawer = (k: string, focusShots = false) => {
+    setSelectedKey(k);
+    setDrawerFocusShots(focusShots);
+    setDrawerKey(k);
+  };
+  const closeDrawer = () => { setDrawerKey(null); setDrawerFocusShots(false); };
+
+  // Finalize → reveal guard (shared by DrDraftReview and
+  // DrFinalizeConfirm): land on the Trades tab with ALL filters reset
+  // so a just-finalized trade can never be hidden by stale state.
+  const revealFinalizedTrade = () => {
+    setSourceFilter("daily_replay");
+    setPeriod("all");
+    setFTicker("");
+    setFSetup("");
+    setStrategyFilter("");
+    setFWinLoss("");
+    setTab("trades");
+  };
+
+  const clearAllFilters = () => {
+    setSourceFilter("all");
+    setPeriod("all");
+    setFTicker("");
+    setFSetup("");
+    setStrategyFilter("");
+    setFWinLoss("");
+  };
+
+  const strategyFilterLabel = (v: string): string => {
+    if (v === "none") return "No strategy recorded";
+    if (v.startsWith("version:")) {
+      const ver = drData.strategyVersions.find((x) => x.id === v.slice("version:".length));
+      const s = ver ? drData.strategies.find((x) => x.id === ver.strategyId) : undefined;
+      return ver ? `${s?.name ?? "Strategy"} · v${ver.version} only` : "Strategy version";
+    }
+    return drData.strategies.find((s) => s.id === v)?.name ?? "Strategy";
+  };
+
+  const toggleNeedsReview = () => {
+    setNeedsReviewOpen((v) => !v);
+    needsReviewRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  // Drawer: Escape closes; a screenshots-focused open scrolls the
+  // gallery into view once the content has mounted.
+  useEffect(() => {
+    if (!drawerKey) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") closeDrawer(); };
+    window.addEventListener("keydown", onKey);
+    let timer: number | undefined;
+    if (drawerFocusShots) {
+      timer = window.setTimeout(() => {
+        document.getElementById("trade-screenshots")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 50);
+    }
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [drawerKey, drawerFocusShots]);
+
+  // Header Import menu: closes on outside click / Escape.
+  useEffect(() => {
+    if (!importMenuOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement).closest(".jr-menu-wrap")) setImportMenuOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setImportMenuOpen(false); };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [importMenuOpen]);
 
   // Draft Review drawer: events come from the journal's loaded stream
   // for linked attempts; for UNLINKED attempts they are fetched on
@@ -999,6 +1112,16 @@ export default function JournalPage() {
   // drafts included); the still-open remainder is labeled "to review".
   const drCounts = draftListCounts(drDrafts, (d) => draftDisplayStatus(d).superseded);
 
+  // Needs Review panel default: open when drafts await review. Set
+  // once, when the first non-empty draft list loads; the header
+  // Drafts button toggles it from there.
+  useEffect(() => {
+    if (needsReviewInitRef.current) return;
+    if (drDrafts.length === 0) return;
+    needsReviewInitRef.current = true;
+    setNeedsReviewOpen(drCounts.toReview > 0);
+  }, [drDrafts.length, drCounts.toReview]);
+
   // One row renderer for the drafts card's two lists: the actionable
   // list (unfinalized drafts awaiting review) and the collapsed
   // "Finalized" history subsection.
@@ -1006,23 +1129,36 @@ export default function JournalPage() {
     const disp = draftDisplayStatus(d);
     const attempt = drData.attempts.find((a) => a.id === d.attemptId) ?? null;
     const exp = drData.attemptsExport.find((a) => a.id === d.attemptId) ?? null;
+    const rowDate = exp?.tradeDate ?? drData.tickerByAttempt.get(d.attemptId)?.tradeDate ?? (attempt?.createdAt ? attempt.createdAt.slice(0, 10) : "");
+    const statusLabel = disp.superseded ? disp.label : d.status === "finalized" ? "Finalized" : "Draft — awaiting review";
+    const entryCapture = d.autoCapture?.entry as { status?: unknown } | undefined;
+    const entryCaptureFailed = entryCapture?.status === "failed";
     return (
-      <div key={d.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,0.06)", flexWrap: "wrap", opacity: disp.superseded ? 0.65 : 1 }}>
-        <span style={{ fontSize: 13 }}>
-          <b>{exp?.ticker ?? "Daily Replay"}</b>{" "}
+      <div key={d.id} className="jr-needs-row" style={{ opacity: disp.superseded ? 0.65 : 1 }}>
+        <span style={{ fontSize: 13, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <span className="hint">{rowDate}</span>
+          <b>{exp?.ticker ?? drData.tickerByAttempt.get(d.attemptId)?.ticker ?? "Daily Replay"}</b>
+          <SourceBadge source="daily_replay" />
+          <span className="jr-dir-badge long">Long</span>
+          <span className="num">entry ${d.firstFillPrice.toFixed(2)}</span>
+          <span className="num">qty {d.firstFillQty}</span>
           <span className="hint">
-            {attempt?.createdAt ? attempt.createdAt.slice(0, 10) : ""}
-            {exp?.tradeDate ? ` · ${exp.tradeDate}` : ""}
-            {` · cycle ${d.cycleIndex} (gen ${d.resetGeneration})`}
+            {`cycle ${d.cycleIndex} (gen ${d.resetGeneration})`}
             {` · candle #${d.firstFillCandleIndex + 1} → #${d.closeFillCandleIndex + 1}`}
-          </span>{" "}
+          </span>
           <span style={{
             fontSize: 10, padding: "2px 8px", borderRadius: 10, fontWeight: 600,
             background: disp.superseded ? "rgba(255,255,255,0.08)" : d.status === "finalized" ? "rgba(16,185,129,0.15)" : "rgba(251,191,36,0.12)",
             border: disp.superseded ? "1px solid rgba(255,255,255,0.2)" : d.status === "finalized" ? "1px solid rgba(16,185,129,0.4)" : "1px solid rgba(251,191,36,0.45)",
             color: disp.superseded ? "var(--muted)" : d.status === "finalized" ? "#34d399" : "#fbbf24",
             textDecoration: disp.superseded ? "line-through" : "none",
-          }}>{disp.label}</span>
+          }}>{statusLabel}</span>
+          {entryCaptureFailed && (
+            <span style={{
+              fontSize: 10, padding: "2px 8px", borderRadius: 10, fontWeight: 600,
+              background: "rgba(251,191,36,0.12)", border: "1px solid rgba(251,191,36,0.45)", color: "#fbbf24",
+            }}>Entry screenshot failed</span>
+          )}
         </span>
         <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <span className="num" style={{ fontWeight: 700, color: d.realizedPnl > 0 ? "var(--emerald-bright)" : d.realizedPnl < 0 ? "#f6465d" : "var(--muted)" }}>{formatSigned(d.realizedPnl)}</span>
@@ -1043,8 +1179,27 @@ export default function JournalPage() {
 
   return (
     <div className="wrap" style={{ paddingTop: 20, paddingBottom: 40 }}>
-      <h2 style={{ margin: "0 0 4px" }}>Trade Journal</h2>
-      <p className="hint" style={{ margin: "0 0 16px" }}>Your Trade DNA — every trade, graded and reviewed.</p>
+      <div className="jr-head">
+        <div>
+          <h2 style={{ margin: "0 0 4px" }}>Trade Journal</h2>
+          <p className="hint" style={{ margin: 0 }}>Review trades. Find your edge.</p>
+        </div>
+        <div className="jr-actions">
+          <button className="btn primary" onClick={() => { setEditingReal(null); setTab("trades"); setShowRealForm(true); }}>Add Trade</button>
+          <div className="jr-menu-wrap">
+            <button className="btn" onClick={() => setImportMenuOpen((v) => !v)} aria-haspopup="menu" aria-expanded={importMenuOpen}>Import Trades ▾</button>
+            {importMenuOpen && (
+              <div className="jr-menu" role="menu">
+                <button className="jr-menu-item" role="menuitem" onClick={() => { setImportMenuOpen(false); setTab("trades"); setShowImport(true); }}>Import from Broker (CSV)</button>
+              </div>
+            )}
+          </div>
+          <button className="btn" onClick={toggleNeedsReview}>
+            Drafts · {drCounts.toReview}
+            <span className="hint" style={{ fontSize: 11 }}> of {drCounts.total} total</span>
+          </button>
+        </div>
+      </div>
 
       <div className="tabs" style={{ marginBottom: 12 }}>
         {(["overview", "trades", "review", "calendar", "analytics"] as Tab[]).map((t) => (
@@ -1054,46 +1209,122 @@ export default function JournalPage() {
         ))}
       </div>
 
-      {/* Source filter */}
-      <div style={{ display: "flex", gap: 6, marginBottom: 8, alignItems: "center", flexWrap: "wrap" }}>
-        <span style={{ fontSize: 12, color: "var(--muted)" }}>Source:</span>
-        {([["all", "All Trades"], ["simulator", "Simulator"], ["real", "Real Market"], ["daily_replay", "Daily Replay / Backtest"]] as [SourceFilter, string][]).map(([s, label]) => (
-          <button key={s} onClick={() => setSourceFilter(s)}
-            style={{
-              padding: "4px 12px", borderRadius: 16, fontSize: 12, cursor: "pointer",
-              background: sourceFilter === s ? "rgba(16,185,129,0.2)" : "rgba(255,255,255,0.05)",
-              border: sourceFilter === s ? "1px solid rgba(16,185,129,0.5)" : "1px solid rgba(255,255,255,0.1)",
-              color: sourceFilter === s ? "#34d399" : "var(--muted)",
-            }}>{label}</button>
-        ))}
-        {(drData.strategies.length > 0 || unified.some((t) => isDailyReplayTrade(t))) && (
-          <>
-            <span style={{ fontSize: 12, color: "var(--muted)", marginLeft: 10 }}>Strategy:</span>
-            <select className="input" style={{ width: "auto", fontSize: 12, padding: "4px 8px" }} value={strategyFilter}
-              onChange={(e) => setStrategyFilter(e.target.value)} aria-label="Strategy filter">
-              <option value="">All strategies</option>
-              {drData.strategies.map((s) => (
-                <option key={s.id} value={s.id}>{s.name}{s.archivedAt ? " (archived)" : ""}</option>
-              ))}
-              {drData.strategyVersions.map((v) => {
-                const s = drData.strategies.find((x) => x.id === v.strategyId);
-                return <option key={v.id} value={`version:${v.id}`}>{s?.name ?? "Strategy"} · v{v.version} only</option>;
-              })}
-              <option value="none">No strategy recorded</option>
+      {/* Headline metric cards — the same filtered set every view reads */}
+      <div className="jr-metrics">
+        <div className="card jr-metric">
+          <div className="jr-metric-label">Total Trades</div>
+          <div className="num jr-metric-value">{metrics.totalTrades}</div>
+        </div>
+        <div className="card jr-metric">
+          <div className="jr-metric-label">Win Rate</div>
+          <div className="num jr-metric-value">{metrics.winRate == null ? "—" : fmtPct(metrics.winRate)}</div>
+        </div>
+        <div className="card jr-metric">
+          <div className="jr-metric-label">Net P&L</div>
+          <div className="num jr-metric-value" style={{ color: metrics.netPnl > 0 ? "var(--emerald-bright)" : metrics.netPnl < 0 ? "#f6465d" : "var(--text)" }}>{fmtPnl(metrics.netPnl)}</div>
+        </div>
+        <div className="card jr-metric">
+          <div className="jr-metric-label">Average R</div>
+          <div className="num jr-metric-value">{analyticsRisk.avgR == null ? "—" : `${analyticsRisk.avgR.toFixed(2)}R`}</div>
+        </div>
+      </div>
+
+      {/* Unified filter bar — every control writes the existing
+          filter state consumed by the single `filtered` memo. */}
+      <div className="card jr-filterbar">
+        <div className="jr-filterbar-row">
+          <div className="jr-seg" role="group" aria-label="Source filter">
+            {([["all", "All"], ["simulator", "Simulator"], ["daily_replay", "Daily Replay"], ["real", "Real Market"]] as [SourceFilter, string][]).map(([s, label]) => (
+              <button key={s} className={`jr-seg-btn ${sourceFilter === s ? "active" : ""}`} onClick={() => setSourceFilter(s)}>{label}</button>
+            ))}
+          </div>
+          <div className="jr-filter-field">
+            <label htmlFor="jr-period">Date Range</label>
+            <select id="jr-period" className="input" value={period} onChange={(e) => setPeriod(e.target.value as Period)}>
+              <option value="today">Today</option>
+              <option value="week">This Week</option>
+              <option value="month">This Month</option>
+              <option value="30d">Last 30 Days</option>
+              <option value="90d">Last 90 Days</option>
+              <option value="ytd">Year to Date</option>
+              <option value="all">All Time</option>
             </select>
-          </>
+          </div>
+          <div className="jr-filter-field">
+            <label htmlFor="jr-ticker">Search Ticker</label>
+            <input id="jr-ticker" className="input" placeholder="Search ticker…" value={fTicker} onChange={(e) => setFTicker(e.target.value)} />
+          </div>
+          <div className="jr-filter-field">
+            <label htmlFor="jr-setup">Setup</label>
+            <select id="jr-setup" className="input" value={fSetup} onChange={(e) => setFSetup(e.target.value)}>
+              <option value="">All setups</option>
+              {SETUPS.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <button className="btn" onClick={() => setAdvancedOpen((v) => !v)} aria-expanded={advancedOpen}>Advanced Filters {advancedOpen ? "▴" : "▾"}</button>
+          <button className="btn" onClick={clearAllFilters}>Clear Filters</button>
+        </div>
+        {advancedOpen && (
+          <div className="jr-advanced">
+            {(drData.strategies.length > 0 || unified.some((t) => isDailyReplayTrade(t))) && (
+              <div className="jr-filter-field">
+                <label htmlFor="jr-strategy">Strategy</label>
+                <select id="jr-strategy" className="input" value={strategyFilter} onChange={(e) => setStrategyFilter(e.target.value)}>
+                  <option value="">All strategies</option>
+                  {drData.strategies.map((s) => (
+                    <option key={s.id} value={s.id}>{s.name}{s.archivedAt ? " (archived)" : ""}</option>
+                  ))}
+                  {drData.strategyVersions.map((v) => {
+                    const s = drData.strategies.find((x) => x.id === v.strategyId);
+                    return <option key={v.id} value={`version:${v.id}`}>{s?.name ?? "Strategy"} · v{v.version} only</option>;
+                  })}
+                </select>
+              </div>
+            )}
+            <div className="jr-filter-field">
+              <label htmlFor="jr-winloss">Win/Loss</label>
+              <select id="jr-winloss" className="input" value={fWinLoss} onChange={(e) => setFWinLoss(e.target.value)}>
+                <option value="">All</option>
+                <option value="win">Winners</option>
+                <option value="loss">Losers</option>
+              </select>
+            </div>
+          </div>
         )}
-        <button onClick={() => setDrDraftsView((v) => !v)}
-          style={{
-            padding: "4px 12px", borderRadius: 16, fontSize: 12, cursor: "pointer", marginLeft: 10,
-            background: drDraftsView ? "rgba(167,139,250,0.2)" : "rgba(255,255,255,0.05)",
-            border: drDraftsView ? "1px solid rgba(167,139,250,0.5)" : "1px solid rgba(255,255,255,0.1)",
-            color: drDraftsView ? "#c4b5fd" : "var(--muted)",
-          }}>
-          Daily Replay Drafts ({drCounts.total})
-          {drCounts.toReview > 0 ? ` · ${drCounts.toReview} to review` : ""}
-          {excludedCount > 0 ? ` · ${excludedCount} excluded from journal` : ""}
-        </button>
+        {(sourceFilter !== "all" || period !== "all" || fTicker !== "" || fSetup !== "" || strategyFilter !== "" || fWinLoss !== "") && (
+          <div className="jr-chips">
+            {sourceFilter !== "all" && (
+              <span className="jr-chip">Source: {sourceFilter === "simulator" ? "Simulator" : sourceFilter === "daily_replay" ? "Daily Replay" : "Real Market"}
+                <button className="jr-chip-x" onClick={() => setSourceFilter("all")} aria-label="Clear source filter">×</button>
+              </span>
+            )}
+            {period !== "all" && (
+              <span className="jr-chip">Date: {({ today: "Today", week: "This Week", month: "This Month", "30d": "Last 30 Days", "90d": "Last 90 Days", ytd: "Year to Date", all: "All Time" } as Record<Period, string>)[period]}
+                <button className="jr-chip-x" onClick={() => setPeriod("all")} aria-label="Clear date filter">×</button>
+              </span>
+            )}
+            {fTicker !== "" && (
+              <span className="jr-chip">Ticker: {fTicker}
+                <button className="jr-chip-x" onClick={() => setFTicker("")} aria-label="Clear ticker filter">×</button>
+              </span>
+            )}
+            {fSetup !== "" && (
+              <span className="jr-chip">Setup: {fSetup}
+                <button className="jr-chip-x" onClick={() => setFSetup("")} aria-label="Clear setup filter">×</button>
+              </span>
+            )}
+            {strategyFilter !== "" && (
+              <span className="jr-chip">Strategy: {strategyFilterLabel(strategyFilter)}
+                <button className="jr-chip-x" onClick={() => setStrategyFilter("")} aria-label="Clear strategy filter">×</button>
+              </span>
+            )}
+            {fWinLoss !== "" && (
+              <span className="jr-chip">{fWinLoss === "win" ? "Winners" : "Losers"}
+                <button className="jr-chip-x" onClick={() => setFWinLoss("")} aria-label="Clear win/loss filter">×</button>
+              </span>
+            )}
+          </div>
+        )}
       </div>
       {filtered.some((t) => isDailyReplayTrade(t)) && (
         <p className="hint" style={{ margin: "0 0 16px", fontSize: 12 }}>
@@ -1109,39 +1340,11 @@ export default function JournalPage() {
         </div>
       )}
 
-      {drDraftsView && (
-        <div className="card" style={{ padding: 16 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-            <h3 style={{ margin: 0 }}>Daily Replay Drafts</h3>
-            <span className="hint" style={{ fontSize: 12 }}>
-              {drCounts.total} draft{drCounts.total === 1 ? "" : "s"}
-              {drCounts.toReview > 0 ? ` · ${drCounts.toReview} to review` : ""}
-              {excludedCount > 0 ? ` · ${excludedCount} trade${excludedCount === 1 ? "" : "s"} excluded from the journal until finalized` : ""}
-            </span>
-          </div>
-          <p className="hint" style={{ margin: "0 0 12px", fontSize: 12 }}>
-            Closed Daily Replay position cycles, captured as drafts while you replay. Review a draft, then finalize it — a finalized trade appears in Trade Journal → Daily Replay / Backtest, analytics and AI Edge exports right away; the replay session does not need to be completed first.
-          </p>
-          {drDrafts.length === 0 && <p className="hint" style={{ margin: 0 }}>No Daily Replay drafts yet.</p>}
-          {drDrafts.length > 0 && actionableDrafts.length === 0 && (
-            <p className="hint" style={{ margin: "0 0 4px" }}>No drafts awaiting review — every draft is finalized.</p>
-          )}
-          {actionableDrafts.map((d) => renderDraftRow(d, true))}
-          {finalizedDrafts.length > 0 && (
-            <details style={{ marginTop: 10 }}>
-              <summary style={{ cursor: "pointer", fontSize: 13, fontWeight: 600, padding: "6px 0" }}>
-                Finalized ({finalizedDrafts.length}) <span className="hint" style={{ fontWeight: 400 }}>— already in the journal</span>
-              </summary>
-              {finalizedDrafts.map((d) => renderDraftRow(d, false))}
-            </details>
-          )}
-        </div>
-      )}
-      {!drDraftsView && tab === "overview" && <OverviewTab metrics={metrics} simMetrics={simMetrics} realMetrics={realMetrics} drMetrics={drMetrics} cumPnl={cumPnl} trades={filtered} sourceTotalCount={sourceTotalCount} sourceClosedCount={sourceClosedCount} period={period} setPeriod={setPeriod} sourceFilter={sourceFilter} avgR={analyticsRisk.avgR} maxDrawdown={analyticsRisk.maxDrawdownUSD} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} onAddRealTrade={() => { setEditingReal(null); setTab("trades"); setShowRealForm(true); }} onImportBroker={() => { setTab("trades"); setShowImport(true); }} />}
-      {!drDraftsView && tab === "trades" && <TradesTab trades={filtered} metas={metas} fTicker={fTicker} setFTicker={setFTicker} fSetup={fSetup} setFSetup={setFSetup} fWinLoss={fWinLoss} setFWinLoss={setFWinLoss} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} onRealTradeSaved={handleRealTradeSaved} showRealForm={showRealForm} setShowRealForm={setShowRealForm} showImport={showImport} setShowImport={setShowImport} sourceFilter={sourceFilter} editingReal={editingReal} onEditReal={startEditReal} onDeleteReal={startDeleteReal} onCancelEdit={cancelEdit} />}
-      {!drDraftsView && tab === "review" && <ReviewTab tradeKey={selectedKey} simTrade={!isRealSelected ? (selected as GroupedTrade | null) : null} realTrade={isRealSelected ? (selected as RealTrade | null) : null} meta={selectedMeta} onSaved={load} onEditReal={startEditReal} onDeleteReal={startDeleteReal} drInfo={selectedDrInfo} drDraftKey={selectedKey ? (draftForTrade(selectedKey, unified.find((t) => t.key === selectedKey)?.attemptId ?? null)?.draftKey ?? null) : null} drAutoCapture={selectedKey ? (draftForTrade(selectedKey, unified.find((t) => t.key === selectedKey)?.attemptId ?? null)?.autoCapture ?? null) : null} />}
-      {!drDraftsView && tab === "calendar" && <CalendarTab trades={closedFiltered} metas={metas} selectedDay={selectedCalDay} onSelectDay={setSelectedCalDay} onSelectTrade={(k) => { setSelectedKey(k); setTab("review"); }} />}
-      {!drDraftsView && tab === "analytics" && <AnalyticsTab trades={analyticsTrades} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} exportInput={{
+      {tab === "overview" && <OverviewTab metrics={metrics} simMetrics={simMetrics} realMetrics={realMetrics} drMetrics={drMetrics} cumPnl={cumPnl} trades={filtered} sourceTotalCount={sourceTotalCount} sourceClosedCount={sourceClosedCount} sourceFilter={sourceFilter} maxDrawdown={analyticsRisk.maxDrawdownUSD} onSelect={(k) => openDrawer(k)} onAddRealTrade={() => { setEditingReal(null); setTab("trades"); setShowRealForm(true); }} onImportBroker={() => { setTab("trades"); setShowImport(true); }} />}
+      {tab === "trades" && <TradesTab trades={filtered} metas={metas} onSelect={(k) => openDrawer(k)} onSelectShots={(k) => openDrawer(k, true)} onRealTradeSaved={handleRealTradeSaved} showRealForm={showRealForm} setShowRealForm={setShowRealForm} showImport={showImport} setShowImport={setShowImport} editingReal={editingReal} onEditReal={startEditReal} onDeleteReal={startDeleteReal} onCancelEdit={cancelEdit} />}
+      {tab === "review" && <ReviewTab tradeKey={selectedKey} simTrade={!isRealSelected ? (selected as GroupedTrade | null) : null} realTrade={isRealSelected ? (selected as RealTrade | null) : null} meta={selectedMeta} onSaved={load} onEditReal={startEditReal} onDeleteReal={startDeleteReal} drInfo={selectedDrInfo} drDraftKey={selectedKey ? (draftForTrade(selectedKey, unified.find((t) => t.key === selectedKey)?.attemptId ?? null)?.draftKey ?? null) : null} drAutoCapture={selectedKey ? (draftForTrade(selectedKey, unified.find((t) => t.key === selectedKey)?.attemptId ?? null)?.autoCapture ?? null) : null} />}
+      {tab === "calendar" && <CalendarTab trades={closedFiltered} metas={metas} selectedDay={selectedCalDay} onSelectDay={setSelectedCalDay} onSelectTrade={(k) => openDrawer(k)} />}
+      {tab === "analytics" && <AnalyticsTab trades={analyticsTrades} onSelect={(k) => openDrawer(k)} exportInput={{
         unified, metas, realTrades, simTrades: [...trades, ...drData.preTrades],
         drAttempts: drData.attemptsExport,
         drEvidence: drData.evidenceByKey,
@@ -1168,30 +1371,82 @@ export default function JournalPage() {
         drWithheldFinalizedDrafts: drData.withheldFinalized,
       }} />}
 
+      {/* Needs Review — Daily Replay drafts, additive below the tab
+          content (never replaces it). Finalized drafts live only in
+          the collapsed history subsection. */}
+      {(drDrafts.length > 0 || needsReviewOpen) && (
+        <div className="card jr-needs" ref={needsReviewRef} style={{ padding: 16, marginTop: 20 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, flexWrap: "wrap", gap: 8 }}>
+            <h3 style={{ margin: 0 }}>Needs review · {drCounts.toReview} draft{drCounts.toReview === 1 ? "" : "s"}</h3>
+            <span className="hint" style={{ fontSize: 12 }}>
+              {drCounts.total} draft{drCounts.total === 1 ? "" : "s"}
+              {drCounts.toReview > 0 ? ` · ${drCounts.toReview} to review` : ""}
+              {excludedCount > 0 ? ` · ${excludedCount} trade${excludedCount === 1 ? "" : "s"} excluded from the journal until finalized` : ""}
+            </span>
+          </div>
+          <p className="hint" style={{ margin: "0 0 12px", fontSize: 12 }}>
+            Closed Daily Replay position cycles, captured as drafts while you replay. Review a draft, then finalize it — a finalized trade appears in Trade Journal → Daily Replay / Backtest, analytics and AI Edge exports right away; the replay session does not need to be completed first.
+          </p>
+          {!needsReviewOpen ? (
+            <button className="btn" onClick={() => setNeedsReviewOpen(true)}>Show drafts</button>
+          ) : (
+            <>
+              {drDrafts.length === 0 && <p className="hint" style={{ margin: 0 }}>No Daily Replay drafts yet.</p>}
+              {drDrafts.length > 0 && actionableDrafts.length === 0 && (
+                <p className="hint" style={{ margin: "0 0 4px" }}>No drafts awaiting review — every draft is finalized.</p>
+              )}
+              {actionableDrafts.map((d) => renderDraftRow(d, true))}
+              {finalizedDrafts.length > 0 && (
+                <details style={{ marginTop: 10 }}>
+                  <summary style={{ cursor: "pointer", fontSize: 13, fontWeight: 600, padding: "6px 0" }}>
+                    Finalized ({finalizedDrafts.length}) <span className="hint" style={{ fontWeight: 400 }}>— already in the journal</span>
+                  </summary>
+                  {finalizedDrafts.map((d) => renderDraftRow(d, false))}
+                </details>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Trade detail drawer — the existing ReviewTab content,
+          unchanged, in a right-side panel. */}
+      {drawerKey && (
+        <div className="jr-drawer-backdrop" onClick={closeDrawer}>
+          <div className="jr-drawer" role="dialog" aria-label="Trade detail" onClick={(e) => e.stopPropagation()}>
+            <div className="jr-drawer-head">
+              <span style={{ fontSize: 13, fontWeight: 600 }}>Trade Detail</span>
+              <button className="btn" style={{ padding: "2px 10px", fontSize: 15, lineHeight: 1.2 }} onClick={closeDrawer} aria-label="Close trade detail">×</button>
+            </div>
+            <ReviewTab tradeKey={selectedKey} simTrade={!isRealSelected ? (selected as GroupedTrade | null) : null} realTrade={isRealSelected ? (selected as RealTrade | null) : null} meta={selectedMeta} onSaved={load} onEditReal={(k) => { closeDrawer(); startEditReal(k); }} onDeleteReal={(k) => { closeDrawer(); startDeleteReal(k); }} drInfo={selectedDrInfo} drDraftKey={selectedKey ? (draftForTrade(selectedKey, unified.find((t) => t.key === selectedKey)?.attemptId ?? null)?.draftKey ?? null) : null} drAutoCapture={selectedKey ? (draftForTrade(selectedKey, unified.find((t) => t.key === selectedKey)?.attemptId ?? null)?.autoCapture ?? null) : null} />
+          </div>
+        </div>
+      )}
+
       {activeDraft && (
         <DrDraftReview
           draft={activeDraft}
-          ticker={activeDraftExport?.ticker ?? null}
-          tradeDate={activeDraftExport?.tradeDate ?? null}
+          ticker={activeDraftExport?.ticker ?? (activeDraft ? drData.tickerByAttempt.get(activeDraft.attemptId)?.ticker ?? null : null)}
+          tradeDate={activeDraftExport?.tradeDate ?? (activeDraft ? drData.tickerByAttempt.get(activeDraft.attemptId)?.tradeDate ?? null : null)}
           attemptStatus={activeDraftAttempt?.status ?? null}
           events={activeDraftEvents}
           onClose={() => setReviewDraft(null)}
           onChanged={() => load()}
-          onViewInJournal={() => { setReviewDraft(null); setDrDraftsView(false); setSourceFilter("daily_replay"); setTab("trades"); }}
+          onViewInJournal={() => { setReviewDraft(null); revealFinalizedTrade(); }}
         />
       )}
 
       {finalizeTarget && (
         <DrFinalizeConfirm
           summary={{
-            ticker: drData.attemptsExport.find((a) => a.id === finalizeTarget.attemptId)?.ticker ?? null,
-            tradeDate: drData.attemptsExport.find((a) => a.id === finalizeTarget.attemptId)?.tradeDate ?? null,
+            ticker: drData.attemptsExport.find((a) => a.id === finalizeTarget.attemptId)?.ticker ?? drData.tickerByAttempt.get(finalizeTarget.attemptId)?.ticker ?? null,
+            tradeDate: drData.attemptsExport.find((a) => a.id === finalizeTarget.attemptId)?.tradeDate ?? drData.tickerByAttempt.get(finalizeTarget.attemptId)?.tradeDate ?? null,
             cycleIndex: finalizeTarget.cycleIndex,
             realizedPnl: finalizeTarget.realizedPnl,
           }}
           onConfirm={() => confirmFinalizeFromJournal(finalizeTarget)}
           onClose={() => setFinalizeTarget(null)}
-          onViewInJournal={() => { setDrDraftsView(false); setSourceFilter("daily_replay"); setTab("trades"); }}
+          onViewInJournal={() => { revealFinalizedTrade(); }}
         />
       )}
 
@@ -1247,7 +1502,7 @@ function badgeSourceOf(t: UnifiedTrade): "simulator" | "real" | "daily_replay" {
   return t.source === "real" ? "real" : isDailyReplayTrade(t) ? "daily_replay" : "simulator";
 }
 
-function OverviewTab({ metrics, simMetrics, realMetrics, drMetrics, cumPnl, trades, sourceTotalCount, sourceClosedCount, period, setPeriod, sourceFilter, avgR, maxDrawdown, onSelect, onAddRealTrade, onImportBroker }: {
+function OverviewTab({ metrics, simMetrics, realMetrics, drMetrics, cumPnl, trades, sourceTotalCount, sourceClosedCount, sourceFilter, maxDrawdown, onSelect, onAddRealTrade, onImportBroker }: {
   metrics: ReturnType<typeof calcMetrics>;
   simMetrics: ReturnType<typeof calcMetrics>;
   realMetrics: ReturnType<typeof calcMetrics>;
@@ -1258,19 +1513,12 @@ function OverviewTab({ metrics, simMetrics, realMetrics, drMetrics, cumPnl, trad
   sourceTotalCount: number;
   /** Closed trades matching the source filter, any period */
   sourceClosedCount: number;
-  period: Period;
-  setPeriod: (p: Period) => void;
   sourceFilter: SourceFilter;
-  avgR: number | null;
   maxDrawdown: number;
   onSelect: (k: string) => void;
   onAddRealTrade: () => void;
   onImportBroker: () => void;
 }) {
-  const periods: { id: Period; label: string }[] = [
-    { id: "today", label: "Today" }, { id: "week", label: "Week" }, { id: "month", label: "Month" },
-    { id: "30d", label: "30D" }, { id: "90d", label: "90D" }, { id: "ytd", label: "YTD" }, { id: "all", label: "All" },
-  ];
   const m = metrics;
   const stat = (label: string, value: string, pnl?: number | null) => (
     <div className="card" style={{ padding: "12px 14px" }}>
@@ -1291,12 +1539,6 @@ function OverviewTab({ metrics, simMetrics, realMetrics, drMetrics, cumPnl, trad
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
-        {periods.map((p) => (
-          <button key={p.id} className={`tab ${period === p.id ? "active" : ""}`} onClick={() => setPeriod(p.id)} style={{ fontSize: 12 }}>{p.label}</button>
-        ))}
-      </div>
-
       {m.totalTrades === 0 ? (
         sourceTotalCount === 0 ? (
           <div className="card" style={{ padding: 32, textAlign: "center" }}>
@@ -1345,15 +1587,11 @@ function OverviewTab({ metrics, simMetrics, realMetrics, drMetrics, cumPnl, trad
       ) : (
         <>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 16 }}>
-            {stat("Net P&L", fmtPnl(m.netPnl), m.netPnl)}
-            {stat("Win Rate", fmtPct(m.winRate))}
-            {stat("Total Trades", String(m.totalTrades))}
             {stat("Profit Factor", m.profitFactor == null ? "—" : m.profitFactor === Infinity ? "∞" : m.profitFactor.toFixed(2))}
             {stat("Avg Win", fmtPnl(m.avgWin), m.avgWin)}
             {stat("Avg Loss", fmtPnl(m.avgLoss), m.avgLoss)}
             {stat("Expectancy", fmtPnl(m.expectancy), m.expectancy)}
             {stat("Largest Win", fmtPnl(m.largestWin), m.largestWin)}
-            {stat("Avg R", avgR == null ? "—" : `${avgR.toFixed(2)}R`)}
             {stat("Max Drawdown", maxDrawdown > 0 ? fmtPnl(-maxDrawdown) : fmtPnl(0), maxDrawdown > 0 ? -maxDrawdown : 0)}
           </div>
 
@@ -1422,45 +1660,84 @@ function OverviewTab({ metrics, simMetrics, realMetrics, drMetrics, cumPnl, trad
 }
 
 /* ---------------- All Trades ---------------- */
-function TradesTab({ trades, metas, fTicker, setFTicker, fSetup, setFSetup, fWinLoss, setFWinLoss, onSelect, onRealTradeSaved, showRealForm, setShowRealForm, showImport, setShowImport, sourceFilter, editingReal, onEditReal, onDeleteReal, onCancelEdit }: {
+type TradeSortKey = "date" | "symbol" | "entry" | "qty" | "pnl";
+
+function TradesTab({ trades, metas, onSelect, onSelectShots, onRealTradeSaved, showRealForm, setShowRealForm, showImport, setShowImport, editingReal, onEditReal, onDeleteReal, onCancelEdit }: {
   trades: UnifiedTrade[]; metas: Record<string, TradeMeta>;
-  fTicker: string; setFTicker: (v: string) => void;
-  fSetup: string; setFSetup: (v: string) => void;
-  fWinLoss: string; setFWinLoss: (v: string) => void;
   onSelect: (k: string) => void;
+  /** Open the trade's detail with the screenshots gallery scrolled
+   *  into view (the kebab "Screenshots" action, real trades). */
+  onSelectShots: (k: string) => void;
   onRealTradeSaved: (notice?: string) => void;
   showRealForm: boolean; setShowRealForm: (v: boolean | ((p: boolean) => boolean)) => void;
   showImport: boolean; setShowImport: (v: boolean | ((p: boolean) => boolean)) => void;
-  sourceFilter: SourceFilter;
   editingReal: { trade: RealTrade; meta: TradeMeta | null } | null;
   onEditReal: (k: string) => void;
   onDeleteReal: (k: string) => void;
   onCancelEdit: () => void;
 }) {
+  // Client-side sorting + pagination over the page-level filtered
+  // set. Default sort (date desc) matches the incoming order exactly.
+  const [sortKey, setSortKey] = useState<TradeSortKey>("date");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [page, setPage] = useState(1);
+  const [menuKey, setMenuKey] = useState<string | null>(null);
+  const PAGE_SIZE = 25;
+
+  useEffect(() => { setPage(1); }, [trades]);
+
+  // Kebab menu: closes on outside click / Escape.
+  useEffect(() => {
+    if (!menuKey) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement).closest(".jr-kebab-cell")) setMenuKey(null);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setMenuKey(null); };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [menuKey]);
+
+  const sorted = useMemo(() => {
+    const arr = [...trades];
+    const mul = sortDir === "asc" ? 1 : -1;
+    arr.sort((a, b) => {
+      switch (sortKey) {
+        case "date": return mul * a.tradeDate.localeCompare(b.tradeDate);
+        case "symbol": return mul * a.ticker.localeCompare(b.ticker);
+        case "entry": return mul * ((a.entryPrice ?? 0) - (b.entryPrice ?? 0));
+        case "qty": return mul * (a.qty - b.qty);
+        case "pnl": return mul * (a.realizedPnl - b.realizedPnl);
+      }
+    });
+    return arr;
+  }, [trades, sortKey, sortDir]);
+
+  const pageCount = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
+  const safePage = Math.min(page, pageCount);
+  const pageTrades = sorted.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+  const rangeStart = sorted.length === 0 ? 0 : (safePage - 1) * PAGE_SIZE + 1;
+  const rangeEnd = Math.min(sorted.length, safePage * PAGE_SIZE);
+
+  const toggleSort = (k: TradeSortKey) => {
+    if (k === sortKey) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else { setSortKey(k); setSortDir(k === "date" ? "desc" : "asc"); }
+  };
+  const thStyle = { padding: "10px 12px", color: "var(--muted)", fontWeight: 600, fontSize: 11, textTransform: "uppercase" as const };
+  const sortHeader = (label: string, k: TradeSortKey) => (
+    <th key={k} style={thStyle}>
+      <button onClick={() => toggleSort(k)} aria-label={`Sort by ${label}`}
+        style={{ background: "none", border: "none", color: "inherit", font: "inherit", cursor: "pointer", padding: 0, textTransform: "uppercase" }}>
+        {label}{sortKey === k ? (sortDir === "asc" ? " ↑" : " ↓") : ""}
+      </button>
+    </th>
+  );
+
   return (
     <div>
-      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
-        <input className="input" placeholder="Search ticker…" value={fTicker} onChange={(e) => setFTicker(e.target.value)} style={{ maxWidth: 160 }} />
-        <select className="input" value={fSetup} onChange={(e) => setFSetup(e.target.value)} style={{ maxWidth: 180 }}>
-          <option value="">All setups</option>
-          {SETUPS.map((s) => <option key={s} value={s}>{s}</option>)}
-        </select>
-        <select className="input" value={fWinLoss} onChange={(e) => setFWinLoss(e.target.value)} style={{ maxWidth: 140 }}>
-          <option value="">Win/Loss</option>
-          <option value="win">Winners</option>
-          <option value="loss">Losers</option>
-        </select>
-        {sourceFilter !== "simulator" && (
-          <>
-            <button className="btn primary" onClick={() => { if (editingReal) onCancelEdit(); else setShowRealForm((v) => !v); }} style={{ marginLeft: "auto" }}>
-              {editingReal ? "Cancel edit" : showRealForm ? "Cancel" : "+ Add Real Trade"}
-            </button>
-            <button className="btn" onClick={() => setShowImport((v) => !v)}>
-              {showImport ? "Cancel" : "⭳ Import from Broker"}
-            </button>
-          </>
-        )}
-      </div>
       {showRealForm && (
         <RealTradeForm
           key={editingReal ? `edit-${editingReal.trade.id}` : "add"}
@@ -1469,18 +1746,31 @@ function TradesTab({ trades, metas, fTicker, setFTicker, fSetup, setFSetup, fWin
           onSaved={(notice) => { setShowRealForm(false); onRealTradeSaved(notice); }}
         />
       )}
-      {showImport && <BrokerImportForm onSaved={() => { setShowImport(false); onRealTradeSaved(); }} />}
+      {showImport && (
+        <div>
+          <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 6 }}>
+            <button className="btn" style={{ padding: "3px 12px", fontSize: 12 }} onClick={() => setShowImport(false)}>Close import</button>
+          </div>
+          <BrokerImportForm onSaved={() => { setShowImport(false); onRealTradeSaved(); }} />
+        </div>
+      )}
       <div className="card" style={{ padding: 0, overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+        <table className="jr-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
           <thead>
             <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)", textAlign: "left" }}>
-              {["Date", "Symbol", "Src", "Dir", "Entry", "Qty", "P&L", "Setup", "Grade", "Actions"].map((h) => (
-                <th key={h} style={{ padding: "10px 12px", color: "var(--muted)", fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>{h}</th>
-              ))}
+              {sortHeader("Date", "date")}
+              {sortHeader("Symbol", "symbol")}
+              <th style={thStyle}>Source</th>
+              <th style={thStyle}>Direction</th>
+              {sortHeader("Entry", "entry")}
+              {sortHeader("Qty", "qty")}
+              {sortHeader("P&L", "pnl")}
+              <th style={thStyle}>Setup</th>
+              <th style={thStyle}>Actions</th>
             </tr>
           </thead>
           <tbody>
-            {trades.map((t) => {
+            {pageTrades.map((t) => {
               const meta = metas[t.key];
               return (
                 <tr key={t.key} onClick={() => onSelect(t.key)}
@@ -1488,22 +1778,31 @@ function TradesTab({ trades, metas, fTicker, setFTicker, fSetup, setFSetup, fWin
                   <td style={{ padding: "10px 12px" }}>{t.tradeDate}</td>
                   <td style={{ padding: "10px 12px", fontWeight: 600 }}>{t.ticker}</td>
                   <td style={{ padding: "10px 12px" }}><SourceBadge source={badgeSourceOf(t)} />{t.strategyLabel && <div className="hint" style={{ fontSize: 11, marginTop: 3 }}>{t.strategyLabel}</div>}</td>
-                  <td style={{ padding: "10px 12px" }}>{t.direction}{t.isOpen && <span style={{ fontSize: 10, color: "#fbbf24", marginLeft: 4 }}>OPEN</span>}</td>
+                  <td style={{ padding: "10px 12px" }}>
+                    <span className={`jr-dir-badge ${t.direction === "long" ? "long" : "short"}`}>{t.direction === "long" ? "Long" : "Short"}</span>
+                    {t.isOpen && <span style={{ fontSize: 10, color: "#fbbf24", marginLeft: 6, fontWeight: 700 }}>OPEN</span>}
+                  </td>
                   <td className="num" style={{ padding: "10px 12px" }}>{t.entryPrice != null ? `$${t.entryPrice.toFixed(2)}` : "—"}</td>
                   <td className="num" style={{ padding: "10px 12px" }}>{t.qty}</td>
                   <td className="num" style={{ padding: "10px 12px", fontWeight: 700, color: t.realizedPnl > 0 ? "var(--emerald-bright)" : t.realizedPnl < 0 ? "#f6465d" : "var(--muted)" }}>{fmtPnl(t.realizedPnl)}</td>
                   <td style={{ padding: "10px 12px" }}>{meta?.setup_tag ?? "—"}</td>
-                  <td style={{ padding: "10px 12px" }}>{meta?.exec_grade ?? "—"}</td>
-                  <td style={{ padding: "10px 12px", whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>
-                    {t.source === "real" ? (
-                      <>
-                        <button className="btn" style={{ padding: "3px 10px", fontSize: 12, marginRight: 6 }}
-                          onClick={(e) => { e.stopPropagation(); onEditReal(t.key); }}>Edit</button>
-                        <button className="btn" style={{ padding: "3px 10px", fontSize: 12, color: "#f6465d", borderColor: "rgba(246,70,93,0.4)" }}
-                          onClick={(e) => { e.stopPropagation(); onDeleteReal(t.key); }}>Delete</button>
-                      </>
-                    ) : (
-                      <span className="hint">—</span>
+                  <td className="jr-kebab-cell" style={{ padding: "10px 12px", whiteSpace: "nowrap", position: "relative" }} onClick={(e) => e.stopPropagation()}>
+                    <button className="btn" style={{ padding: "3px 10px", fontSize: 12, marginRight: 6 }}
+                      onClick={(e) => { e.stopPropagation(); onSelect(t.key); }}>View</button>
+                    <button className="btn" style={{ padding: "3px 8px", fontSize: 12 }}
+                      aria-label={`More actions for ${t.ticker}`} aria-haspopup="menu" aria-expanded={menuKey === t.key}
+                      onClick={(e) => { e.stopPropagation(); setMenuKey(menuKey === t.key ? null : t.key); }}>⋯</button>
+                    {menuKey === t.key && (
+                      <div className="jr-menu jr-kebab-menu" role="menu">
+                        <button className="jr-menu-item" role="menuitem" onClick={() => { setMenuKey(null); onSelect(t.key); }}>View details</button>
+                        {t.source === "real" && (
+                          <>
+                            <button className="jr-menu-item" role="menuitem" onClick={() => { setMenuKey(null); onEditReal(t.key); }}>Edit trade</button>
+                            <button className="jr-menu-item" role="menuitem" onClick={() => { setMenuKey(null); onSelectShots(t.key); }}>Screenshots</button>
+                            <button className="jr-menu-item danger" role="menuitem" onClick={() => { setMenuKey(null); onDeleteReal(t.key); }}>Delete trade</button>
+                          </>
+                        )}
+                      </div>
                     )}
                   </td>
                 </tr>
@@ -1512,6 +1811,15 @@ function TradesTab({ trades, metas, fTicker, setFTicker, fSetup, setFSetup, fWin
           </tbody>
         </table>
         {trades.length === 0 && <p className="hint" style={{ padding: 20, textAlign: "center" }}>No trades match your filters.</p>}
+        {sorted.length > 0 && (
+          <div className="jr-table-footer">
+            <span className="hint">Showing {rangeStart}–{rangeEnd} of {sorted.length}</span>
+            <span style={{ display: "flex", gap: 8 }}>
+              <button className="btn" style={{ padding: "3px 12px", fontSize: 12 }} disabled={safePage <= 1} onClick={() => setPage(safePage - 1)}>Prev</button>
+              <button className="btn" style={{ padding: "3px 12px", fontSize: 12 }} disabled={safePage >= pageCount} onClick={() => setPage(safePage + 1)}>Next</button>
+            </span>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1573,7 +1881,7 @@ function ReviewScreenshots({ tradeKey, extraTradeKey, drDraftKey, drAutoCapture 
 
   if (shots.length === 0) return null;
   return (
-    <div className="card" style={{ padding: 16 }}>
+    <div className="card" id="trade-screenshots" style={{ padding: 16 }}>
       <h4 style={{ margin: "0 0 12px" }}>Screenshots</h4>
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
         {ordered.map((s) => {

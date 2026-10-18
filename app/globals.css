@@ -1607,3 +1607,125 @@ body.ws-active .footer { display: none; }
   align-items: center;
 }
 .l2-spread strong { font-size: 13px; }
+
+/* ============================================================
+   Trade Journal redesign (.jr-) — presentation only.
+   Charcoal panels, subtle borders, existing theme vars.
+   ============================================================ */
+.jr-head {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  gap: 12px; flex-wrap: wrap; margin-bottom: 16px;
+}
+.jr-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.jr-menu-wrap { position: relative; }
+.jr-menu {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 40;
+  min-width: 210px; padding: 6px;
+  background: var(--bg3); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow-sm);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.jr-menu-item {
+  appearance: none; background: none; border: none; cursor: pointer;
+  text-align: left; padding: 8px 10px; border-radius: 8px;
+  font: inherit; font-size: 13px; color: var(--text); white-space: nowrap;
+}
+.jr-menu-item:hover { background: var(--bg4); }
+.jr-menu-item.danger { color: #f6465d; }
+
+.jr-metrics {
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  gap: 10px; margin-bottom: 12px;
+}
+.jr-metric { padding: 12px 14px; }
+.jr-metric-label {
+  font-size: 11px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.jr-metric-value { font-size: 20px; font-weight: 700; color: var(--text); }
+
+.jr-filterbar { padding: 12px 14px; margin-bottom: 16px; }
+.jr-filterbar-row {
+  display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap;
+}
+.jr-filter-field { display: flex; flex-direction: column; gap: 4px; min-width: 130px; }
+.jr-filter-field label {
+  font-size: 11px; font-weight: 700; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.jr-filter-field .input { width: auto; }
+.jr-seg {
+  display: flex; border: 1px solid var(--border); border-radius: 10px;
+  overflow: hidden; flex-wrap: wrap;
+}
+.jr-seg-btn {
+  appearance: none; border: none; cursor: pointer; font: inherit;
+  padding: 8px 12px; font-size: 12.5px; font-weight: 600;
+  background: var(--bg3); color: var(--muted);
+  border-right: 1px solid var(--border);
+}
+.jr-seg-btn:last-child { border-right: none; }
+.jr-seg-btn.active { background: rgba(16, 185, 129, 0.18); color: var(--emerald-bright); }
+.jr-advanced {
+  display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end;
+  margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-soft);
+}
+.jr-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
+.jr-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; padding: 3px 6px 3px 10px; border-radius: 14px;
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.4); color: var(--emerald-bright);
+}
+.jr-chip-x {
+  appearance: none; background: none; border: none; cursor: pointer;
+  color: inherit; font-size: 14px; line-height: 1; padding: 0 2px;
+}
+
+.jr-table { min-width: 640px; }
+.jr-dir-badge {
+  font-size: 10px; padding: 2px 8px; border-radius: 10px; font-weight: 600;
+}
+.jr-dir-badge.long {
+  background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.35);
+  color: var(--emerald-bright);
+}
+.jr-dir-badge.short {
+  background: rgba(246, 70, 93, 0.1); border: 1px solid rgba(246, 70, 93, 0.35);
+  color: #f6465d;
+}
+.jr-kebab-menu { left: auto; right: 0; top: calc(100% + 4px); min-width: 170px; }
+.jr-table-footer {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 12px; flex-wrap: wrap; padding: 10px 12px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.jr-drawer-backdrop {
+  position: fixed; inset: 0; z-index: 110;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex; justify-content: flex-end;
+}
+.jr-drawer {
+  width: 100%; max-width: 760px; height: 100%;
+  background: var(--bg2); border-left: 1px solid var(--border);
+  overflow-y: auto; padding: 16px;
+}
+.jr-drawer-head {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 12px;
+}
+
+.jr-needs { scroll-margin-top: 12px; }
+.jr-needs-row {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 12px; padding: 10px 0; flex-wrap: wrap;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+@media (max-width: 700px) {
+  .jr-metrics { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 760px) {
+  .jr-drawer { max-width: 100%; border-left: none; }
+}
