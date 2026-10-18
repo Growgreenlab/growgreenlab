@@ -28,6 +28,7 @@
  *   Trades without an entry timestamp fall into a "Not recorded" bucket for
  *   the time-based dimensions — they are never guessed.
  */
+import { effectiveClassification } from "./strategyClassification";
 
 export interface AnalyticsTrade {
   key: string;
@@ -77,12 +78,28 @@ export interface AnalyticsTrade {
   strategyName: string | null;
   /** "Name · vN" for the strategy-version breakdown. */
   strategyVersionLabel: string | null;
+  /* --- strategy annotation (journal_trade_meta, 2026-10-18) ---
+   * The per-trade "Strategy traded" annotation — a DIFFERENT fact
+   * from the attempt binding above: recorded at review time, on any
+   * source, by stable strategy ID. Null whenever the annotation
+   * columns are unavailable (migration not applied) or the trader
+   * never recorded one — never backfilled from the binding. */
+  tradedStrategyId: string | null;
+  /** Registry name for tradedStrategyId, resolved by the caller. */
+  tradedStrategyName: string | null;
+  /** Raw recorded classification slug (meta.setup_class). The
+   *  effective classification (this, else the legacy hod_class
+   *  coalesce) is derived in lib/strategyClassification.ts. */
+  setupClass: string | null;
+  /** Execution grade annotation (meta.exec_grade); null when unset. */
+  execGrade: string | null;
 }
 
 export type BreakdownDimension =
   | "setup" | "hodClass" | "symbol" | "mistake" | "emotion" | "plan"
   | "source" | "session" | "timeOfDay" | "hold" | "side"
-  | "keyLevel" | "interaction" | "strategy" | "strategyVersion";
+  | "keyLevel" | "interaction" | "strategy" | "strategyVersion"
+  | "strategyTraded" | "setupClass" | "execGrade";
 
 /**
  * The one Daily Replay predicate: a simulator-class trade whose
@@ -116,6 +133,13 @@ export interface BreakdownRow {
   avgLoss: number | null;
   /** Mean of non-null rMultiple; null when no trade in the row has an R. */
   avgR: number | null;
+  /** How many trades in the row actually carry an R — an avgR from
+   *  1 trade must be distinguishable from one from 50. */
+  avgRSampleCount: number;
+  /** Largest peak-to-trough decline of THIS row's chronological
+   *  cumulative realized P&L curve, in dollars (same convention as
+   *  riskMetrics().maxDrawdownUSD, scoped to the row's trades). */
+  maxDrawdownUSD: number;
   /** netPnl / count (count includes breakevens — matches calcMetrics). */
   expectancy: number | null;
   profitFactor: number | null;
@@ -213,6 +237,15 @@ function bucketLabels(t: AnalyticsTrade, dim: BreakdownDimension): string[] {
         : "Simulator"];
     case "strategy": return [t.strategyName ?? "Not recorded"];
     case "strategyVersion": return [t.strategyVersionLabel ?? "Not recorded"];
+    case "strategyTraded":
+      // The annotation is the trader's own statement of what they
+      // were testing; a Daily Replay trade without an annotation
+      // falls back to its attempt's bound strategy (the plan it ran
+      // under) so bound-only history still groups meaningfully.
+      return [t.tradedStrategyName ?? t.strategyName ?? "Not recorded"];
+    case "setupClass":
+      return [effectiveClassification({ setup_class: t.setupClass, hod_class: t.hodClass })?.label ?? "Not recorded"];
+    case "execGrade": return [t.execGrade ?? "Not recorded"];
     case "session": return [sessionBucket(t)];
     case "timeOfDay": return [timeOfDayBucket(t)];
     case "hold": return [holdBucket(t)];
@@ -232,6 +265,14 @@ function summarize(label: string, rows: AnalyticsTrade[]): BreakdownRow {
   const rs = rows.map((t) => t.rMultiple).filter((r): r is number => r != null && isFinite(r));
   const holds = rows.map(holdMinutes).filter((h): h is number => h != null);
   const decided = winners.length + losers.length;
+  // Per-group drawdown: the same peak-to-trough walk riskMetrics()
+  // runs over the whole selection, scoped to this row's trades.
+  let cum = 0, peak = 0, maxDrawdownUSD = 0;
+  for (const t of chronological(rows)) {
+    cum += t.realizedPnl;
+    if (cum > peak) peak = cum;
+    if (peak - cum > maxDrawdownUSD) maxDrawdownUSD = peak - cum;
+  }
   return {
     key: label,
     label,
@@ -247,6 +288,8 @@ function summarize(label: string, rows: AnalyticsTrade[]): BreakdownRow {
     avgWin: winners.length > 0 ? grossProfit / winners.length : null,
     avgLoss: losers.length > 0 ? -(grossLoss / losers.length) : null,
     avgR: rs.length > 0 ? rs.reduce((s, r) => s + r, 0) / rs.length : null,
+    avgRSampleCount: rs.length,
+    maxDrawdownUSD,
     expectancy: rows.length > 0 ? netPnl / rows.length : null,
     profitFactor: grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? Infinity : null,
     avgHoldMinutes: holds.length > 0 ? holds.reduce((s, h) => s + h, 0) / holds.length : null,

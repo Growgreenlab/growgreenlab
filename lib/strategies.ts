@@ -52,6 +52,14 @@ export interface Strategy {
   archivedAt: string | null;
   createdAt: string | null;
   updatedAt: string | null;
+  /** Classification vocabulary family for the journal's per-trade
+   *  "Strategy traded" annotation (migration
+   *  journal-strategy-annotation-v1.sql — PREPARED, may not be
+   *  applied yet). Read defensively: the column is simply absent
+   *  from rows fetched before the migration, so this stays null and
+   *  the family falls back to read-time derivation from the latest
+   *  version's setup_type (lib/strategyClassification.ts). */
+  classificationFamily: string | null;
 }
 
 export interface StrategyVersion {
@@ -99,6 +107,7 @@ export function mapStrategyRow(r: Row): Strategy {
     archivedAt: str(r.archived_at),
     createdAt: str(r.created_at),
     updatedAt: str(r.updated_at),
+    classificationFamily: str(r.classification_family),
   };
 }
 
