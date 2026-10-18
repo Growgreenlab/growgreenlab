@@ -7,6 +7,7 @@
  * simulator trades via groupFillsIntoTrades, unified rows as the page's
  * useMemo builds them.
  */
+import { createHash } from "node:crypto";
 import { calcRealTrade, groupFillsIntoTrades, type GroupedTrade, type RawFill, type RealFill } from "./journal";
 import { riskMetrics } from "./journalAnalytics";
 import { deriveDrEvidence } from "./drTradeEvidence";
@@ -617,6 +618,275 @@ const RANGE = { start: "2026-10-01", end: "2026-10-31" };
   check("2.0 README documents 2.0 compatibility", readme.includes("SCHEMA 2.0 - WHAT CHANGED"));
   check("2.0 README backtest disclaimer", readme.includes("BACKTESTS: historical simulations"));
   check("2.0 README documents R rule", readme.includes("risk snapshot recorded at the first entry fill"));
+}
+
+/* ============ Phase D/E: timeline finalized-only filtering + draft keys ==
+ * One attempt (ATTX) with TWO cycles / two trades, plus a second
+ * attempt (ATTY) with one trade. A snapshot whose unified omits
+ * ATTX trade 2 must produce a decision_timeline.csv with trade 1's
+ * cycle events + ATTX lifecycle rows, NONE of trade 2's cycle event
+ * seqs, and correct trade_id cells; a snapshot omitting ALL of an
+ * attempt's trades contributes zero rows for that attempt. */
+{
+  const SESSX = "ffffffff-ffff-ffff-ffff-fffffffffff1";
+  const SESSY = "ffffffff-ffff-ffff-ffff-fffffffffff2";
+  const ATTX = "b1111111-1111-4111-8111-111111111111";
+  const ATTY = "b2222222-2222-4222-8222-222222222222";
+
+  const xGrouped: GroupedTrade[] = groupFillsIntoTrades([
+    sf("x1f1", SESSX, "buy", 100, 10.00, 5, 0, "2026-10-15T13:35:00.000Z"),
+    sf("x1f2", SESSX, "sell", 100, 11.00, 9, 100, "2026-10-15T13:39:00.000Z"),
+    sf("x2f1", SESSX, "buy", 50, 20.00, 12, 0, "2026-10-15T13:42:00.000Z"),
+    sf("x2f2", SESSX, "sell", 50, 19.00, 16, -50, "2026-10-15T13:46:00.000Z"),
+  ], { id: SESSX, ticker: "DRX", trade_date: "2026-10-15", source: "daily_replay" });
+  check("phaseDE fixture: ATTX groups into 2 trades", xGrouped.length === 2);
+  const yGrouped: GroupedTrade[] = groupFillsIntoTrades([
+    sf("y1f1", SESSY, "buy", 10, 5.00, 2, 0, "2026-10-15T14:02:00.000Z"),
+    sf("y1f2", SESSY, "sell", 10, 6.00, 4, 10, "2026-10-15T14:04:00.000Z"),
+  ], { id: SESSY, ticker: "DRY", trade_date: "2026-10-15", source: "daily_replay" });
+
+  // ATTX events — seqs are significant to the assertions below:
+  // 1 attempt_created, 2 session_started, 3-6 cycle 1, 7-10 cycle 2,
+  // 11 session_completed.
+  let xs = 0;
+  const xev = (type: DrEventType, payload: Record<string, unknown> = {}, idx = 0): DrEvent =>
+    ({ seq: ++xs, type, wallTs: 1760601000000 + xs * 5000, marketIdx: idx, marketTs: 1760544000000 + idx * 60000, payload });
+  const attXEvents: DrEvent[] = [
+    xev("attempt_created", { ticker: "DRX" }),
+    xev("session_started"),
+    xev("order_filled", { side: "buy", qty: 100, price: 10, candleIndex: 5 }, 5),
+    xev("risk_snapshot", { entry: 10, qty: 100, stopLoss: 9.5, takeProfit: 11, plannedRisk: 50, rewardRisk: 2 }, 5),
+    xev("order_filled", { side: "sell", qty: 100, price: 11, candleIndex: 9 }, 9),
+    xev("position_closed", { qty: 100, price: 11, realizedPnl: 100, sessionRealized: 100, reason: "target", unrealizedPnl: 0 }, 9),
+    xev("order_filled", { side: "buy", qty: 50, price: 20, candleIndex: 12 }, 12),
+    xev("risk_snapshot", { entry: 20, qty: 50, stopLoss: 19, takeProfit: 22, plannedRisk: 50, rewardRisk: 2 }, 12),
+    xev("order_filled", { side: "sell", qty: 50, price: 19, candleIndex: 16 }, 16),
+    xev("position_closed", { qty: 50, price: 19, realizedPnl: -50, sessionRealized: 50, reason: "stop-loss", unrealizedPnl: 0 }, 16),
+    xev("session_completed", {}, 17),
+  ];
+  const cycle2Seqs = new Set([7, 8, 9, 10]);
+  let ys = 0;
+  const yev = (type: DrEventType, payload: Record<string, unknown> = {}, idx = 0): DrEvent =>
+    ({ seq: ++ys, type, wallTs: 1760602000000 + ys * 5000, marketIdx: idx, marketTs: 1760544000000 + idx * 60000, payload });
+  const attYEvents: DrEvent[] = [
+    yev("attempt_created", { ticker: "DRY" }),
+    yev("order_filled", { side: "buy", qty: 10, price: 5, candleIndex: 2 }, 2),
+    yev("risk_snapshot", { entry: 5, qty: 10, stopLoss: 4.5, takeProfit: 6, plannedRisk: 5, rewardRisk: 2 }, 2),
+    yev("order_filled", { side: "sell", qty: 10, price: 6, candleIndex: 4 }, 4),
+    yev("position_closed", { qty: 10, price: 6, realizedPnl: 10, sessionRealized: 10, reason: "target", unrealizedPnl: 0 }, 4),
+  ];
+
+  const derivedX = deriveDrEvidence({ attemptId: ATTX, trades: xGrouped, events: attXEvents });
+  const derivedY = deriveDrEvidence({ attemptId: ATTY, trades: yGrouped, events: attYEvents });
+  const evidenceDE = new Map([...derivedX.byTradeKey, ...derivedY.byTradeKey]);
+  const drU2 = (g: GroupedTrade, att: string): ExportUnifiedInput => ({
+    ...simUnified(g), sessionSource: "daily_replay", attemptId: att,
+    rMultiple: evidenceDE.get(g.tradeKey)?.rMultiple ?? null,
+  });
+  const inputDE: ExportSnapshotInput = {
+    unified: [drU2(xGrouped[0], ATTX), drU2(xGrouped[1], ATTX), drU2(yGrouped[0], ATTY)],
+    metas: {},
+    realTrades: [],
+    simTrades: [...xGrouped, ...yGrouped],
+    drAttempts: [
+      { id: ATTX, sessionId: SESSX, strategyVersionId: null, status: "finished", startIndex: 4, createdAt: "2026-10-16T16:00:00Z", finishedAt: "2026-10-16T16:30:00Z", ticker: "DRX", tradeDate: "2026-10-15" },
+      { id: ATTY, sessionId: SESSY, strategyVersionId: null, status: "finished", startIndex: 1, createdAt: "2026-10-16T17:00:00Z", finishedAt: "2026-10-16T17:20:00Z", ticker: "DRY", tradeDate: "2026-10-15" },
+    ],
+    drEvidence: evidenceDE,
+    drEvents: [
+      ...attXEvents.map((event, i) => ({ id: `xev-${i + 1}`, attemptId: ATTX, event })),
+      ...attYEvents.map((event, i) => ({ id: `yev-${i + 1}`, attemptId: ATTY, event })),
+    ],
+    drEventTradeKeys: new Map([[ATTX, derivedX.eventTradeKey], [ATTY, derivedY.eventTradeKey]]),
+    strategies: [], strategyVersions: [],
+    drDraftKeys: new Map([
+      [xGrouped[0].tradeKey, { draftKey: `dr:${ATTX}:g0:c1`, autoCapture: {} }],
+      [xGrouped[1].tradeKey, { draftKey: `dr:${ATTX}:g0:c2`, autoCapture: {} }],
+    ]),
+  };
+  const rangeDE = { start: "2026-10-01", end: "2026-10-31" };
+
+  const fullDE = buildExportSnapshot(inputDE, { range: rangeDE, mode: "custom", source: "daily_replay" });
+  check("phaseDE full: 3 DR trades", fullDE.counts.total === 3 && fullDE.counts.dailyReplay === 3);
+  check("phaseDE draftInfoByTradeKey carried onto the DR block",
+    fullDE.dailyReplay?.draftInfoByTradeKey.get(xGrouped[0].tradeKey)?.draftKey === `dr:${ATTX}:g0:c1`
+    && fullDE.dailyReplay?.draftInfoByTradeKey.get(xGrouped[1].tradeKey)?.draftKey === `dr:${ATTX}:g0:c2`);
+  const fullRows = parseCsv(buildDecisionTimelineCsv(fullDE));
+  check("phaseDE full timeline: every event of both attempts present",
+    fullRows.length === 1 + attXEvents.length + attYEvents.length);
+
+  // Second snapshot: unified omits ATTX trade 2 (the unfinalized cycle).
+  const omitDE = buildExportSnapshot(
+    { ...inputDE, unified: [drU2(xGrouped[0], ATTX), drU2(yGrouped[0], ATTY)] },
+    { range: rangeDE, mode: "custom", source: "daily_replay" },
+  );
+  check("phaseDE omit: snapshot has 2 trades", omitDE.counts.total === 2);
+  const omitRows = parseCsv(buildDecisionTimelineCsv(omitDE)).slice(1);
+  const omitX = omitRows.filter((r) => r[1] === ATTX);
+  check("phaseDE omit: ATTX rows are trade-1 cycle + lifecycle only (7 rows)", omitX.length === 7);
+  check("phaseDE omit: NONE of trade 2's cycle event seqs present",
+    omitX.every((r) => !cycle2Seqs.has(Number(r[3]))));
+  check("phaseDE omit: trade-1 cycle rows carry trade 1's export id",
+    omitX.filter((r) => r[0] !== "").every((r) => r[0] === exportIdForTradeKey(xGrouped[0].tradeKey))
+    && omitX.some((r) => r[0] === exportIdForTradeKey(xGrouped[0].tradeKey)));
+  check("phaseDE omit: lifecycle rows kept with empty trade_id",
+    omitX.some((r) => r[4] === "attempt_created" && r[0] === "")
+    && omitX.some((r) => r[4] === "session_completed" && r[0] === ""));
+  check("phaseDE omit: ATTY rows untouched", omitRows.filter((r) => r[1] === ATTY).length === attYEvents.length);
+
+  // Third snapshot: ALL of ATTX's trades omitted -> zero ATTX rows.
+  const noneDE = buildExportSnapshot(
+    { ...inputDE, unified: [drU2(yGrouped[0], ATTY)] },
+    { range: rangeDE, mode: "custom", source: "daily_replay" },
+  );
+  const noneRows = parseCsv(buildDecisionTimelineCsv(noneDE)).slice(1);
+  check("phaseDE all-omitted attempt: zero rows for it", noneRows.filter((r) => r[1] === ATTX).length === 0);
+  check("phaseDE all-omitted attempt: other attempt still exports", noneRows.filter((r) => r[1] === ATTY).length === attYEvents.length);
+
+  /* --- README / prompt finalized-only + screenshot-timing notes --- */
+  const covDE = summarizeScreenshotCoverage(fullDE, [], true);
+  const readmeDE = buildReadme(fullDE, covDE, [], { pdfIncluded: false, pdfFailureNote: null, zipFileName: "x.zip" });
+  check("phaseDE README states finalized-only", readmeDE.includes("Daily Replay trades in this export are FINALIZED trades only — unfinalized drafts are excluded by design and never appear in any file in this package."));
+  check("phaseDE README states representative timing", readmeDE.includes("Daily Replay representative screenshots: an auto-captured representative shows the chart as staged at the entry fill; the entry candle was still forming when captured."));
+  const promptDE = buildChatGptPrompt(fullDE, covDE, { pdfIncluded: false });
+  check("phaseDE prompt states finalized-only", promptDE.includes("Daily Replay trades in this export are FINALIZED trades only — unfinalized drafts are excluded by design and never appear in any file in this package."));
+  check("phaseDE prompt states representative rule", promptDE.includes("Daily Replay screenshots: each Daily Replay trade contributes ONE representative screenshot"));
+  check("phaseDE schema version stays 2.0", fullDE.schemaVersion === "2.0");
+}
+
+/* ================= Representative screenshots + chart prompt
+ * (Representative plan §6.2): manifest roles, exactly-one-image
+ * propagation into trades.csv / analytics.json, coverage wording,
+ * rules 1–22 byte-identity vs the pinned pre-Stage-1 hashes, and the
+ * new unnumbered chart-analysis section. ================= */
+{
+  const RSESS = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  const RATT = "b2222222-2222-4222-8222-222222222222";
+  const RUSER = "user-00000000-0000-0000-0000-000000000001";
+  const RDRAFT = `dr:${RATT}:g0:c1`;
+  const RDSEG = `dr_${RATT}_g0_c1`;
+  const RFSEG = `${RSESS}_1`;
+  const R_ENTRY = `${RUSER}/${RDSEG}/auto-entry-c6.png`;
+  const R_EXIT = `${RUSER}/${RDSEG}/auto-exit-c10.png`;
+  const R_MANUAL = `${RUSER}/${RDSEG}/manual.png`;
+  const R_REVIEW = `${RUSER}/${RFSEG}/review.png`;
+  const rsf = (id: string, side: "buy" | "sell", qty: number, price: number, idx: number, pnl: number, t: string): RawFill =>
+    ({ id, session_id: RSESS, side, qty, price, candle_index: idx, candle_time: t, realized_pnl: pnl, created_at: t });
+  const rGrouped0 = groupFillsIntoTrades([
+    rsf("rx1", "buy", 100, 10, 5, 0, "2026-10-15T13:35:00.000Z"),
+    rsf("rx2", "sell", 100, 11, 9, 100, "2026-10-15T13:39:00.000Z"),
+  ], { id: RSESS, ticker: "REPR", trade_date: "2026-10-15", source: "daily_replay" })[0];
+  const rGrouped: GroupedTrade = { ...rGrouped0, tradeKey: `${RSESS}:1`, sessionId: RSESS, fills: rGrouped0.fills.map((f) => ({ ...f, session_id: RSESS })) };
+  const rEvents: DrEvent[] = [
+    { seq: 1, type: "order_filled", wallTs: 1760600000000, marketIdx: 5, marketTs: 1760544300000, payload: { side: "buy", qty: 100, price: 10, candleIndex: 5 } },
+    { seq: 2, type: "risk_snapshot", wallTs: 1760600001000, marketIdx: 5, marketTs: 1760544300000, payload: { entry: 10, qty: 100, stopLoss: 9.5, takeProfit: 11, plannedRisk: 50, rewardRisk: 2 } },
+    { seq: 3, type: "order_filled", wallTs: 1760600100000, marketIdx: 9, marketTs: 1760544540000, payload: { side: "sell", qty: 100, price: 11, candleIndex: 9 } },
+    { seq: 4, type: "position_closed", wallTs: 1760600100000, marketIdx: 9, marketTs: 1760544540000, payload: { qty: 100, price: 11, realizedPnl: 100, sessionRealized: 100, reason: "target", unrealizedPnl: 0 } },
+  ];
+  const rDerived = deriveDrEvidence({ attemptId: RATT, trades: [rGrouped], events: rEvents });
+  const mkSnap = (autoCapture: Record<string, unknown>) => buildExportSnapshot({
+    unified: [{
+      key: rGrouped.tradeKey, source: "simulator", ticker: "REPR", tradeDate: "2026-10-15",
+      direction: "long", entryPrice: 10, exitPrice: 11, qty: 100, realizedPnl: 100, isOpen: false,
+      rMultiple: 2, sessionSource: "daily_replay", attemptId: RATT,
+    }],
+    metas: {}, realTrades: [], simTrades: [rGrouped],
+    drAttempts: [{ id: RATT, sessionId: RSESS, strategyVersionId: null, status: "finished", startIndex: 4, createdAt: "2026-10-16T16:00:00Z", finishedAt: "2026-10-16T16:30:00Z", ticker: "REPR", tradeDate: "2026-10-15" }],
+    drEvidence: rDerived.byTradeKey,
+    drEvents: rEvents.map((event, i) => ({ id: `rev-${i + 1}`, attemptId: RATT, event })),
+    drEventTradeKeys: new Map([[RATT, rDerived.eventTradeKey]]),
+    strategies: [], strategyVersions: [],
+    drDraftKeys: new Map([[rGrouped.tradeKey, { draftKey: RDRAFT, autoCapture }]]),
+  }, { range: { start: "2026-10-01", end: "2026-10-31" }, mode: "custom", source: "daily_replay" });
+  const bothCaptured = {
+    entry: { path: R_ENTRY, candleIndex: 5, status: "captured" },
+    exit: { path: R_EXIT, candleIndex: 9, status: "captured" },
+  };
+  const listedAll = new Map([[rGrouped.tradeKey, [R_ENTRY, R_EXIT, R_MANUAL, R_REVIEW]]]);
+
+  const snapR = mkSnap(bothCaptured);
+  check("rep: record carries fill candle indices", snapR.trades[0].entryCandleIndex === 5 && snapR.trades[0].exitCandleIndex === 9);
+
+  const manR = buildScreenshotManifest(snapR, listedAll, RUSER);
+  check("rep: manifest lists ALL FOUR images (none silently dropped)", manR.length === 4);
+  const repEntries = manR.filter((e) => e.role === "representative");
+  check("rep: exactly ONE representative — the entry capture", repEntries.length === 1 && repEntries[0].storagePath === R_ENTRY);
+  check("rep: representative is downloadable (listed + file set)", repEntries[0].status === "listed" && repEntries[0].file !== null);
+  check("rep: representative source/candle recorded", repEntries[0].representativeSource === "auto_entry" && repEntries[0].candleIndex === 5);
+  check("rep: exit + manual + review are not-included attachments with no file",
+    manR.filter((e) => e.role === "attachment").every((e) => e.status === "not-included" && e.file === null && e.fileName === null)
+    && manR.some((e) => e.storagePath === R_EXIT && e.status === "not-included"));
+
+  // Exactly-one-image propagation: flip the representative to included
+  // (as the package does after download) and rebuild artifacts.
+  repEntries[0].status = "included";
+  const csvRows = parseCsv(buildTradesCsv(snapR, manR));
+  const shotCol = CSV_COLUMNS.indexOf("screenshot_files");
+  const drRow = csvRows.find((r) => r[1] === "REPR");
+  check("rep: trades.csv names ONLY the representative file",
+    drRow !== undefined && drRow[shotCol] === repEntries[0].fileName);
+  const docR2 = buildAnalyticsJson(snapR, manR, summarizeScreenshotCoverage(snapR, manR, true)) as any;
+  check("rep: analytics tradesIndex lists ONLY the representative",
+    JSON.stringify(docR2.tradesIndex[0].screenshots) === JSON.stringify([repEntries[0].fileName]));
+  check("rep: analytics public manifest carries role/source/candle",
+    docR2.metadata.screenshotManifest.some((e: any) => e.role === "representative" && e.representativeSource === "auto_entry" && e.candleIndex === 5)
+    && docR2.metadata.screenshotManifest.filter((e: any) => e.status === "not-included").length === 3);
+  check("rep: public manifest never leaks storage paths",
+    docR2.metadata.screenshotManifest.every((e: any) => !("storagePath" in e) && !("tradeKey" in e)));
+  const covR = summarizeScreenshotCoverage(snapR, manR, true);
+  check("rep: coverage counts the representative", covR.dailyReplayTradesWithRepresentative === 1 && covR.screenshotFiles === 1);
+
+  // User selection wins over the entry default.
+  const snapSel = mkSnap({ ...bothCaptured, representative: { path: R_EXIT, selectedAt: "2026-10-17T00:00:00.000Z" } });
+  const manSel = buildScreenshotManifest(snapSel, listedAll, RUSER);
+  check("rep: user-selected exit becomes the representative",
+    manSel.filter((e) => e.role === "representative").length === 1
+    && manSel.find((e) => e.role === "representative")?.storagePath === R_EXIT
+    && manSel.find((e) => e.role === "representative")?.representativeSource === "user_selected"
+    && manSel.find((e) => e.storagePath === R_ENTRY)?.status === "not-included");
+
+  // Entry failed -> no representative at all; coverage says so plainly.
+  const snapNone = mkSnap({ entry: { status: "failed" }, exit: { path: R_EXIT, candleIndex: 9, status: "captured" } });
+  const manNone = buildScreenshotManifest(snapNone, listedAll, RUSER);
+  check("rep: entry failed + exit captured -> NO representative, all not-included",
+    manNone.every((e) => e.role === "attachment" && e.status === "not-included"));
+  const covNone = summarizeScreenshotCoverage(snapNone, manNone, true);
+  check("rep: coverage note says 'had no representative screenshot'", covNone.note.includes("had no representative screenshot"));
+
+  /* ---- prompt: rules 1–22 byte-identity + new section ---- */
+  const promptR = buildChatGptPrompt(snapR, covR, { pdfIncluded: false, chartContextIncluded: true, representativeIncluded: true });
+  const aStart = promptR.indexOf("1. Begin with a concise summary");
+  const aEnd = promptR.indexOf("validate each hypothesis.") + "validate each hypothesis.".length;
+  check("prompt: rules 1-15 byte-identical to the pinned pre-Stage-1 hash",
+    createHash("sha256").update(promptR.slice(aStart, aEnd)).digest("hex") === "7e28fe0cf4f9173dfbf7f70c5ef6e48d01c5b3f8358615ab43d7b451c16dd49e");
+  const bStart = promptR.indexOf("16. Evaluate the QUALITY");
+  const bEnd = promptR.indexOf("never mix the two clocks.") + "never mix the two clocks.".length;
+  check("prompt: rules 16-22 byte-identical to the pinned pre-Stage-1 hash",
+    createHash("sha256").update(promptR.slice(bStart, bEnd)).digest("hex") === "2a0f704fb18a4e5e5723d4cbdf0dc0db2a462c60b6953a85dacdc92ac61b9e27");
+  check("prompt: chart-analysis section present (unnumbered supplement)",
+    promptR.includes("REPRESENTATIVE SCREENSHOT & CHART ANALYSIS") && promptR.includes("not a continuation of them"));
+  check("prompt: section separates observations from interpretations",
+    promptR.includes("Observations first") && promptR.includes("Interpretations second"));
+  check("prompt: section carries the no-hindsight rule",
+    promptR.includes("No-hindsight rule") && promptR.includes("judge the entry decision ONLY from entry_context"));
+  check("prompt: section covers structure checklist + verdict",
+    promptR.includes("higher highs/higher lows") && promptR.includes("consolidation") && promptR.includes("HOD")
+    && promptR.includes("SUPPORTED the stated setup") && promptR.includes("clean, weak, or failed"));
+  check("prompt: section forbids invented levels + requires missing-evidence honesty",
+    promptR.includes("No invented levels") && promptR.includes("Missing evidence"));
+  check("prompt: files list names chart_context.csv with its sections",
+    promptR.includes("chart_context.csv - per-trade historical OHLCV") && promptR.includes("post_entry_development"));
+  const promptNoCtx = buildChatGptPrompt(snapR, covR, { pdfIncluded: false });
+  check("prompt: section omitted when no chart context and no representative",
+    !promptNoCtx.includes("REPRESENTATIVE SCREENSHOT & CHART ANALYSIS") && !promptNoCtx.includes("chart_context.csv - per-trade"));
+
+  /* ---- README: chart context inventory + schema note ---- */
+  const readmeR = buildReadme(snapR, covR, manR, { pdfIncluded: false, pdfFailureNote: null, zipFileName: "x.zip", chartContextIncluded: true });
+  check("readme: inventory lists chart_context.csv when included", readmeR.split("\n").some((l) => l === "- chart_context.csv"));
+  check("readme: schema note describes representative + sections",
+    readmeR.includes("Representative screenshots (additive within schema 2.0)") && readmeR.includes("entry_candle_final"));
+  const readmeNoCtx = buildReadme(snapR, covR, manR, { pdfIncluded: false, pdfFailureNote: null, zipFileName: "x.zip" });
+  check("readme: chart_context.csv absent from inventory when not included", !readmeNoCtx.split("\n").some((l) => l === "- chart_context.csv"));
 }
 
 console.log(`edgeExport tests: ${passed} passed, ${failed} failed`);

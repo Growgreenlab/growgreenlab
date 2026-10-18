@@ -28,6 +28,9 @@ import {
   type ExportSnapshot, type ScreenshotManifestEntry,
 } from "./edgeExport";
 import type { PdfScreenshotImage } from "./edgeExportPdf";
+import {
+  buildChartContextCsv, buildTradeChartContext, summarizeChartContexts,
+} from "./drChartContext";
 
 export type ExportProgressFn = (stage: string, pct?: number) => void;
 
@@ -37,6 +40,11 @@ export interface GeneratePackageOptions {
   /** Include decision_timeline.csv (default true when the snapshot
    *  has Daily Replay trades; the file is only ever produced then). */
   includeDecisionTimeline?: boolean;
+  /** Include chart_context.csv — per-trade OHLCV from the sessions'
+   *  stored candles (default true when the snapshot has Daily Replay
+   *  trades). The file is produced only when at least one trade's
+   *  context validates; per-trade failures become warnings. */
+  includeChartContext?: boolean;
 }
 
 export interface PackageSummary {
@@ -83,14 +91,27 @@ export async function listExportScreenshots(
   snapshot: ExportSnapshot,
   onProgress?: ExportProgressFn,
 ): Promise<Map<string, string[]>> {
-  const realKeys = snapshot.trades.filter((r) => r.source === "real" || r.isDailyReplay).map((r) => r.tradeKey);
+  const eligible = snapshot.trades.filter((r) => r.source === "real" || r.isDailyReplay);
   const out = new Map<string, string[]>();
   let done = 0;
-  await mapPool(realKeys, 4, async (tradeKey) => {
-    const list = await listScreenshots(client, userId, tradeKey);
-    out.set(tradeKey, list.map((s) => s.path));
+  await mapPool(eligible, 4, async (rec) => {
+    // Daily Replay trades union BOTH prefixes (plan §2.4): the
+    // canonical session trade key and, when the trade was born as a
+    // draft, its draft key — auto-captures and draft-era uploads live
+    // under the draft prefix. Merged + deduped by storage path.
+    const keys = [rec.tradeKey];
+    if (rec.isDailyReplay) {
+      const draftKey = snapshot.dailyReplay?.draftInfoByTradeKey?.get(rec.tradeKey)?.draftKey;
+      if (draftKey && draftKey !== rec.tradeKey) keys.push(draftKey);
+    }
+    const paths: string[] = [];
+    for (const k of keys) {
+      const list = await listScreenshots(client, userId, k);
+      for (const s of list) if (!paths.includes(s.path)) paths.push(s.path);
+    }
+    out.set(rec.tradeKey, paths);
     done++;
-    onProgress?.(`Checking screenshots (${done}/${realKeys.length})`, realKeys.length ? (done / realKeys.length) * 100 : 100);
+    onProgress?.(`Checking screenshots (${done}/${eligible.length})`, eligible.length ? (done / eligible.length) * 100 : 100);
   });
   return out;
 }
@@ -111,10 +132,13 @@ export async function generateEdgePackage(
   if (options.includeScreenshots) {
     onProgress?.("Checking screenshots", 0);
     const listed = await listExportScreenshots(client, userId, snapshot, onProgress);
-    manifest = buildScreenshotManifest(snapshot, listed);
-    if (manifest.length > 0) {
+    manifest = buildScreenshotManifest(snapshot, listed, userId);
+    // "not-included" entries (non-representative DR images) are listed
+    // in the manifest only — their bytes are never downloaded.
+    const downloadable = manifest.filter((e) => e.status !== "not-included");
+    if (downloadable.length > 0) {
       let done = 0;
-      await mapPool(manifest, 4, async (entry) => {
+      await mapPool(downloadable, 4, async (entry) => {
         try {
           const { data, error } = await client.storage.from(BUCKET).download(entry.storagePath);
           if (error || !data) throw new Error(error?.message ?? "download returned no data");
@@ -128,7 +152,7 @@ export async function generateEdgePackage(
           warnings.push(`Screenshot ${entry.fileName} for ${entry.tradeId} could not be downloaded (${e instanceof Error ? e.message : "unknown error"}) - it is listed in the manifest as unavailable, not silently omitted.`);
         }
         done++;
-        onProgress?.(`Downloading screenshots (${done}/${manifest.length})`, (done / manifest.length) * 100);
+        onProgress?.(`Downloading screenshots (${done}/${downloadable.length})`, (done / downloadable.length) * 100);
       });
     }
   }
@@ -138,6 +162,58 @@ export async function generateEdgePackage(
   const strategyJson = buildStrategyJson(snapshot);
   const includeTimeline = options.includeDecisionTimeline !== false && snapshot.dailyReplay != null;
   const timelineCsv = includeTimeline ? buildDecisionTimelineCsv(snapshot) : null;
+
+  /* ---- chart context (Representative plan §5 S1.2, DR only) ----
+   * Built ONLY from the sessions' STORED candles (replay_sessions.
+   * candles), read through the caller's own RLS session. A fetch or
+   * validation failure never aborts the package and never invents
+   * data: the file is omitted and the reason is a warning. Also
+   * stamps the representative manifest entries' candleTime from the
+   * validated entry candle. */
+  let chartContextCsv: string | null = null;
+  const representativeIncluded = manifest.some((e) => e.role === "representative" && e.status === "included");
+  if (snapshot.dailyReplay && options.includeChartContext !== false) {
+    onProgress?.("Building chart context", undefined);
+    try {
+      const drRecs = snapshot.trades.filter((r) => r.isDailyReplay);
+      const attemptSession = new Map(snapshot.dailyReplay.attempts.map((a) => [a.id, a.sessionId]));
+      const sessionIdFor = (tradeKey: string, attemptId: string | null): string =>
+        (attemptId ? attemptSession.get(attemptId) : undefined) ?? tradeKey.slice(0, tradeKey.lastIndexOf(":"));
+      const sessionIds = [...new Set(drRecs.map((r) => sessionIdFor(r.tradeKey, r.attemptId)))];
+      const candlesBySession = new Map<string, unknown>();
+      if (typeof (client as unknown as { from?: unknown }).from === "function" && sessionIds.length > 0) {
+        const { data, error } = await client.from("replay_sessions").select("id, candles").in("id", sessionIds);
+        if (error) throw new Error(error.message);
+        for (const row of (data ?? []) as unknown as { id: string; candles: unknown }[]) {
+          candlesBySession.set(row.id, row.candles);
+        }
+      }
+      const contexts = drRecs.map((r) => buildTradeChartContext({
+        tradeId: r.exportId,
+        tradeKey: r.tradeKey,
+        symbol: r.symbol,
+        attemptId: r.attemptId,
+        entryCandleIndex: r.entryCandleIndex,
+        exitCandleIndex: r.exitCandleIndex,
+        recordedEntryTime: r.entryTime,
+        candles: candlesBySession.get(sessionIdFor(r.tradeKey, r.attemptId)),
+      }));
+      for (const ctx of contexts) {
+        if (!ctx.available || !ctx.entryTime) continue;
+        const entry = manifest.find((e) => e.tradeId === ctx.tradeId && e.role === "representative");
+        if (entry) entry.candleTime = ctx.entryTime;
+      }
+      chartContextCsv = buildChartContextCsv(contexts);
+      const summary = summarizeChartContexts(contexts);
+      for (const u of summary.unavailable) {
+        warnings.push(`Chart context unavailable for ${u.tradeId}: ${u.reason} — the trade is exported without OHLCV context; nothing was invented.`);
+      }
+      for (const n of summary.notes) warnings.push(`Chart context note — ${n}`);
+    } catch (e) {
+      chartContextCsv = null;
+      warnings.push(`Chart context (chart_context.csv) could not be built (${e instanceof Error ? e.message : "unknown error"}) — the package was produced without it; no OHLCV was invented.`);
+    }
+  }
 
   /* ---- text artifacts (all from the same snapshot + final manifest) ---- */
   onProgress?.("Building analytics", undefined);
@@ -170,8 +246,17 @@ export async function generateEdgePackage(
   }
   const pdfIncluded = pdfBytes != null;
 
-  const promptText = buildChatGptPrompt(snapshot, coverage, { pdfIncluded, timelineIncluded: includeTimeline });
-  const readme = buildReadme(snapshot, coverage, manifest, { pdfIncluded, pdfFailureNote, zipFileName, timelineIncluded: includeTimeline });
+  const promptText = buildChatGptPrompt(snapshot, coverage, {
+    pdfIncluded,
+    timelineIncluded: includeTimeline,
+    chartContextIncluded: chartContextCsv != null,
+    representativeIncluded,
+  });
+  const readme = buildReadme(snapshot, coverage, manifest, {
+    pdfIncluded, pdfFailureNote, zipFileName,
+    timelineIncluded: includeTimeline,
+    chartContextIncluded: chartContextCsv != null,
+  });
   // Privacy: the downloadable manifest contains ONLY the public
   // projection — raw storage paths (account UUID, internal object ids)
   // and internal trade keys are never serialized into the ZIP.
@@ -192,6 +277,7 @@ export async function generateEdgePackage(
   zip.file("screenshots-manifest.json", manifestJson);
   if (timelineCsv) zip.file("decision_timeline.csv", timelineCsv);
   if (strategyJson) zip.file("strategy.json", JSON.stringify(strategyJson, null, 2));
+  if (chartContextCsv) zip.file("chart_context.csv", chartContextCsv);
   if (options.includeScreenshots) {
     const folder = zip.folder("screenshots");
     if (shotBytes.size > 0) {
@@ -211,6 +297,7 @@ export async function generateEdgePackage(
     "ChatGPT_Prompt.txt", "README.txt", "screenshots-manifest.json",
     ...(timelineCsv ? ["decision_timeline.csv"] : []),
     ...(strategyJson ? ["strategy.json"] : []),
+    ...(chartContextCsv ? ["chart_context.csv"] : []),
     ...(shotBytes.size > 0 ? [...shotBytes.keys()] : []),
   ];
 

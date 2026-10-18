@@ -72,6 +72,30 @@ export async function uploadScreenshots(
 }
 
 /**
+ * Upload ONE screenshot blob (e.g. an automatic chart capture) to a
+ * DETERMINISTIC path — `{userId}/{segment(tradeKey)}/{fileName}` —
+ * with upsert enabled, so a retry overwrites the same object instead
+ * of piling up duplicates (contrast uploadScreenshots, whose random
+ * names suit one-off manual uploads). Returns the storage path plus
+ * an error string (null on success); the path is returned either way
+ * so callers can record the intended location.
+ */
+export async function uploadScreenshotBlob(
+  client: SupabaseClient,
+  userId: string,
+  tradeKey: string,
+  fileName: string,
+  blob: Blob,
+): Promise<{ path: string; error: string | null }> {
+  const path = `${userId}/${segment(tradeKey)}/${safeFileName(fileName)}`;
+  const { error } = await client.storage.from(BUCKET).upload(path, blob, {
+    contentType: "image/png",
+    upsert: true,
+  });
+  return { path, error: error ? error.message : null };
+}
+
+/**
  * List a trade's screenshots with fresh signed URLs (1 hour TTL).
  * Returns [] on any error (missing bucket, no files, signed-url
  * failure) so callers can treat "no screenshots" uniformly.

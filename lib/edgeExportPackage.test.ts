@@ -337,7 +337,10 @@ async function main() {
     const manifestDoc = JSON.parse(manifestT) as any;
     const entry = (manifestDoc.entries as any[]).find((e) => e.tradeId === `TRADE-${RW_ID}`);
     check("priv: manifest entry maps id/file/status", !!entry && entry.file === shotPath && entry.status === "included" && entry.symbol === "PRIV" && entry.type === "trade-screenshot");
-    check("priv: manifest entry keys are exactly the public set", !!entry && JSON.stringify(Object.keys(entry).sort()) === JSON.stringify(["capturedAt", "file", "fileName", "status", "symbol", "tradeId", "type"]));
+    // Deliberate update (Representative plan §5 S1.2): the public set
+    // gains role / representativeSource / candleIndex / candleTime —
+    // still NO storagePath, tradeKey or account identifiers.
+    check("priv: manifest entry keys are exactly the public set", !!entry && JSON.stringify(Object.keys(entry).sort()) === JSON.stringify(["candleIndex", "candleTime", "capturedAt", "file", "fileName", "representativeSource", "role", "status", "symbol", "tradeId", "type"]));
 
     // Analytics: gross values on the documented net basis + definitions.
     const analytics = JSON.parse(analyticsT) as any;
@@ -426,6 +429,216 @@ async function main() {
     check("2.0 pkg: timeline toggle off omits the file but keeps strategy.json",
       !zip2.file("decision_timeline.csv") && !!zip2.file("strategy.json"));
     check("2.0 pkg: prompt does not list an omitted timeline", !noTl.promptText.includes("decision_timeline.csv - the"));
+  }
+
+  /* ---- Phase D/E: listExportScreenshots draft-prefix union ---- */
+  {
+    const { listExportScreenshots } = await import("./edgeExportPackage");
+    const PKG_SESSION = "66666666-6666-4666-8666-666666666666";
+    const PKG_TL_SESSION = "77777777-7777-4777-8777-777777777777";
+    const PKG_ATT = "c1111111-1111-4111-8111-111111111111";
+    const drKey = `${PKG_SESSION}:1`;
+    const tlKey = `${PKG_TL_SESSION}:1`;
+    const draftKey = `dr:${PKG_ATT}:g0:c1`;
+    const canonPrefix = `${USER}/${PKG_SESSION}_1`;
+    const draftPrefix = `${USER}/dr_${PKG_ATT}_g0_c1`;
+    const tlPrefix = `${USER}/${PKG_TL_SESSION}_1`;
+    const pkgInput: ExportSnapshotInput = {
+      unified: [
+        {
+          key: drKey, source: "simulator", ticker: "DRPKG", tradeDate: "2026-10-15",
+          direction: "long", entryPrice: 10, exitPrice: 11, qty: 100, realizedPnl: 100,
+          isOpen: false, rMultiple: 2, sessionSource: "daily_replay", attemptId: PKG_ATT,
+        },
+        {
+          key: tlKey, source: "simulator", ticker: "TLPKG", tradeDate: "2026-10-15",
+          direction: "long", entryPrice: 5, exitPrice: 5.5, qty: 100, realizedPnl: 50,
+          isOpen: false, rMultiple: null, sessionSource: "sample", attemptId: null,
+        },
+      ],
+      metas: {},
+      realTrades: [],
+      simTrades: [],
+      drAttempts: [{ id: PKG_ATT, sessionId: PKG_SESSION, strategyVersionId: null, status: "finished", startIndex: 4, createdAt: "2026-10-16T16:00:00Z", finishedAt: "2026-10-16T16:30:00Z", ticker: "DRPKG", tradeDate: "2026-10-15" }],
+      drEvidence: new Map(),
+      drEvents: [],
+      drEventTradeKeys: new Map(),
+      strategies: [], strategyVersions: [],
+      drDraftKeys: new Map([[drKey, { draftKey, autoCapture: {} }]]),
+    };
+    const pkgSnap = buildExportSnapshot(pkgInput, { range: { start: "2026-10-01", end: "2026-10-31" }, mode: "custom", source: "all" });
+    check("phaseDE pkg: snapshot carries the draft-key mapping",
+      pkgSnap.dailyReplay?.draftInfoByTradeKey.get(drKey)?.draftKey === draftKey);
+
+    const recorded: string[] = [];
+    const unionClient = {
+      storage: {
+        from: (_bucket: string) => ({
+          list: async (prefix: string) => {
+            recorded.push(prefix);
+            if (prefix === canonPrefix) return { data: [{ name: "canon.png", id: "obj-c", created_at: "2026-10-16T16:05:00.000Z" }, { name: "canon.png", id: "obj-c-dup", created_at: "2026-10-16T16:05:00.000Z" }], error: null };
+            if (prefix === draftPrefix) return { data: [{ name: "auto-entry-c5.png", id: "obj-d", created_at: "2026-10-16T16:06:00.000Z" }], error: null };
+            return { data: [], error: null };
+          },
+          createSignedUrls: async (paths: string[]) => ({ data: paths.map((p) => ({ path: p, signedUrl: "https://signed.example/z", error: null })), error: null }),
+          download: async () => ({ data: null, error: { message: "not used in this test" } }),
+        }),
+      },
+    } as any;
+    const listedMap = await listExportScreenshots(unionClient, USER, pkgSnap);
+    const drPaths = listedMap.get(drKey) ?? [];
+    check("phaseDE pkg: DR trade lists BOTH canonical and draft prefixes",
+      recorded.includes(canonPrefix) && recorded.includes(draftPrefix));
+    check("phaseDE pkg: DR paths include objects from both prefixes",
+      drPaths.includes(`${canonPrefix}/canon.png`) && drPaths.includes(`${draftPrefix}/auto-entry-c5.png`) && drPaths.length === 2);
+    check("phaseDE pkg: DR paths deduped by path", new Set(drPaths).size === drPaths.length);
+    check("phaseDE pkg: Trade Lab sim trade still lists nothing",
+      !recorded.includes(tlPrefix) && !listedMap.has(tlKey));
+  }
+
+  /* ---- Representative plan §6.2: one image per DR trade, end to end ---- */
+  {
+    const PSESS = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    const PATT = "c3333333-3333-4333-8333-333333333333";
+    const PDRAFT = `dr:${PATT}:g0:c1`;
+    const PDSEG = `dr_${PATT}_g0_c1`;
+    const pTrade0: GroupedTrade = groupFillsIntoTrades([
+      sf("y1", "buy", 100, 10.00, 5, 0, "2026-10-15T13:35:00.000Z"),
+      sf("y2", "sell", 100, 11.00, 9, 100, "2026-10-15T13:39:00.000Z"),
+    ], { id: PSESS, ticker: "PKGR", trade_date: "2026-10-15", source: "daily_replay" })[0];
+    const pGrouped: GroupedTrade = { ...pTrade0, tradeKey: `${PSESS}:1`, sessionId: PSESS, fills: pTrade0.fills.map((f) => ({ ...f, session_id: PSESS })) };
+    const pEvents: DrEvent[] = [
+      { seq: 1, type: "order_filled", wallTs: 1760600000000, marketIdx: 5, marketTs: 1760544300000, payload: { side: "buy", qty: 100, price: 10, candleIndex: 5 } },
+      { seq: 2, type: "risk_snapshot", wallTs: 1760600001000, marketIdx: 5, marketTs: 1760544300000, payload: { entry: 10, qty: 100, stopLoss: 9.5, takeProfit: 11, plannedRisk: 50, rewardRisk: 2 } },
+      { seq: 3, type: "order_filled", wallTs: 1760600100000, marketIdx: 9, marketTs: 1760544540000, payload: { side: "sell", qty: 100, price: 11, candleIndex: 9 } },
+      { seq: 4, type: "position_closed", wallTs: 1760600100000, marketIdx: 9, marketTs: 1760544540000, payload: { qty: 100, price: 11, realizedPnl: 100, sessionRealized: 100, reason: "target", unrealizedPnl: 0 } },
+    ];
+    const pDerived = deriveDrEvidence({ attemptId: PATT, trades: [pGrouped], events: pEvents });
+    const P_ENTRY = `${USER}/${PDSEG}/auto-entry-c6.png`;
+    const P_EXIT = `${USER}/${PDSEG}/auto-exit-c10.png`;
+    const P_MANUAL = `${USER}/${PDSEG}/manual.png`;
+    const P_REVIEW = `${USER}/${PSESS}_1/review.png`;
+    const pInput: ExportSnapshotInput = {
+      unified: [{
+        key: pGrouped.tradeKey, source: "simulator", ticker: "PKGR", tradeDate: "2026-10-15",
+        direction: "long", entryPrice: 10, exitPrice: 11, qty: 100, realizedPnl: 100, isOpen: false,
+        rMultiple: 2, sessionSource: "daily_replay", attemptId: PATT,
+      }],
+      metas: {}, realTrades: [], simTrades: [pGrouped],
+      drAttempts: [{ id: PATT, sessionId: PSESS, strategyVersionId: null, status: "finished", startIndex: 4, createdAt: "2026-10-16T16:00:00Z", finishedAt: "2026-10-16T16:30:00Z", ticker: "PKGR", tradeDate: "2026-10-15" }],
+      drEvidence: pDerived.byTradeKey,
+      drEvents: pEvents.map((event, i) => ({ id: `pev-${i + 1}`, attemptId: PATT, event })),
+      drEventTradeKeys: new Map([[PATT, pDerived.eventTradeKey]]),
+      strategies: [], strategyVersions: [],
+      drDraftKeys: new Map([[pGrouped.tradeKey, {
+        draftKey: PDRAFT,
+        autoCapture: {
+          entry: { path: P_ENTRY, candleIndex: 5, status: "captured" },
+          exit: { path: P_EXIT, candleIndex: 9, status: "captured" },
+        },
+      }]]),
+    };
+    const pSnap = buildExportSnapshot(pInput, { range: { start: "2026-10-01", end: "2026-10-31" }, mode: "custom", source: "daily_replay" });
+    const CBASE = Date.UTC(2026, 9, 15, 13, 30, 0);
+    const pCandles = Array.from({ length: 12 }, (_, i) => ({
+      t: CBASE + i * 60000, o: 10 + i * 0.1, h: 10.2 + i * 0.1, l: 9.9 + i * 0.1, c: 10.1 + i * 0.1, v: 1000 + i * 100,
+    }));
+    const mkPkgClient = (opts: { failEntryDownload?: boolean; failCandles?: boolean } = {}) => ({
+      storage: {
+        from: (_bucket: string) => ({
+          list: async (prefix: string) => {
+            if (prefix === `${USER}/${PDSEG}`) {
+              return { data: [
+                { name: "auto-entry-c6.png", id: "o1", created_at: "2026-10-16T16:05:00.000Z" },
+                { name: "auto-exit-c10.png", id: "o2", created_at: "2026-10-16T16:09:00.000Z" },
+                { name: "manual.png", id: "o3", created_at: "2026-10-16T16:20:00.000Z" },
+              ], error: null };
+            }
+            if (prefix === `${USER}/${PSESS}_1`) {
+              return { data: [{ name: "review.png", id: "o4", created_at: "2026-10-16T16:25:00.000Z" }], error: null };
+            }
+            return { data: [], error: null };
+          },
+          createSignedUrls: async (paths: string[]) => ({ data: paths.map((p) => ({ path: p, signedUrl: "https://signed.example/p", error: null })), error: null }),
+          download: async (path: string) => {
+            if (opts.failEntryDownload && path === P_ENTRY) return { data: null, error: { message: "entry bytes gone" } };
+            return { data: new Blob([new Uint8Array(FAKE_PNG)]), error: null };
+          },
+        }),
+      },
+      from: (_table: string) => ({
+        select: (_cols: string) => ({
+          in: async (_col: string, _ids: string[]) => opts.failCandles
+            ? { data: null, error: { message: "db down" } }
+            : { data: [{ id: PSESS, candles: pCandles }], error: null },
+        }),
+      }),
+    }) as any;
+
+    const resP = await generateEdgePackage(mkPkgClient(), USER, pSnap, { includeScreenshots: true, includePdf: false });
+    check("rep pkg: exactly ONE screenshot file in the summary", resP.summary.screenshotFiles === 1);
+    const zipP = await JSZip.loadAsync(new Uint8Array(await resP.blob.arrayBuffer()));
+    const shotNames = Object.keys(zipP.files).filter((n) => n.startsWith("screenshots/") && !n.endsWith("/"));
+    check("rep pkg: ZIP screenshots/ holds exactly one image", shotNames.length === 1);
+    const repEntry = resP.manifest.find((e) => e.role === "representative");
+    check("rep pkg: the ZIP image IS the representative", repEntry?.status === "included" && shotNames[0] === `screenshots/${repEntry.fileName}`);
+    check("rep pkg: manifest lists all 4 images; 3 are not-included",
+      resP.manifest.length === 4 && resP.manifest.filter((e) => e.status === "not-included").length === 3);
+    check("rep pkg: representative candleTime stamped from stored candles",
+      repEntry?.candleTime === "2026-10-15T13:35:00.000Z" && repEntry?.candleIndex === 5 && repEntry?.representativeSource === "auto_entry");
+    const tradesCsvP = await zipP.file("trades.csv")!.async("string");
+    const pRows = parseCsv(tradesCsvP);
+    const pShotCol = pRows[0].indexOf("screenshot_files");
+    check("rep pkg: trades.csv names only the representative file",
+      pRows.length === 2 && pRows[1][pShotCol] === repEntry?.fileName);
+    const analyticsP = JSON.parse(await zipP.file("analytics.json")!.async("string"));
+    check("rep pkg: analytics tradesIndex lists only the representative",
+      JSON.stringify(analyticsP.tradesIndex[0].screenshots) === JSON.stringify([repEntry?.fileName]));
+    check("rep pkg: chart_context.csv in ZIP + filesIncluded",
+      !!zipP.file("chart_context.csv") && resP.summary.filesIncluded.includes("chart_context.csv"));
+    const ccText = await zipP.file("chart_context.csv")!.async("string");
+    const ccRows = parseCsv(ccText).slice(1);
+    check("rep pkg: chart_context sections are 5 entry / 1 final / 4 post",
+      ccRows.filter((r) => r[3] === "entry_context").length === 5
+      && ccRows.filter((r) => r[3] === "entry_candle_final").length === 1
+      && ccRows.filter((r) => r[3] === "post_entry_development").length === 4);
+    check("rep pkg: prompt carries the chart-analysis section + file line",
+      resP.promptText.includes("REPRESENTATIVE SCREENSHOT & CHART ANALYSIS") && resP.promptText.includes("chart_context.csv - per-trade historical OHLCV"));
+    check("rep pkg: no chart-context warnings on the happy path",
+      !resP.warnings.some((w) => w.includes("Chart context unavailable") || w.includes("could not be built")));
+
+    /* representative download failure: reported, NEVER substituted */
+    const resFail = await generateEdgePackage(mkPkgClient({ failEntryDownload: true }), USER, pSnap, { includeScreenshots: true, includePdf: false });
+    const failRep = resFail.manifest.find((e) => e.role === "representative");
+    check("rep fail: representative marked unavailable", failRep?.status === "unavailable");
+    check("rep fail: NO image substituted (0 files, others still not-included)",
+      resFail.summary.screenshotFiles === 0 && resFail.manifest.filter((e) => e.status === "not-included").length === 3);
+    check("rep fail: warning surfaced", resFail.warnings.some((w) => w.includes("could not be downloaded")));
+    const zipFail = await JSZip.loadAsync(new Uint8Array(await resFail.blob.arrayBuffer()));
+    check("rep fail: ZIP has the NO-SCREENSHOTS note, no image bytes",
+      !!zipFail.file("screenshots/NO-SCREENSHOTS.txt") && !Object.keys(zipFail.files).some((n) => n.endsWith(".png")));
+
+    /* candle fetch failure: warning, package continues, no invention */
+    const resNoCc = await generateEdgePackage(mkPkgClient({ failCandles: true }), USER, pSnap, { includeScreenshots: true, includePdf: false });
+    const zipNoCc = await JSZip.loadAsync(new Uint8Array(await resNoCc.blob.arrayBuffer()));
+    check("cc fail: package still produced with the representative image",
+      resNoCc.summary.screenshotFiles === 1 && !!zipNoCc.file("trades.csv"));
+    check("cc fail: chart_context.csv honestly absent", !zipNoCc.file("chart_context.csv"));
+    check("cc fail: warning explains the omission", resNoCc.warnings.some((w) => w.includes("could not be built")));
+    check("cc fail: representative candleTime stays null (not invented)",
+      resNoCc.manifest.find((e) => e.role === "representative")?.candleTime === null);
+    check("cc fail: prompt omits the chart file line", !resNoCc.promptText.includes("chart_context.csv - per-trade"));
+
+    /* toggle off */
+    const resOff = await generateEdgePackage(mkPkgClient(), USER, pSnap, { includeScreenshots: true, includePdf: false, includeChartContext: false });
+    const zipOff = await JSZip.loadAsync(new Uint8Array(await resOff.blob.arrayBuffer()));
+    check("cc off: no chart_context.csv and no cc warnings",
+      !zipOff.file("chart_context.csv") && !resOff.warnings.some((w) => w.includes("Chart context")));
+
+    /* PDF: only the representative can appear (D8) */
+    const resPdf = await generateEdgePackage(mkPkgClient(), USER, pSnap, { includeScreenshots: true, includePdf: true });
+    check("rep pdf: PDF built from the single included representative",
+      resPdf.summary.pdfIncluded === true && resPdf.summary.screenshotFiles === 1);
   }
 
   console.log(`edgeExportPackage tests: ${passed} passed, ${failed} failed`);

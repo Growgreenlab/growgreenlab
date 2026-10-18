@@ -34,6 +34,7 @@ import {
 } from "./journal";
 import { describeDrEvent, type DrEvent } from "./dailyReplayEvents";
 import type { DrTradeEvidence } from "./drTradeEvidence";
+import { resolveRepresentative, type RepresentativeSource } from "./drRepresentative";
 import {
   strategyVersionLabel, type Strategy, type StrategyVersion,
 } from "./strategies";
@@ -156,6 +157,13 @@ export interface ExportSnapshotInput {
   drEventTradeKeys?: Map<string, Map<number, string | null>>;
   strategies?: Strategy[];
   strategyVersions?: StrategyVersion[];
+  /** Finalized Daily Replay trades only: tradeKey -> { draftKey,
+   *  autoCapture } for trades that were born as per-cycle drafts
+   *  (plan §2.4 + Representative plan §2.2). The draft key unions the
+   *  draft-key screenshot prefix in the package layer; autoCapture is
+   *  the draft row's recorded capture outcomes, the input to
+   *  representative resolution (lib/drRepresentative.ts). */
+  drDraftKeys?: Map<string, { draftKey: string; autoCapture: Record<string, unknown> }>;
 }
 
 /* ================= period selection & date ranges ======================= */
@@ -345,6 +353,14 @@ export interface ExportTradeRecord {
   strategyName: string | null;
   strategyVersion: number | null;
   strategyLabel: string | null;
+  /* --- Chart-context anchors (Representative plan §5 S1.2) --- */
+  /** Candle index of the first entry fill / last exit fill, from the
+   *  grouped fills (simulator-class trades; fills carry candle_index).
+   *  Null for real trades (no candle data is stored for them) and when
+   *  the fills carry none. Used ONLY to slice the session's stored
+   *  candles into chart_context.csv sections — never guessed. */
+  entryCandleIndex: number | null;
+  exitCandleIndex: number | null;
 }
 
 /** The Daily Replay subset of a snapshot: only the attempts,
@@ -357,6 +373,9 @@ export interface ExportDrSubset {
   events: ExportDrEventInput[];
   evidence: Map<string, DrTradeEvidence>;
   eventTradeKeys: Map<string, Map<number, string | null>>;
+  /** tradeKey -> { draftKey, autoCapture } for the SELECTED trades
+   *  that have a draft (same Map pattern as eventTradeKeys). */
+  draftInfoByTradeKey: Map<string, { draftKey: string; autoCapture: Record<string, unknown> }>;
 }
 
 export interface ExportSnapshot {
@@ -520,6 +539,8 @@ export function buildExportSnapshot(
         strategyName: null,
         strategyVersion: null,
         strategyLabel: null,
+        entryCandleIndex: null,
+        exitCandleIndex: null,
         ...mf,
       };
     } else {
@@ -585,6 +606,8 @@ export function buildExportSnapshot(
         strategyLabel: chain.strategy
           ? strategyVersionLabel(chain.strategy.name, chain.version?.version ?? null)
           : null,
+        entryCandleIndex: fills.find(isEntry)?.candle_index ?? null,
+        exitCandleIndex: fills.filter((f) => !isEntry(f)).slice(-1)[0]?.candle_index ?? null,
         ...mf,
       };
     }
@@ -670,7 +693,13 @@ export function buildExportSnapshot(
       const m = input.drEventTradeKeys?.get(id);
       if (m) eventTradeKeys.set(id, m);
     }
-    dailyReplay = { attempts, strategies, versions, events, evidence, eventTradeKeys };
+    const draftInfoByTradeKey = new Map<string, { draftKey: string; autoCapture: Record<string, unknown> }>();
+    for (const r of records) {
+      if (!r.isDailyReplay) continue;
+      const info = input.drDraftKeys?.get(r.tradeKey);
+      if (info) draftInfoByTradeKey.set(r.tradeKey, info);
+    }
+    dailyReplay = { attempts, strategies, versions, events, evidence, eventTradeKeys, draftInfoByTradeKey };
   }
 
   return {
@@ -785,6 +814,10 @@ export function publicScreenshotManifestEntry(e: ScreenshotManifestEntry): {
   tradeId: string; symbol: string; type: ScreenshotManifestEntry["type"];
   file: string | null; fileName: string | null;
   status: ScreenshotManifestEntry["status"]; capturedAt: string | null;
+  role: ScreenshotManifestEntry["role"];
+  representativeSource: ScreenshotManifestEntry["representativeSource"];
+  candleIndex: number | null;
+  candleTime: string | null;
 } {
   return {
     tradeId: e.tradeId,
@@ -794,6 +827,10 @@ export function publicScreenshotManifestEntry(e: ScreenshotManifestEntry): {
     fileName: e.fileName,
     status: e.status,
     capturedAt: e.capturedAt,
+    role: e.role,
+    representativeSource: e.representativeSource,
+    candleIndex: e.candleIndex,
+    candleTime: e.candleTime,
   };
 }
 
@@ -815,6 +852,23 @@ export interface ScreenshotManifestEntry {
   /** Capture timestamp — storage listings used by the app do not expose
    *  one to the export, so this is null (unavailable, never invented). */
   capturedAt: string | null;
+  /* --- Representative role (Representative plan §5 S1.2, additive) --- */
+  /** "representative" for the ONE image a Daily Replay trade
+   *  contributes to the package; "attachment" for everything else
+   *  (all real-trade images, and DR images that stay in the journal —
+   *  those are listed with status "not-included", never dropped
+   *  silently). */
+  role: "representative" | "attachment";
+  /** How the representative was resolved (lib/drRepresentative.ts);
+   *  null for attachments and for DR trades with no representative. */
+  representativeSource: RepresentativeSource | null;
+  /** Candle index the representative is anchored to, from the draft
+   *  record — null when unknown (never inferred from a file name). */
+  candleIndex: number | null;
+  /** The representative candle's period start (ISO), derived by the
+   *  package layer from the session's stored candles by index;
+   *  null when the candles were unavailable. */
+  candleTime: string | null;
 }
 
 export interface ScreenshotCoverage {
@@ -830,6 +884,9 @@ export interface ScreenshotCoverage {
   simulatorTrades: number;
   /** Daily Replay trades in the selection (screenshot-eligible). */
   dailyReplayTrades: number;
+  /** Daily Replay trades whose representative resolved to a listed
+   *  image (Representative plan §5 S1.2). */
+  dailyReplayTradesWithRepresentative: number;
   note: string;
 }
 
@@ -846,10 +903,20 @@ function screenshotFileName(exportId: string, storagePath: string, n: number): s
  * Entries start as "listed"; the package layer flips them to "included"
  * (bytes fetched) or "unavailable" (fetch failed) before artifacts are
  * generated, so CSV/JSON/README always describe the final package.
+ *
+ * Daily Replay trades (Representative plan §5 S1.2): exactly ONE image
+ * per trade is downloadable — the resolved representative
+ * (lib/drRepresentative.ts). Every other listed DR image stays a
+ * manifest row with status "not-included" and file null: listed and
+ * explained, never silently dropped, and never substituted for a failed
+ * representative (a failed download becomes "unavailable" + a warning).
+ * Real trades are unchanged: every listed image is a downloadable
+ * attachment.
  */
 export function buildScreenshotManifest(
   snapshot: ExportSnapshot,
   listed: Map<string, string[]>,
+  userId?: string,
 ): ScreenshotManifestEntry[] {
   const entries: ScreenshotManifestEntry[] = [];
   for (const rec of snapshot.trades) {
@@ -857,6 +924,60 @@ export function buildScreenshotManifest(
     // screenshots; Trade Lab simulator trades remain excluded.
     if (rec.source !== "real" && !rec.isDailyReplay) continue;
     const paths = [...new Set(listed.get(rec.tradeKey) ?? [])].sort();
+    if (rec.isDailyReplay) {
+      const info = snapshot.dailyReplay?.draftInfoByTradeKey.get(rec.tradeKey);
+      // Owner id: explicit when the caller has it (the package layer),
+      // else derived from the listing itself — every listed path for
+      // this trade sits under the owner's own first segment by
+      // construction of the storage list calls.
+      const owner = userId ?? (paths.length > 0 ? paths[0].split("/")[0] : null);
+      const resolution = owner
+        ? resolveRepresentative({
+            autoCapture: info?.autoCapture,
+            listedPaths: paths,
+            draftKey: info?.draftKey ?? null,
+            finalizedTradeKey: rec.tradeKey,
+            userId: owner,
+          })
+        : null;
+      paths.forEach((storagePath, i) => {
+        if (resolution && storagePath === resolution.path) {
+          const fileName = screenshotFileName(rec.exportId, storagePath, i + 1);
+          entries.push({
+            tradeId: rec.exportId,
+            tradeKey: rec.tradeKey,
+            symbol: rec.symbol,
+            type: "trade-screenshot",
+            storagePath,
+            file: `screenshots/${fileName}`,
+            fileName,
+            status: "listed",
+            capturedAt: null,
+            role: "representative",
+            representativeSource: resolution.source,
+            candleIndex: resolution.candleIndex,
+            candleTime: null,
+          });
+        } else {
+          entries.push({
+            tradeId: rec.exportId,
+            tradeKey: rec.tradeKey,
+            symbol: rec.symbol,
+            type: "trade-screenshot",
+            storagePath,
+            file: null,
+            fileName: null,
+            status: "not-included",
+            capturedAt: null,
+            role: "attachment",
+            representativeSource: null,
+            candleIndex: null,
+            candleTime: null,
+          });
+        }
+      });
+      continue;
+    }
     paths.forEach((storagePath, i) => {
       const fileName = screenshotFileName(rec.exportId, storagePath, i + 1);
       entries.push({
@@ -869,6 +990,10 @@ export function buildScreenshotManifest(
         fileName,
         status: "listed",
         capturedAt: null,
+        role: "attachment",
+        representativeSource: null,
+        candleIndex: null,
+        candleTime: null,
       });
     });
   }
@@ -887,6 +1012,12 @@ export function summarizeScreenshotCoverage(
   const withShots = new Set(manifest.filter((e) => e.status === "included" || e.status === "listed").map((e) => e.tradeId));
   const missing = eligible.filter((r) => !withShots.has(r.exportId)).map((r) => r.exportId);
   const files = manifest.filter((e) => e.status === "included").length;
+  // Representative plan §5 S1.2: a DR trade that HAS images but no
+  // resolvable representative is a different fact from "no screenshot"
+  // — it had no representative screenshot.
+  const drIds = new Set(drTrades.map((r) => r.exportId));
+  const drWithRep = new Set(manifest.filter((e) => e.role === "representative" && (e.status === "included" || e.status === "listed")).map((e) => e.tradeId));
+  const drNoRep = drTrades.filter((r) => manifest.some((e) => e.tradeId === r.exportId) && !drWithRep.has(r.exportId)).length;
   let note: string;
   if (!screenshotsRequested) {
     note = "Screenshots were not included in this package (the option was turned off). No images were fabricated or substituted.";
@@ -896,6 +1027,9 @@ export function summarizeScreenshotCoverage(
     note = "No screenshots were available for the selected trades. Nothing was fabricated to fill the gap.";
   } else {
     note = `${files} screenshot file${files === 1 ? "" : "s"} included across ${withShots.size} trade${withShots.size === 1 ? "" : "s"}; ${missing.length} trade${missing.length === 1 ? "" : "s"} had no screenshot.`;
+    if (drNoRep > 0) {
+      note += ` ${drNoRep} Daily Replay trade${drNoRep === 1 ? "" : "s"} had no representative screenshot — its other images are listed in the manifest as not-included and were not exported.`;
+    }
   }
   return {
     screenshotsRequested,
@@ -905,6 +1039,7 @@ export function summarizeScreenshotCoverage(
     tradesMissingScreenshots: missing,
     simulatorTrades: snapshot.counts.simulator - snapshot.counts.dailyReplay,
     dailyReplayTrades: drTrades.length,
+    dailyReplayTradesWithRepresentative: [...drWithRep].filter((id) => drIds.has(id)).length,
     note,
   };
 }
@@ -1067,15 +1202,27 @@ export function buildDecisionTimelineCsv(snapshot: ExportSnapshot): string {
   const dr = snapshot.dailyReplay;
   if (!dr) return rows.join("\r\n") + "\r\n";
   const exportIdByKey = new Map(snapshot.trades.map((r) => [r.tradeKey, r.exportId]));
+  // Finalized-only filtering (plan §7.5(i)): the export contains
+  // finalized trades only, so timeline rows follow the same rule —
+  // a row assigned to a trade that is NOT in this snapshot is
+  // dropped; attempt-level rows (no owning trade) are kept only when
+  // the attempt has at least one included trade; attempts with no
+  // included trade contribute zero rows.
+  const includedKeys = new Set(snapshot.trades.map((r) => r.tradeKey));
+  const attemptsWithIncluded = new Set(
+    snapshot.trades.map((r) => r.attemptId).filter((id): id is string => !!id),
+  );
   const attempts = [...dr.attempts].sort((a, b) =>
     (a.createdAt ?? "").localeCompare(b.createdAt ?? "") || a.id.localeCompare(b.id));
   for (const attempt of attempts) {
+    if (!attemptsWithIncluded.has(attempt.id)) continue;
     const events = dr.events
       .filter((e) => e.attemptId === attempt.id)
       .sort((a, b) => a.event.seq - b.event.seq);
     const assignment = dr.eventTradeKeys.get(attempt.id);
     for (const { id, event } of events) {
       const tradeKey = assignment?.get(event.seq) ?? null;
+      if (tradeKey !== null && !includedKeys.has(tradeKey)) continue;
       const cells = [
         tradeKey ? (exportIdByKey.get(tradeKey) ?? "") : "",
         attempt.id,
@@ -1488,6 +1635,13 @@ export interface PromptContext {
   /** Whether decision_timeline.csv is actually in this package (the
    *  panel toggle) — the prompt lists only files that exist. */
   timelineIncluded?: boolean;
+  /** Whether chart_context.csv is actually in this package
+   *  (Representative plan §5 S1.2) — the chart-analysis section and
+   *  the file list appear only when the evidence exists. */
+  chartContextIncluded?: boolean;
+  /** Whether at least one Daily Replay representative screenshot is
+   *  included in this package. */
+  representativeIncluded?: boolean;
 }
 
 /**
@@ -1511,6 +1665,7 @@ export function buildChatGptPrompt(
     ...(hasDr ? [
       ...(ctx.timelineIncluded === false ? [] : ["decision_timeline.csv - the Daily Replay Decision Timeline: every recorded decision event for the included attempts, with both market time (historical, Eastern) and wall-clock time (when the trader acted)"]),
       "strategy.json - the immutable strategy versions the included attempts were bound to, exactly as recorded before they ran",
+      ...(ctx.chartContextIncluded ? ["chart_context.csv - per-trade historical OHLCV for the included Daily Replay trades, sectioned at the entry candle: entry_context holds ONLY the candles completed before the entry candle, entry_candle_final is the entry candle's final OHLCV (it was still forming at the fill), and post_entry_development holds the candles while the position was open. Entry judgments may use entry_context only - see the chart-analysis section below."] : []),
     ] : []),
     ...(coverage.screenshotFiles > 0 ? [`screenshots/ - ${coverage.screenshotFiles} trade screenshot(s), named by stable trade ID`] : []),
   ];
@@ -1529,6 +1684,8 @@ PACKAGE FACTS (generated by Grow Green Lab - treat these as the evidence boundar
 - Files in this package:
 ${files.map((f) => `  * ${f}`).join("\n")}
 - Data that is NOT available in this package (do not invent it): ${unavailable.map((u) => u.label).join("; ")}. Full reasons are in analytics.json under metadata.metricsUnavailable, and missing-data counts under metadata.missingDataSummary.
+- Daily Replay trades in this export are FINALIZED trades only — unfinalized drafts are excluded by design and never appear in any file in this package.
+- Daily Replay screenshots: each Daily Replay trade contributes ONE representative screenshot (see screenshots-manifest.json for its recorded source and candle). An auto-captured representative shows the chart as staged at the entry fill; the entry candle was still forming when it was captured. The trade's other screenshots stay in the journal and are listed in the manifest as not-included.
 ${snapshot.source === "all" ? "- This package mixes Real Market and Simulator trades. Keep them separate in your analysis; the combined figures are labeled mixed-source and must not be presented as real-money performance.\n" : ""}${snapshot.warnings.length > 0 ? `- Package warnings from Grow Green Lab:\n${snapshot.warnings.map((w) => `  * ${w}`).join("\n")}\n` : ""}
 Follow these rules:
 
@@ -1557,8 +1714,16 @@ DAILY REPLAY & STRATEGY EVIDENCE (this package includes Daily Replay backtest tr
 20. Do not claim statistical significance without an adequate sample and a stated basis. When the evidence cannot support a conclusion, say so plainly instead of filling the gap.
 21. NEVER modify, rewrite or "improve" a strategy version: versions are immutable records. Propose changes only as a NEW version the trader can create and test - your output must not present an edited version as if it were the recorded one.
 22. Daily Replay results are historical simulations (backtests), not live trading results and not a guarantee of future performance. In decision_timeline.csv, market_time is the historical candle time (Eastern) and wall_time is when the trader actually acted - never mix the two clocks.
-` : ""}
+` : ""}${(ctx.chartContextIncluded || ctx.representativeIncluded) ? `
+REPRESENTATIVE SCREENSHOT & CHART ANALYSIS (a supplement to the rules above, not a continuation of them — it applies only to Daily Replay trades with a representative screenshot and/or rows in chart_context.csv):
 
+- Observations first: state only what is directly visible in the representative screenshot or directly readable from chart_context.csv — price location versus the prior candles, candle sizes, the volume pattern.
+- Interpretations second, separately labelled, each tied to the observation it rests on. Never present an interpretation as a recorded fact.
+- For each such trade, use chart_context.csv's entry_context (the candles completed BEFORE the entry candle) together with the representative screenshot to assess: the trend structure before the entry (higher highs/higher lows versus lower highs/lower lows) and any consolidation; whether the entry was at, near, or away from the session high (HOD) and prior resistance; whether a breakout had formed on completed candles or was only anticipated on a still-forming candle; whether volume expanded into the entry relative to the prior completed candles; and whether the entry supported the trader's stated setup (trades.csv setup + entry_reasoning) or contradicted it. Classify any HOD breakout as clean, weak, or failed ONLY from completed pre-entry candles and the screenshot. End with one verdict per trade: the pre-entry structure SUPPORTED the stated setup, CONTRADICTED it, or the evidence is INSUFFICIENT — citing the candle times you relied on.
+- No-hindsight rule: judge the entry decision ONLY from entry_context and the representative image. entry_candle_final is the entry candle's FINAL OHLCV — the candle was still forming at the fill, so its final values were not known at entry. post_entry_development may be discussed only as post-entry development (what happened while the position was open), never as evidence for or against the entry decision itself.
+- No invented levels: do not state support, resistance, VWAP, EMA or any other level unless it is visible in the screenshot or derivable from the supplied OHLCV. If a level cannot be verified from the supplied evidence, say so instead of estimating one.
+- Missing evidence: if a trade has no representative screenshot or no chart_context.csv rows, say the chart analysis is unavailable for that trade instead of reconstructing the chart from price summaries.
+` : ""}
 Organize your response as:
 
 A. Executive summary
@@ -1589,6 +1754,9 @@ export interface ReadmeContext {
   zipFileName: string;
   /** Whether decision_timeline.csv is actually in this package. */
   timelineIncluded?: boolean;
+  /** Whether chart_context.csv is actually in this package
+   *  (Representative plan §5 S1.2). */
+  chartContextIncluded?: boolean;
 }
 
 const CSV_COLUMN_DOCS: [string, string][] = [
@@ -1648,7 +1816,7 @@ export function buildReadme(
     "ChatGPT_Prompt.txt",
     "README.txt (this file)",
     "screenshots-manifest.json",
-    ...(hasDr ? [...(ctx.timelineIncluded === false ? [] : ["decision_timeline.csv"]), "strategy.json"] : []),
+    ...(hasDr ? [...(ctx.timelineIncluded === false ? [] : ["decision_timeline.csv"]), "strategy.json", ...(ctx.chartContextIncluded ? ["chart_context.csv"] : [])] : []),
     ...(coverage.screenshotFiles > 0 ? [`screenshots/ (${coverage.screenshotFiles} image file${coverage.screenshotFiles === 1 ? "" : "s"})`] : []),
   ];
   const lines: string[] = [
@@ -1680,6 +1848,7 @@ export function buildReadme(
     "- analytics.json gains a dailyReplay block (per-attempt results and bound strategies) and two new breakdown dimensions (strategy, strategyVersion). counts gains a dailyReplay field (a subset of simulator, its coarse class).",
     "- decision_timeline.csv and strategy.json are new files, present only when Daily Replay trades are in the selection.",
     "- Daily Replay trades can now carry screenshots (journal-attached, like real trades) and recorded original plans (from the risk snapshot at entry). Trade Lab simulator trades are unchanged: no screenshots, no original plan, R unavailable.",
+    "- Representative screenshots (additive within schema 2.0): each Daily Replay trade contributes ONE representative screenshot — its recorded entry-time capture, or one the trader explicitly selected — identified in screenshots-manifest.json by role, representativeSource, candleIndex and candleTime. The trade's other screenshots stay in the journal and are listed in the manifest as not-included. chart_context.csv (when present) carries the trade's stored OHLCV sectioned at the entry candle: entry_context (candles completed before the entry), entry_candle_final (the entry candle's final OHLCV, finalized after the fill) and post_entry_development (candles while the position was open).",
     ...(hasDr ? [
       "",
       "DAILY REPLAY IN THIS PACKAGE",
@@ -1705,13 +1874,15 @@ export function buildReadme(
     ROUNDING_NOTE,
     "",
     "SCREENSHOT MANIFEST",
-    "screenshots-manifest.json lists every screenshot considered for this package: owning stable trade ID, symbol, package-relative file name, and status (included / unavailable). The same manifest is embedded in analytics.json (metadata.screenshotManifest).",
+    "screenshots-manifest.json lists every screenshot considered for this package: owning stable trade ID, symbol, package-relative file name, and status (included / unavailable / not-included). The same manifest is embedded in analytics.json (metadata.screenshotManifest).",
     "PRIVACY: raw storage paths are intentionally NOT included anywhere in this package. Storage paths contain the account's internal identifiers (account UUID and internal object names), so they stay inside the application; screenshots are identified only by stable trade ID and package-relative file name.",
-    "Screenshots are typed \"trade-screenshot\": the platform does not record whether a screenshot was taken at entry, exit, or review, and the export does not guess from file names.",
+    "Screenshots are typed \"trade-screenshot\": the platform does not record whether a screenshot was taken at entry, exit, or review, and the export does not guess from file names. Exception (schema 2.0 representative data): for Daily Replay trades the manifest records the representative image's role, source and candle index from the draft record; non-representative attachments remain untyped.",
     coverage.note,
     ...(manifest.length === 0 ? ["No screenshot entries were recorded for this package."] : []),
     "",
     "MISSING DATA AND KNOWN LIMITATIONS",
+    "- Daily Replay trades in this export are FINALIZED trades only — unfinalized drafts are excluded by design and never appear in any file in this package.",
+    "- Daily Replay representative screenshots: an auto-captured representative shows the chart as staged at the entry fill; the entry candle was still forming when captured. A user-selected representative is labelled user_selected in the manifest and may have been captured at review time — the prompt separates entry-time evidence from later images.",
     ...unavailable.map((u) => `- ${u.label}: ${u.reason}`),
     ...snapshot.warnings.map((w) => `- ${w}`),
     "",

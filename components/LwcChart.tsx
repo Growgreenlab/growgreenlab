@@ -8,7 +8,7 @@
  */
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type MutableRefObject } from "react";
 import {
   createChart,
   CandlestickSeries,
@@ -312,6 +312,14 @@ interface Props {
    *  click. Used by Daily Replay's full-day preview to pick the starting
    *  candle. Omit = no behavior (all existing parents). */
   onCandleClick?: (timeSec: number) => void;
+  /** Optional (Daily Replay trade drafts): a capture handle the parent
+   *  owns. On chart creation the chart assigns `current` a function
+   *  returning `chart.takeScreenshot()` (null on any failure), and
+   *  clears it again on teardown — so the parent can snapshot the
+   *  chart exactly as rendered at an entry/exit fill. Purely additive:
+   *  parents that never pass it (all existing ones) are unaffected,
+   *  and nothing about rendering, data, scales or events changes. */
+  captureHandleRef?: MutableRefObject<(() => HTMLCanvasElement | null) | null>;
   /** Optional (Daily Replay preview): notified on every visible
    *  logical-range change with the range and the bar spacing derived
    *  from it (plot width / range span). The parent records the latest
@@ -353,7 +361,7 @@ interface Props {
   onDrawingToolChange: (tool: DrawingTool) => void;
 }
 
-export default function LwcChart({ candles, revealedCount, sessionKey, countdown, lastPrice, brackets, referenceLevels, fitOnLoad, fitAnchorIndex, showFitAll, stableScale, onCandleClick, onViewChange, initialView, highlightTimeSec, highlightSpanSec, onPlannedDrag, onActiveDrag, drawings, onDrawingsChange, drawingTool, onDrawingToolChange }: Props) {
+export default function LwcChart({ candles, revealedCount, sessionKey, countdown, lastPrice, brackets, referenceLevels, fitOnLoad, fitAnchorIndex, showFitAll, stableScale, onCandleClick, captureHandleRef, onViewChange, initialView, highlightTimeSec, highlightSpanSec, onPlannedDrag, onActiveDrag, drawings, onDrawingsChange, drawingTool, onDrawingToolChange }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const elRef = useRef<HTMLDivElement>(null);
   const countdownRef = useRef<HTMLDivElement>(null);
@@ -376,6 +384,11 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
   // which runs once — a ref keeps inline parent closures safe).
   const onCandleClickRef = useRef(onCandleClick);
   onCandleClickRef.current = onCandleClick;
+  // Latest capture-handle ref (read inside the chart-creation effect,
+  // which runs once — a ref keeps inline parent refs safe, mirroring
+  // onCandleClickRef above).
+  const captureHandleRefRef = useRef(captureHandleRef);
+  captureHandleRefRef.current = captureHandleRef;
   // Latest fit anchor (read inside the data-push effect at full-load
   // time only — a ref keeps later selection changes from re-windowing).
   const fitAnchorIndexRef = useRef(fitAnchorIndex);
@@ -747,6 +760,13 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
     });
     chart.priceScale("").applyOptions({ scaleMargins: VOLUME_SCALE_MARGINS });
     chartRef.current = chart;
+    // Optional capture handle (Daily Replay trade drafts): hand the
+    // parent a screenshot function bound to THIS chart instance.
+    if (captureHandleRefRef.current) {
+      captureHandleRefRef.current.current = () => {
+        try { return chart.takeScreenshot(); } catch { return null; }
+      };
+    }
     candleSeriesRef.current = candleSeries;
     volumeSeriesRef.current = volumeSeries;
     pushedRef.current = null;
@@ -793,6 +813,7 @@ export default function LwcChart({ candles, revealedCount, sessionKey, countdown
         chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleViewChange);
       }
       chart.remove();
+      if (captureHandleRefRef.current) captureHandleRefRef.current.current = null;
       chartRef.current = null;
       candleSeriesRef.current = null;
       volumeSeriesRef.current = null;

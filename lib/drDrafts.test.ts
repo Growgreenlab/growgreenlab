@@ -365,5 +365,28 @@ seq = 0;
   eq("13 autoCapture preserved", row.autoCapture, { entry: { status: "captured" } });
 }
 
+/* ===== 14. Representative selection round-trips through the draft row
+ * (Representative plan §6.2): the auto_capture JSONB carries the new
+ * `representative` member opaquely; no migration, no new column. ===== */
+{
+  const selCapture = {
+    entry: { path: "u-9/dr_att_g0_c1/auto-entry-c6.png", candleIndex: 5, status: "captured" },
+    exit: { path: "u-9/dr_att_g0_c1/auto-exit-c10.png", candleIndex: 9, status: "captured" },
+    representative: { path: "u-9/dr_att_g0_c1/auto-exit-c10.png", selectedAt: "2026-10-17T02:00:00.000Z" },
+  };
+  const row = mapDraftRow({
+    id: "d-10", user_id: "u-9", attempt_id: ATT, reset_generation: 0, cycle_index: 1,
+    draft_key: `dr:${ATT}:g0:c1`, status: "finalized",
+    first_fill_candle_index: 5, first_fill_price: "10.5", first_fill_qty: 100,
+    close_fill_candle_index: 9, realized_pnl: "100.25",
+    event_first_seq: 4, event_last_seq: 11, auto_capture: selCapture,
+    finalized_session_id: SID, finalized_trade_key: `${SID}:1`,
+    finalized_at: "2026-10-17T01:00:00Z", created_at: "2026-10-17T00:00:00Z", updated_at: "2026-10-17T02:00:00Z",
+  });
+  eq("14 representative member round-trips through mapDraftRow", row.autoCapture, selCapture);
+  eq("14 representative path readable for resolution",
+    (row.autoCapture.representative as { path?: string }).path, "u-9/dr_att_g0_c1/auto-exit-c10.png");
+}
+
 console.log(`=== drDrafts RESULT: ${passed} passed, ${failed} failed ===`);
 if (failed > 0) process.exit(1);

@@ -18,6 +18,7 @@ import {
 } from "../lib/edgeExport";
 
 import { generateEdgePackage, listExportScreenshots, type PackageResult } from "../lib/edgeExportPackage";
+import { resolveRepresentative } from "../lib/drRepresentative";
 
 const MAX_AUTO_SCREENSHOT_TRADES = 60;
 
@@ -39,6 +40,7 @@ export default function EdgeExportPanel({ input }: { input: ExportSnapshotInput 
   const [versionSel, setVersionSel] = useState("");
   const [attemptSel, setAttemptSel] = useState("");
   const [includeTimeline, setIncludeTimeline] = useState(true);
+  const [includeChartContext, setIncludeChartContext] = useState(true);
 
   const [shotInfo, setShotInfo] = useState<{ state: "idle" | "loading" | "done" | "skipped" | "error"; files: number; tradesWith: number }>({ state: "idle", files: 0, tradesWith: 0 });
   const [busy, setBusy] = useState<string | null>(null);
@@ -99,8 +101,28 @@ export default function EdgeExportPanel({ input }: { input: ExportSnapshotInput 
         if (!user) throw new Error("not signed in");
         const listed = await listExportScreenshots(supabase, user.id, snapshot);
         if (!alive) return;
+        // Representative-aware (Representative plan §5 S1.3): a Daily
+        // Replay trade contributes exactly ONE image to the package —
+        // its resolved representative — so the count must not promise
+        // exit images the package excludes. Real trades count all.
         let files = 0, tradesWith = 0;
-        for (const paths of listed.values()) { files += paths.length; if (paths.length > 0) tradesWith++; }
+        for (const rec of snapshot.trades) {
+          const paths = listed.get(rec.tradeKey) ?? [];
+          if (rec.isDailyReplay) {
+            const info = snapshot.dailyReplay?.draftInfoByTradeKey.get(rec.tradeKey);
+            const rep = resolveRepresentative({
+              autoCapture: info?.autoCapture,
+              listedPaths: paths,
+              draftKey: info?.draftKey ?? null,
+              finalizedTradeKey: rec.tradeKey,
+              userId: user.id,
+            });
+            if (rep) { files += 1; tradesWith += 1; }
+          } else if (rec.source === "real") {
+            files += paths.length;
+            if (paths.length > 0) tradesWith += 1;
+          }
+        }
         setShotInfo({ state: "done", files, tradesWith });
       } catch {
         if (alive) setShotInfo({ state: "error", files: 0, tradesWith: 0 });
@@ -123,7 +145,7 @@ export default function EdgeExportPanel({ input }: { input: ExportSnapshotInput 
       const supabase = createClient();
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Please sign in to generate an export — screenshots are read under your own session.");
-      const res = await generateEdgePackage(supabase, user.id, snapshot, { includeScreenshots, includePdf, includeDecisionTimeline: includeTimeline }, (stage, pct) => {
+      const res = await generateEdgePackage(supabase, user.id, snapshot, { includeScreenshots, includePdf, includeDecisionTimeline: includeTimeline, includeChartContext }, (stage, pct) => {
         setBusy(pct != null ? `${stage} — ${Math.round(pct)}%` : stage);
       });
       const url = URL.createObjectURL(res.blob);
@@ -264,10 +286,21 @@ export default function EdgeExportPanel({ input }: { input: ExportSnapshotInput 
             Include Decision Timeline (decision_timeline.csv)
           </label>
         )}
+        {snapshot?.dailyReplay && (
+          <label style={{ display: "flex", gap: 7, alignItems: "center", cursor: "pointer" }}>
+            <input type="checkbox" checked={includeChartContext} onChange={(e) => setIncludeChartContext(e.target.checked)} />
+            Include chart context (chart_context.csv)
+          </label>
+        )}
       </div>
       <p className="hint" style={{ margin: "8px 0 0", fontSize: 11.5 }}>
-        Package contents: trades.csv · analytics.json{includePdf ? " · Trading_Report.pdf" : ""} · ChatGPT_Prompt.txt · README.txt · screenshots-manifest.json{includeScreenshots ? " · screenshots/" : ""}{snapshot?.dailyReplay ? `${includeTimeline ? " · decision_timeline.csv" : ""} · strategy.json` : ""}
+        Package contents: trades.csv · analytics.json{includePdf ? " · Trading_Report.pdf" : ""} · ChatGPT_Prompt.txt · README.txt · screenshots-manifest.json{includeScreenshots ? " · screenshots/" : ""}{snapshot?.dailyReplay ? `${includeTimeline ? " · decision_timeline.csv" : ""} · strategy.json${includeChartContext ? " · chart_context.csv" : ""}` : ""}
       </p>
+      {snapshot?.dailyReplay && (
+        <p className="hint" style={{ margin: "4px 0 0", fontSize: 11.5 }}>
+          Daily Replay trades include ONE representative screenshot each (the entry-time capture, or one you selected) plus chart context: the session&apos;s stored OHLCV, sectioned so entry judgments use only candles completed before the entry.
+        </p>
+      )}
 
       {warnings.length > 0 && (
         <div style={{ marginTop: 10, padding: "9px 12px", borderRadius: 8, background: "rgba(251,191,36,0.08)", border: "1px solid rgba(251,191,36,0.35)", fontSize: 12.5 }}>

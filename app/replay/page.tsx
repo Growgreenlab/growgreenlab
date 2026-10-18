@@ -51,6 +51,16 @@ import {
   type DrOrderRow,
   type DrOrderUpdateOp,
 } from "../../lib/dailyReplayOrders";
+import {
+  draftKeyFor, buildDraftPayload, draftsForAttempt, latestClosedCycle,
+  reconcileDrafts, upsertDraft, updateDraftAutoCapture,
+  fetchDraftsForAttempts, finalizeDraft, supersedeDraft, writeDraftMapping,
+  type DrDraftRow, type DrDraftPayload,
+} from "../../lib/drDrafts";
+import { splitCyclesByGeneration } from "../../lib/drTradeEvidence";
+import { groupFillsIntoTrades, type RawFill } from "../../lib/journal";
+import { uploadScreenshotBlob, MAX_BYTES } from "../../lib/journalAttachments";
+import DrDraftReview from "../../components/DrDraftReview";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
 import { diag } from "../../lib/diag";
 import { DEFAULT_HOTKEYS, isTypingTarget } from "../../lib/hotkeys";
@@ -188,6 +198,16 @@ function isDrStorageMissing(e: unknown): boolean {
 
 const DR_STORAGE_MISSING_MSG =
   "Daily Replay storage is not enabled on this deployment yet.";
+
+/** True when the trade-drafts table is absent (its migration has not
+ *  been applied on this deployment yet). Drafts then degrade to an
+ *  honest "not enabled" notice — never an error at every cycle close. */
+function isDraftsStorageMissing(e: unknown): boolean {
+  if (!e || typeof e !== "object") return false;
+  const err = e as { code?: string; message?: string };
+  if (err.code === "42P01" || err.code === "PGRST205") return true;
+  return (err.message ?? "").includes("daily_replay_trade_drafts");
+}
 
 /** True when an RPC error means THIS function does not exist on the
  *  deployment (its migration not applied) — as opposed to the
@@ -693,6 +713,38 @@ function ReplayPageInner() {
   const drOrderTrackerRef = useRef<DrOrderTracker | null>(null);
   const drOrdersMissingRef = useRef(false);
   const drOrderChainsRef = useRef(new Map<string, Promise<void>>());
+  /* ---- Daily Replay trade drafts (per-cycle durable records) ----
+   * A draft row is written the moment a position cycle closes
+   * (observed in drSyncFills), keyed dr:{attempt}:g{gen}:c{cycle}.
+   * drCaptureRef is the workspace chart's screenshot handle (assigned
+   * by LwcChart's captureHandleRef prop); entry captures are staged
+   * in drPendingEntryCaptureRef at the entry fill and uploaded only
+   * after the draft row itself is confirmed saved. Save states are
+   * per-draft and HONEST: "saved" renders only after the upsert
+   * resolves, failures stay visible with a retry that re-runs the
+   * writer from the stored payload. */
+  const drCaptureRef = useRef<(() => HTMLCanvasElement | null) | null>(null);
+  const [drDraftRows, setDrDraftRows] = useState<DrDraftRow[]>([]);
+  const drDraftRowsRef = useRef<DrDraftRow[]>([]);
+  drDraftRowsRef.current = drDraftRows;
+  const [drDraftsAvailable, setDrDraftsAvailable] = useState<boolean | null>(null);
+  const drDraftsMissingRef = useRef(false);
+  const [drDraftSaveStates, setDrDraftSaveStates] = useState<
+    Record<string, "saving" | "saved" | "failed">
+  >({});
+  const drFailedPayloadsRef = useRef(new Map<string, DrDraftPayload>());
+  const [drDraftNotice, setDrDraftNotice] = useState<
+    { text: string; tone: "ok" | "warn" } | null
+  >(null);
+  const drNoticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [drReviewDraftKey, setDrReviewDraftKey] = useState<string | null>(null);
+  const drPendingEntryCaptureRef = useRef<{
+    draftKey: string;
+    candleIndex: number;
+    blob: Blob | null;
+    status: string;
+  } | null>(null);
+  const drDraftHandledRef = useRef(new Set<string>());
   /* Refresh-resume: an in-progress attempt found on load, verified
    * against the attempts table (the localStorage hint alone proves
    * nothing — the server row decides, and anything non-active clears
@@ -986,6 +1038,14 @@ function ReplayPageInner() {
       drEventsMissingRef.current = false;
       drSeenFillsRef.current = 0;
       drPlayStartedRef.current = false;
+      // Trade drafts start empty for a fresh attempt.
+      setDrDraftRows([]);
+      setDrDraftSaveStates({});
+      setDrReviewDraftKey(null);
+      setDrDraftNotice(null);
+      drDraftHandledRef.current = new Set();
+      drFailedPayloadsRef.current = new Map();
+      drPendingEntryCaptureRef.current = null;
       // Fresh persistent-order tracking for this attempt.
       drOrderTrackerRef.current = new DrOrderTracker();
       drOrdersMissingRef.current = false;
@@ -1296,6 +1356,10 @@ function ReplayPageInner() {
         }
       });
       setDrEvents(recorder.all);
+      // Trade drafts: backfill/reconcile from the restored stream —
+      // cycles already closed server-side keep (or gain) their draft
+      // rows before any new trading happens.
+      void drSyncDraftsFromStream(offer.attemptId, events);
       if (recon.restoredPlannedBrackets) {
         setPlannedSL(recon.restoredPlannedBrackets.sl);
         setPlannedTP(recon.restoredPlannedBrackets.tp);
@@ -2054,6 +2118,7 @@ function ReplayPageInner() {
       // journal sessions. The session saves with source
       // 'daily_replay'; ticker/date are read server-side from the
       // attempt's own dataset.
+      let completedSessionId: string | null = null;
       const fillsPayload = eng.fills.map((f) => ({
         side: f.side,
         qty: f.qty,
@@ -2092,6 +2157,7 @@ function ReplayPageInner() {
           .select("id")
           .single();
         if (error || !s) throw error ?? new Error("Daily Replay session save failed.");
+        completedSessionId = s.id;
         if (eng.fills.length > 0) {
           const { error: tErr } = await supabase.from("session_trades").insert(
             fillsPayload.map((f) => ({ ...f, session_id: s.id, user_id: user.id }))
@@ -2106,10 +2172,69 @@ function ReplayPageInner() {
       } else if (!completedId) {
         throw new Error("Daily Replay completion returned no session.");
       }
+      if (!cErr && completedId) completedSessionId = String(completedId);
       // The attempt is finished server-side: the resume hint is spent.
       try { localStorage.removeItem(DAILY_REPLAY_STATE_KEY); } catch { /* ignore */ }
       await flushDrEvents();
       setDrSaveMsg("Saved to your journal — find it under My Sessions.");
+      /* Trade-draft reconciliation (post-completion, best-effort):
+       * link each final-generation draft to its grouped journal
+       * trade, create any draft the live writer missed, supersede
+       * earlier-generation leftovers, and copy annotations forward
+       * for already-finalized drafts. The completion transaction
+       * above is untouched and already committed — a failure here is
+       * swallowed and the reconciler is safely re-runnable. */
+      if (completedSessionId) {
+        try {
+          const trades = groupFillsIntoTrades(
+            fillsPayload.map((f) => ({ ...f, session_id: completedSessionId as string })) as unknown as RawFill[],
+            { id: completedSessionId, ticker: info.ticker, trade_date: info.tradeDate, source: "daily_replay" }
+          );
+          const existing = await fetchDraftsForAttempts(supabase, [info.attemptId]);
+          const plan = reconcileDrafts({
+            attemptId: info.attemptId,
+            sessionId: completedSessionId,
+            events: drRecorderRef.current?.all ?? [],
+            trades,
+            drafts: existing,
+            allowCreate: true,
+          });
+          const rowsByKey = new Map<string, DrDraftRow>();
+          for (const d of existing) rowsByKey.set(d.draftKey, d);
+          for (const payload of plan.creates) {
+            const res = await upsertDraft(supabase, user.id, payload);
+            if (res.error) {
+              if (isDraftsStorageMissing(res.error)) {
+                drDraftsMissingRef.current = true;
+                setDrDraftsAvailable(false);
+              }
+              continue;
+            }
+            if (res.data) rowsByKey.set(res.data.draftKey, res.data);
+          }
+          for (const m of plan.mappings) {
+            const target = m.draftId
+              ? m.draftId
+              : (rowsByKey.get(m.draftKey)?.id ?? m.draftKey);
+            await writeDraftMapping(supabase, target, m.finalizedSessionId, m.finalizedTradeKey);
+          }
+          for (const id of plan.supersedeDraftIds) {
+            await supersedeDraft(supabase, id);
+          }
+          for (const m of plan.mappings) {
+            const row = rowsByKey.get(m.draftKey);
+            if (row && row.status === "finalized") {
+              await copyDraftMetaForward(
+                supabase, user.id, m.draftKey, m.finalizedTradeKey, m.finalizedSessionId
+              );
+            }
+          }
+          if (!drDraftsMissingRef.current) {
+            const refreshed = await fetchDraftsForAttempts(supabase, [info.attemptId]);
+            setDrDraftRows(refreshed);
+          }
+        } catch { /* reconciliation never blocks or un-saves completion */ }
+      }
     } catch (e) {
       setDrSaveMsg(
         `Replay complete — journal save failed: ${e instanceof Error ? e.message : "unknown error"}`
@@ -2304,6 +2429,323 @@ function ReplayPageInner() {
     persistDrOrderUpdates(ops);
   };
 
+  /* ---------------- Trade drafts: capture + persistence ----------------
+   * Observation-only side effects: every helper below runs AFTER the
+   * recorder/engine work it observes, catches everything, and never
+   * gates a fill, an order, or completion. */
+
+  /** Show a drafts notice; "ok" notices auto-dismiss when a timeout
+   *  is given, "warn" notices persist until dismissed or a retry
+   *  succeeds (a success replaces them with the "ok" notice). */
+  const showDrDraftNotice = (
+    notice: { text: string; tone: "ok" | "warn" } | null,
+    autoDismissMs?: number
+  ): void => {
+    if (drNoticeTimeoutRef.current) {
+      clearTimeout(drNoticeTimeoutRef.current);
+      drNoticeTimeoutRef.current = null;
+    }
+    setDrDraftNotice(notice);
+    if (notice && autoDismissMs) {
+      drNoticeTimeoutRef.current = setTimeout(() => {
+        setDrDraftNotice((cur) => (cur === notice ? null : cur));
+      }, autoDismissMs);
+    }
+  };
+
+  /** Snapshot the workspace chart as a PNG blob (null on ANY
+   *  failure). Oversized captures are re-encoded at 0.75× then 0.5×
+   *  until they fit the screenshot bucket's MAX_BYTES limit. */
+  const captureChartBlob = async (): Promise<Blob | null> => {
+    try {
+      const handle = drCaptureRef.current;
+      if (!handle) return null;
+      const canvas = handle();
+      if (!canvas) return null;
+      const toBlob = (c: HTMLCanvasElement): Promise<Blob | null> =>
+        new Promise((resolve) => {
+          try { c.toBlob((b) => resolve(b), "image/png"); } catch { resolve(null); }
+        });
+      let blob = await toBlob(canvas);
+      if (!blob) return null;
+      for (const factor of [0.75, 0.5]) {
+        if (!blob || blob.size <= MAX_BYTES) break;
+        const smaller = document.createElement("canvas");
+        smaller.width = Math.max(1, Math.floor(canvas.width * factor));
+        smaller.height = Math.max(1, Math.floor(canvas.height * factor));
+        const ctx = smaller.getContext("2d");
+        if (!ctx) break;
+        ctx.drawImage(canvas, 0, 0, smaller.width, smaller.height);
+        const next = await toBlob(smaller);
+        if (!next) break;
+        blob = next;
+      }
+      return blob;
+    } catch {
+      return null;
+    }
+  };
+
+  /** Copy a draft-key annotation row forward to a finalized trade
+   *  key (only when a draft-key row exists and the target has none). */
+  const copyDraftMetaForward = async (
+    supabase: ReturnType<typeof createClient>,
+    userId: string,
+    fromKey: string,
+    toKey: string,
+    sessionId: string | null
+  ): Promise<void> => {
+    try {
+      const { data: src } = await supabase
+        .from("journal_trade_meta")
+        .select("*")
+        .eq("trade_key", fromKey)
+        .maybeSingle();
+      if (!src) return;
+      const { data: existing } = await supabase
+        .from("journal_trade_meta")
+        .select("trade_key")
+        .eq("trade_key", toKey)
+        .maybeSingle();
+      if (existing) return;
+      const copy: Record<string, unknown> = { ...(src as Record<string, unknown>) };
+      delete copy.id;
+      delete copy.created_at;
+      copy.user_id = userId;
+      copy.trade_key = toKey;
+      copy.session_id = sessionId;
+      copy.updated_at = new Date().toISOString();
+      await supabase.from("journal_trade_meta").upsert(copy, { onConflict: "user_id,trade_key" });
+    } catch { /* best-effort — the draft-key row remains the record */ }
+  };
+
+  /**
+   * Persist one closed cycle's draft, then (never blocking the saved
+   * state) upload its entry/exit auto-captures and record their
+   * outcomes on the row. Failures are visible and retryable: the
+   * payload is kept in drFailedPayloadsRef and the strip's Retry
+   * button re-calls this with it. NEVER throws.
+   */
+  const persistDrDraft = async (
+    payload: DrDraftPayload,
+    closeCandleIndex: number
+  ): Promise<void> => {
+    const draftKey = payload.draft_key;
+    const clearSaveState = () =>
+      setDrDraftSaveStates((s) => {
+        const next = { ...s };
+        delete next[draftKey];
+        return next;
+      });
+    try {
+      setDrDraftSaveStates((s) => ({ ...s, [draftKey]: "saving" }));
+      if (drDraftsMissingRef.current) {
+        setDrDraftsAvailable(false);
+        clearSaveState();
+        return;
+      }
+      if (!isSupabaseConfigured()) {
+        drFailedPayloadsRef.current.set(draftKey, payload);
+        setDrDraftSaveStates((s) => ({ ...s, [draftKey]: "failed" }));
+        showDrDraftNotice({
+          tone: "warn",
+          text: "Trade closed — draft could not be saved (not signed in). It can be recovered from the attempt timeline.",
+        });
+        return;
+      }
+      const supabase = createClient();
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        drFailedPayloadsRef.current.set(draftKey, payload);
+        setDrDraftSaveStates((s) => ({ ...s, [draftKey]: "failed" }));
+        showDrDraftNotice({
+          tone: "warn",
+          text: "Trade closed — draft could not be saved (not signed in). It can be recovered from the attempt timeline.",
+        });
+        return;
+      }
+      const res = await upsertDraft(supabase, user.id, payload);
+      if (res.error) {
+        if (isDraftsStorageMissing(res.error)) {
+          drDraftsMissingRef.current = true;
+          setDrDraftsAvailable(false);
+          clearSaveState();
+          return;
+        }
+        drFailedPayloadsRef.current.set(draftKey, payload);
+        setDrDraftSaveStates((s) => ({ ...s, [draftKey]: "failed" }));
+        showDrDraftNotice({ tone: "warn", text: "Trade closed — draft NOT saved yet." });
+        return;
+      }
+      let row = res.data;
+      if (!row) {
+        const existing = await fetchDraftsForAttempts(supabase, [payload.attempt_id]);
+        row = existing.find((d) => d.draftKey === draftKey) ?? null;
+      }
+      if (row) {
+        const savedRow = row;
+        setDrDraftRows((prev) => [
+          ...prev.filter((d) => d.draftKey !== savedRow.draftKey),
+          savedRow,
+        ]);
+        setDrDraftsAvailable(true);
+      }
+      drFailedPayloadsRef.current.delete(draftKey);
+      setDrDraftSaveStates((s) => ({ ...s, [draftKey]: "saved" }));
+      showDrDraftNotice({ tone: "ok", text: "Trade closed — draft saved." }, 4000);
+      if (!row) return;
+      /* Auto-captures: strictly after the saved state above. */
+      try {
+        const pending = drPendingEntryCaptureRef.current;
+        const matched = pending && pending.draftKey === draftKey ? pending : null;
+        if (matched) drPendingEntryCaptureRef.current = null;
+        let entryOutcome: Record<string, unknown>;
+        if (matched && matched.blob) {
+          const up = await uploadScreenshotBlob(
+            supabase, user.id, draftKey,
+            `auto-entry-c${matched.candleIndex + 1}.png`, matched.blob
+          );
+          entryOutcome = up.error
+            ? { status: "failed", candleIndex: matched.candleIndex }
+            : { status: "captured", path: up.path, candleIndex: matched.candleIndex };
+        } else if (matched) {
+          entryOutcome = { status: matched.status, candleIndex: matched.candleIndex };
+        } else {
+          entryOutcome = { status: "skipped" };
+        }
+        let exitOutcome: Record<string, unknown>;
+        if (searchParams.get("chart") === "canvas" || !drCaptureRef.current) {
+          exitOutcome = { status: "skipped", candleIndex: closeCandleIndex };
+        } else {
+          const exitBlob = await new Promise<Blob | null>((resolve) => {
+            requestAnimationFrame(() => {
+              void captureChartBlob().then(resolve);
+            });
+          });
+          if (exitBlob) {
+            const up = await uploadScreenshotBlob(
+              supabase, user.id, draftKey,
+              `auto-exit-c${closeCandleIndex + 1}.png`, exitBlob
+            );
+            exitOutcome = up.error
+              ? { status: "failed", candleIndex: closeCandleIndex }
+              : { status: "captured", path: up.path, candleIndex: closeCandleIndex };
+          } else {
+            exitOutcome = { status: "failed", candleIndex: closeCandleIndex };
+          }
+        }
+        const autoCapture = { entry: entryOutcome, exit: exitOutcome };
+        const upd = await updateDraftAutoCapture(supabase, row.id, autoCapture);
+        if (!upd.error) {
+          const rowId = row.id;
+          setDrDraftRows((prev) =>
+            prev.map((d) => (d.id === rowId ? { ...d, autoCapture } : d))
+          );
+        }
+      } catch { /* captures are evidence, never a save blocker */ }
+    } catch {
+      drFailedPayloadsRef.current.set(draftKey, payload);
+      setDrDraftSaveStates((s) => ({ ...s, [draftKey]: "failed" }));
+      showDrDraftNotice({ tone: "warn", text: "Trade closed — draft NOT saved yet." });
+    }
+  };
+
+  /** After a session_reset is recorded: any still-open draft from an
+   *  earlier generation is superseded (its fills were wiped by the
+   *  reset and will never reach the saved session). Best-effort
+   *  server-side; the strip also derives superseded-ness read-side. */
+  const drAfterReset = (): void => {
+    drPendingEntryCaptureRef.current = null;
+    const rec = drRecorderRef.current;
+    if (!rec) return;
+    const gen = rec.all.filter((e) => e.type === "session_reset").length;
+    for (const row of drDraftRowsRef.current) {
+      if (row.status !== "draft" || row.resetGeneration >= gen) continue;
+      setDrDraftRows((prev) =>
+        prev.map((d) => (d.id === row.id ? { ...d, status: "superseded" as const } : d))
+      );
+      void (async () => {
+        try {
+          if (!isSupabaseConfigured() || drDraftsMissingRef.current) return;
+          const supabase = createClient();
+          await supersedeDraft(supabase, row.id);
+        } catch { /* best-effort; read-side derivation still shows it */ }
+      })();
+    }
+  };
+
+  /** Resume-time reconciliation: fetch the attempt's drafts, create
+   *  any the restored stream shows closed but un-drafted, and adopt
+   *  the merged set. Best-effort; a missing table latches honestly. */
+  const drSyncDraftsFromStream = async (
+    attemptId: string,
+    events: DrEvent[]
+  ): Promise<void> => {
+    try {
+      if (!isSupabaseConfigured()) return;
+      const supabase = createClient();
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+      const existing = await fetchDraftsForAttempts(supabase, [attemptId]);
+      const merged = [...existing];
+      const known = new Set(existing.map((d) => d.draftKey));
+      for (const d of existing) drDraftHandledRef.current.add(d.draftKey);
+      for (const payload of draftsForAttempt(attemptId, events)) {
+        if (known.has(payload.draft_key)) continue;
+        const res = await upsertDraft(supabase, user.id, payload);
+        if (res.error) {
+          if (isDraftsStorageMissing(res.error)) {
+            drDraftsMissingRef.current = true;
+            setDrDraftsAvailable(false);
+            return;
+          }
+          continue;
+        }
+        if (res.data) {
+          merged.push(res.data);
+          drDraftHandledRef.current.add(res.data.draftKey);
+        }
+      }
+      setDrDraftRows(merged);
+      setDrDraftsAvailable(true);
+    } catch { /* drafts are recoverable from the stream at any time */ }
+  };
+
+  /** Re-fetch the current attempt's draft rows (drawer onChanged). */
+  const refreshDrDraftRows = async (): Promise<void> => {
+    const info = drInfoRef.current;
+    if (!info || !isSupabaseConfigured()) return;
+    try {
+      const supabase = createClient();
+      const rows = await fetchDraftsForAttempts(supabase, [info.attemptId]);
+      if (!drDraftsMissingRef.current) setDrDraftRows(rows);
+    } catch { /* keep the rows already on screen */ }
+  };
+
+  /** Finalize from the Drafts strip: flip the flag, then copy any
+   *  draft-key annotations forward when a finalized key is known. */
+  const finalizeDrDraftFromStrip = async (row: DrDraftRow): Promise<void> => {
+    try {
+      if (!isSupabaseConfigured()) return;
+      const supabase = createClient();
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+      await finalizeDraft(supabase, row.id);
+      setDrDraftRows((prev) =>
+        prev.map((d) =>
+          d.id === row.id
+            ? { ...d, status: "finalized" as const, finalizedAt: new Date().toISOString() }
+            : d
+        )
+      );
+      if (row.finalizedTradeKey) {
+        await copyDraftMetaForward(
+          supabase, user.id, row.draftKey, row.finalizedTradeKey, row.finalizedSessionId
+        );
+      }
+    } catch { /* the row keeps its prior status; finalize is retryable */ }
+  };
+
   /**
    * Observe engine fills centrally (market/limit fills from handlers,
    * bracket triggers + limit fills from the tick loop) and feed them
@@ -2373,6 +2815,57 @@ function ReplayPageInner() {
           { marketIdx: f.candleIndex, marketTs: f.time }
         );
       }
+      /* Trade drafts (observation only — after recordFill/snapshot,
+       * never gating them): stage the entry capture at a first entry
+       * fill, and persist the draft when a sell fill closes a cycle. */
+      if (f.side === "buy" && wasFlat && drInfoRef.current) {
+        try {
+          const attemptId = drInfoRef.current.attemptId;
+          const split = splitCyclesByGeneration(rec.all);
+          const gen = split.lastGeneration;
+          // The cycle this fill just opened carries its own
+          // cycleIndex (the value buildDraftPayload will key its
+          // draft with at close): the open cycle of this generation.
+          const openCycle = split.cycles.find(
+            (c) => c.generation === gen && !c.closed
+          );
+          const idx = openCycle
+            ? openCycle.cycleIndex
+            : split.cycles.filter((c) => c.generation === gen && c.closed).length + 1;
+          const key = draftKeyFor(attemptId, gen, idx);
+          if (searchParams.get("chart") === "canvas") {
+            drPendingEntryCaptureRef.current = {
+              draftKey: key, candleIndex: f.candleIndex, blob: null, status: "skipped",
+            };
+          } else {
+            const captureCandle = f.candleIndex;
+            requestAnimationFrame(() => {
+              void captureChartBlob().then((blob) => {
+                drPendingEntryCaptureRef.current = {
+                  draftKey: key,
+                  candleIndex: captureCandle,
+                  blob,
+                  status: blob ? "captured" : "failed",
+                };
+              });
+            });
+          }
+        } catch { /* capture staging never gates the fill */ }
+      }
+      if (f.side === "sell" && !wasFlat && rec.positionQty === 0) {
+        try {
+          const split = splitCyclesByGeneration(rec.all);
+          const cycle = latestClosedCycle(rec.all);
+          const info = drInfoRef.current;
+          if (cycle && info) {
+            const payload = buildDraftPayload(info.attemptId, cycle, split.lastGeneration);
+            if (!drDraftHandledRef.current.has(payload.draft_key)) {
+              drDraftHandledRef.current.add(payload.draft_key);
+              void persistDrDraft(payload, f.candleIndex);
+            }
+          }
+        } catch { /* draft persistence never gates the fill */ }
+      }
     }
   };
 
@@ -2417,6 +2910,20 @@ function ReplayPageInner() {
     isDr && drInfo && candles
       ? highlightBandFor(candles, drInfo.startIndex)
       : null;
+  /* Trade drafts strip derivations: rows in (generation, cycle)
+   * order; a still-"draft" row from an earlier generation than the
+   * live stream's is superseded by derivation even if the best-effort
+   * server update has not landed. */
+  const drStreamGen = drEvents.filter((e) => e.type === "session_reset").length;
+  const drDraftRowsSorted = [...drDraftRows].sort(
+    (a, b) => a.resetGeneration - b.resetGeneration || a.cycleIndex - b.cycleIndex
+  );
+  const drFailedDraftKeys = Object.entries(drDraftSaveStates)
+    .filter(([, s]) => s === "failed")
+    .map(([k]) => k);
+  const drReviewRow = drReviewDraftKey
+    ? (drDraftRows.find((d) => d.draftKey === drReviewDraftKey) ?? null)
+    : null;
 
   return (
     <div className="ws">
@@ -2879,8 +3386,8 @@ function ReplayPageInner() {
                 }}
                 onPause={() => { stopTimer(); drRec()?.record("session_paused", {}, drCtx()); }}
                 onNext={isDr ? () => { void drStepNext(); } : () => { eng.step(); setEnded(eng.atEnd); bump(); }}
-                onReset={() => { const wasPlaying = playing; stopTimer(); setEnded(false); drSyncFills(); drSettleTrackedOrders(); eng.reset(); drRec()?.record("session_reset", {}, drCtx()); bump(); if (wasPlaying) { setPlayNonce((n) => n + 1); setPlaying(true); } }}
-                onRestart={() => { stopTimer(); setEnded(false); drSyncFills(); drSettleTrackedOrders(); eng.reset(); drRec()?.record("session_reset", {}, drCtx()); bump(); setPlayNonce((n) => n + 1); setPlaying(true); }}
+                onReset={() => { const wasPlaying = playing; stopTimer(); setEnded(false); drSyncFills(); drSettleTrackedOrders(); eng.reset(); drRec()?.record("session_reset", {}, drCtx()); drAfterReset(); bump(); if (wasPlaying) { setPlayNonce((n) => n + 1); setPlaying(true); } }}
+                onRestart={() => { stopTimer(); setEnded(false); drSyncFills(); drSettleTrackedOrders(); eng.reset(); drRec()?.record("session_reset", {}, drCtx()); drAfterReset(); bump(); setPlayNonce((n) => n + 1); setPlaying(true); }}
                 speed={speed}
                 onSpeed={setSpeed}
                 index={eng.index}
@@ -3007,6 +3514,7 @@ function ReplayPageInner() {
                     }
                     highlightTimeSec={isDr ? (drActiveBand?.timeSec ?? null) : undefined}
                     highlightSpanSec={drActiveBand?.spanSec ?? 60}
+                    captureHandleRef={drCaptureRef}
                     onPlannedDrag={(sl, tp) => { setPlannedLevels(sl, tp); drBracketsChanged(sl, tp, "drag", "planned"); }}
                     onActiveDrag={(sl, tp) => {
                       const e = engineRef.current;
@@ -3262,6 +3770,176 @@ function ReplayPageInner() {
                 )}
               </div>
             </details>
+          )}
+
+          {/* Daily Replay — Trade Drafts (per-cycle durable records) */}
+          {isDr && (
+            <div
+              className="card"
+              style={{ marginTop: 10, padding: "10px 12px" }}
+            >
+              <div style={{ fontWeight: 700, fontSize: 13 }}>Trade Drafts</div>
+              {drDraftNotice && (
+                <div
+                  style={{
+                    display: "flex", gap: 8, alignItems: "center", marginTop: 8,
+                    fontSize: 12.5,
+                    color: drDraftNotice.tone === "ok" ? "var(--emerald-bright)" : "#fbbf24",
+                  }}
+                >
+                  <span>{drDraftNotice.text}</span>
+                  {drDraftNotice.tone === "warn" && (
+                    <button
+                      className="btn"
+                      style={{ padding: "1px 8px", fontSize: 11.5 }}
+                      onClick={() => showDrDraftNotice(null)}
+                    >
+                      Dismiss
+                    </button>
+                  )}
+                </div>
+              )}
+              {drDraftsAvailable === false ? (
+                <p className="hint" style={{ margin: "8px 0 0" }}>
+                  Trade drafts are not enabled on this deployment yet (its database update
+                  has not been applied). Closed trades still save to the journal when the
+                  replay completes.
+                </p>
+              ) : (
+                <>
+                  {drDraftRowsSorted.length === 0 && drFailedDraftKeys.length === 0 && (
+                    <p className="hint" style={{ margin: "8px 0 0" }}>
+                      Closed trades in this replay will appear here as drafts.
+                    </p>
+                  )}
+                  <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
+                    {drDraftRowsSorted.map((row) => {
+                      const saveState = drDraftSaveStates[row.draftKey];
+                      const derivedSuperseded =
+                        row.status === "draft" && row.resetGeneration < drStreamGen;
+                      const chip =
+                        saveState === "saving"
+                          ? "saving…"
+                          : saveState === "failed"
+                            ? "NOT saved"
+                            : derivedSuperseded || row.status === "superseded"
+                              ? "Superseded"
+                              : row.status === "finalized"
+                                ? "Finalized"
+                                : saveState === "saved"
+                                  ? "Draft · saved"
+                                  : "Draft";
+                      const chipColor =
+                        saveState === "failed"
+                          ? "#f6465d"
+                          : saveState === "saving"
+                            ? "#fbbf24"
+                            : derivedSuperseded || row.status === "superseded"
+                              ? "var(--muted)"
+                              : row.status === "finalized"
+                                ? "var(--emerald-bright)"
+                                : "var(--muted)";
+                      return (
+                        <div
+                          key={row.draftKey}
+                          style={{
+                            display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center",
+                            fontSize: 12.5, padding: "6px 8px",
+                            background: "rgba(255,255,255,0.02)",
+                            border: "1px solid rgba(255,255,255,0.06)", borderRadius: 6,
+                          }}
+                        >
+                          <span>
+                            Trade {row.cycleIndex} · closed at candle #
+                            {row.closeFillCandleIndex + 1} ·{" "}
+                            <span className="num">{formatSigned(row.realizedPnl)}</span>
+                          </span>
+                          <span style={{ color: chipColor, fontWeight: 600 }}>{chip}</span>
+                          <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+                            {saveState === "failed" && (
+                              <button
+                                className="btn"
+                                style={{ padding: "2px 10px", fontSize: 11.5 }}
+                                onClick={() => {
+                                  const p = drFailedPayloadsRef.current.get(row.draftKey);
+                                  if (p) void persistDrDraft(p, p.close_fill_candle_index);
+                                }}
+                              >
+                                Retry
+                              </button>
+                            )}
+                            <button
+                              className="btn"
+                              style={{ padding: "2px 10px", fontSize: 11.5 }}
+                              onClick={() => setDrReviewDraftKey(row.draftKey)}
+                            >
+                              Review
+                            </button>
+                            {row.status === "draft" && !derivedSuperseded && (
+                              <button
+                                className="btn primary"
+                                style={{ padding: "2px 10px", fontSize: 11.5 }}
+                                onClick={() => { void finalizeDrDraftFromStrip(row); }}
+                              >
+                                Finalize
+                              </button>
+                            )}
+                          </span>
+                        </div>
+                      );
+                    })}
+                    {/* Cycles whose draft write failed have no row yet —
+                        they stay visible here with their retry. */}
+                    {drFailedDraftKeys
+                      .filter((k) => !drDraftRows.some((d) => d.draftKey === k))
+                      .map((k) => {
+                        const p = drFailedPayloadsRef.current.get(k);
+                        if (!p) return null;
+                        return (
+                          <div
+                            key={k}
+                            style={{
+                              display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center",
+                              fontSize: 12.5, padding: "6px 8px",
+                              background: "rgba(246,70,93,0.05)",
+                              border: "1px solid rgba(246,70,93,0.25)", borderRadius: 6,
+                            }}
+                          >
+                            <span>
+                              Trade {p.cycle_index} · closed at candle #
+                              {p.close_fill_candle_index + 1} ·{" "}
+                              <span className="num">{formatSigned(p.realized_pnl)}</span>
+                            </span>
+                            <span style={{ color: "#f6465d", fontWeight: 600 }}>NOT saved</span>
+                            <span style={{ marginLeft: "auto" }}>
+                              <button
+                                className="btn"
+                                style={{ padding: "2px 10px", fontSize: 11.5 }}
+                                onClick={() => { void persistDrDraft(p, p.close_fill_candle_index); }}
+                              >
+                                Retry
+                              </button>
+                            </span>
+                          </div>
+                        );
+                      })}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* Trade draft review drawer */}
+          {drReviewRow && (
+            <DrDraftReview
+              draft={drReviewRow}
+              ticker={drInfo?.ticker ?? null}
+              tradeDate={drInfo?.tradeDate ?? null}
+              attemptStatus={drPhase === "done" ? "finished" : "active"}
+              events={drEvents}
+              onClose={() => setDrReviewDraftKey(null)}
+              onChanged={() => { void refreshDrDraftRows(); }}
+            />
           )}
 
           {/* Guest daily limit modal */}
