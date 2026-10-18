@@ -20,11 +20,20 @@
  * finalized_session_id + finalized_trade_key ({session_id}:{seq});
  * the session-scoped key stays canonical for the journal.
  *
- * Finalization (plan §3): finalize is a durable FLAG on the draft
- * row only — it never writes journal rows. A cycle's journal trade is
- * visible iff the attempt completed AND (no draft row exists —
- * legacy/pre-feature attempts, unchanged — OR its draft is
- * finalized). computeDrExclusions encodes exactly that read-side rule.
+ * Finalization (plan §3, AMENDED by the 2026-10-18 workflow fix at
+ * the user's explicit direction): finalize is a durable FLAG on the
+ * draft row only — it never writes journal rows. A FINALIZED draft's
+ * trade is journal-visible IMMEDIATELY, even while its attempt is
+ * still active: the journal builds a pre-completion row from the
+ * attempt's events + the draft's anchors (buildPreCompletionTrade
+ * below), keyed by the draft key. When the attempt completes, the
+ * session-sourced canonical row REPLACES the pre-completion row (the
+ * journal builds pre-completion rows only for attempts with no
+ * session, so the two can never coexist) and computeDrExclusions
+ * keeps encoding the post-completion read-side rule: a completed
+ * attempt's cycle trade is visible iff no draft row exists
+ * (legacy/pre-feature attempts, unchanged) OR its draft is
+ * finalized.
  *
  * Writer durability (plan §4.4): upsertDraft is FIRST-WRITE-WINS for
  * anchors and status. It inserts with ignoreDuplicates on the
@@ -41,7 +50,7 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { DrEvent } from "./dailyReplayEvents";
-import type { GroupedTrade } from "./journal";
+import type { GroupedTrade, RawFill } from "./journal";
 import {
   splitCyclesByGeneration,
   verifyCycleTradePair,
@@ -471,4 +480,118 @@ export async function writeDraftMapping(
     .select();
   if (error || !data) return 0;
   return (data as unknown[]).length;
+}
+
+/* ================================================================== */
+/* Pre-completion journal rows (finalized ⇒ visible, 2026-10-18)      */
+/* ================================================================== */
+
+/** Tolerances for reconciling a cycle against its draft's recorded
+ *  anchors — the same cent-level slack verifyCycleTradePair uses for
+ *  the post-completion pairing (REALIZED_EPS there). */
+const ANCHOR_PRICE_EPS = 0.011;
+const ANCHOR_PNL_EPS = 0.011;
+
+/**
+ * Build a journal GroupedTrade for one CLOSED cycle purely from its
+ * recorded events — the pre-completion twin of groupFillsIntoTrades.
+ * Fills come from the cycle's order_filled events in seq order; a
+ * sell fill's realized_pnl is the realizedPnl of the exit event the
+ * recorder emits immediately after that fill (partial_exit /
+ * position_closed — the same pairing buildDraftPayload relies on).
+ * Entry/exit are qty-weighted averages and realizedPnl is the
+ * cycle's recorded realized sum, exactly the conventions the
+ * session-sourced rows use. sessionId is "" — no session exists yet;
+ * callers must treat "" as "no session" (never a real session id).
+ * Returns null for an open cycle or a cycle without fills — never a
+ * fabricated row.
+ */
+export function groupedTradeFromCycle(
+  cycle: DrCycleInfo,
+  meta: { tradeKey: string; ticker: string; tradeDate: string },
+): GroupedTrade | null {
+  if (!cycle.closed) return null;
+  const fills: RawFill[] = [];
+  let unassignedSell: RawFill | null = null;
+  for (const e of cycle.events) {
+    if (e.type === "order_filled") {
+      const side = e.payload.side === "sell" ? "sell" : "buy";
+      const qty = typeof e.payload.qty === "number" ? e.payload.qty : 0;
+      const price = typeof e.payload.price === "number" ? e.payload.price : 0;
+      if (!(qty > 0) || !(price > 0)) continue;
+      const candleTime = e.marketTs != null ? new Date(e.marketTs).toISOString() : null;
+      const fill: RawFill = {
+        id: `${meta.tradeKey}:f${e.seq}`,
+        session_id: "",
+        side,
+        qty,
+        price,
+        candle_index: typeof e.payload.candleIndex === "number" ? e.payload.candleIndex : (e.marketIdx ?? 0),
+        candle_time: candleTime,
+        realized_pnl: 0,
+        created_at: candleTime ?? new Date(e.wallTs).toISOString(),
+      };
+      fills.push(fill);
+      if (side === "sell") unassignedSell = fill;
+    } else if (e.type === "partial_exit" || e.type === "position_closed") {
+      if (unassignedSell && typeof e.payload.realizedPnl === "number") {
+        unassignedSell.realized_pnl = e.payload.realizedPnl;
+        unassignedSell = null;
+      }
+    }
+  }
+  if (fills.length === 0) return null;
+  let buyQty = 0, buyValue = 0, sellQty = 0, sellValue = 0;
+  for (const f of fills) {
+    if (f.side === "buy") { buyQty += f.qty; buyValue += f.qty * f.price; }
+    else { sellQty += f.qty; sellValue += f.qty * f.price; }
+  }
+  if (buyQty <= 0 || sellQty <= 0) return null;
+  const direction: "long" | "short" = buyQty >= sellQty ? "long" : "short";
+  return {
+    tradeKey: meta.tradeKey,
+    sessionId: "",
+    ticker: meta.ticker,
+    tradeDate: meta.tradeDate,
+    source: "daily_replay",
+    sequence: cycle.cycleIndex,
+    direction,
+    entryPrice: direction === "long" ? buyValue / buyQty : sellValue / sellQty,
+    exitPrice: direction === "long" ? sellValue / sellQty : buyValue / buyQty,
+    qty: direction === "long" ? buyQty : sellQty,
+    entryTime: fills[0].candle_time,
+    exitTime: fills[fills.length - 1].candle_time,
+    realizedPnl: cycle.realizedSum,
+    fees: 0,
+    fills,
+    rMultiple: null, // overlaid from recorded evidence by the caller
+  };
+}
+
+/**
+ * The verified pre-completion journal row for a FINALIZED draft: the
+ * draft's cycle must reconcile with the draft's recorded anchors
+ * (first-fill candle/price/qty + realized sum) under the same
+ * cent-level tolerances the post-completion pairing uses. Any
+ * mismatch withholds the row (null) — the trade stays out of the
+ * journal rather than showing unverified numbers, and the caller can
+ * count it as withheld for the export hint. The row keys off the
+ * DRAFT key — the identity its screenshots and journal meta already
+ * use; at completion the canonical session row replaces it.
+ */
+export function buildPreCompletionTrade(
+  draft: DrDraftRow,
+  cycle: DrCycleInfo,
+  meta: { ticker: string; tradeDate: string },
+): GroupedTrade | null {
+  if (draft.status !== "finalized") return null;
+  if (!cycle.closed) return null;
+  if (cycle.generation !== draft.resetGeneration || cycle.cycleIndex !== draft.cycleIndex) return null;
+  const ff = cycle.firstFill;
+  if (!ff) return null;
+  if (ff.payload.candleIndex !== draft.firstFillCandleIndex) return null;
+  if (typeof ff.payload.price !== "number" || Math.abs(ff.payload.price - draft.firstFillPrice) > ANCHOR_PRICE_EPS) return null;
+  if (ff.payload.qty !== draft.firstFillQty) return null;
+  if (Math.abs(cycle.realizedSum - draft.realizedPnl) > ANCHOR_PNL_EPS) return null;
+  return groupedTradeFromCycle(cycle, { tradeKey: draft.draftKey, ticker: meta.ticker, tradeDate: meta.tradeDate });
 }

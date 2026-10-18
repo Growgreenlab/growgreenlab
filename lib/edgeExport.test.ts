@@ -10,7 +10,8 @@
 import { createHash } from "node:crypto";
 import { calcRealTrade, groupFillsIntoTrades, type GroupedTrade, type RawFill, type RealFill } from "./journal";
 import { riskMetrics } from "./journalAnalytics";
-import { deriveDrEvidence } from "./drTradeEvidence";
+import { deriveDrEvidence, splitCyclesByGeneration } from "./drTradeEvidence";
+import { buildPreCompletionTrade, type DrDraftRow } from "./drDrafts";
 import type { DrEvent, DrEventType } from "./dailyReplayEvents";
 import { mapStrategyRow, mapStrategyVersionRow } from "./strategies";
 import {
@@ -889,21 +890,25 @@ const RANGE = { start: "2026-10-01", end: "2026-10-31" };
   check("readme: chart_context.csv absent from inventory when not included", !readmeNoCtx.split("\n").some((l) => l === "- chart_context.csv"));
 }
 
-/* ============ export hints: finalized-but-invisible DR trades ============
- * Reproduces the reported scenario (2026-10-17): the user finalized a
- * Daily Replay draft, then the export panel (Daily source, Daily range
- * Oct 17) showed "Eligible trades: 0" with no explanation. Two distinct
- * invisibility causes must be NAMED by computeDrExportHints, never
- * silently folded into the 0:
- *  (B) the draft is finalized but its attempt never completed — no
- *      session exists, so no unified trade exists at all (by design);
- *  (C) a completed DR trade exists but its tradeDate is outside the
- *      selected range.
+/* ============ export hints: invisible DR trades, named ============
+ * History: the 2026-10-17 report was a finalized draft on an
+ * UNCOMPLETED attempt being invisible everywhere (case B) — at the
+ * time that was by design (materialization at completion) and the
+ * hint named it. The 2026-10-18 workflow fix SUPERSEDES that rule:
+ * a finalized draft's trade is now journal-visible immediately as a
+ * pre-completion unified row, so case B no longer exists as an
+ * invisibility cause (see the pre-completion block below). The two
+ * causes that remain must still be NAMED by computeDrExportHints,
+ * never silently folded into an "Eligible trades: 0":
+ *  (W) a finalized draft whose cycle could NOT be reconciled with
+ *      its recorded anchors — the row is withheld, never fabricated;
+ *  (C) a DR trade (pre- or post-completion) exists but its tradeDate
+ *      is outside the selected range.
  * The hints are communication only: eligibility itself never changes. */
 {
   const H_SESSION = "ffffffff-ffff-4fff-8fff-ffffffffffff";
   const H_ATT_DONE = "a3333333-3333-4333-8333-333333333333";
-  const H_ATT_PENDING = "a4444444-4444-4444-8444-444444444444";
+  const H_ATT_WITHHELD = "a4444444-4444-4444-8444-444444444444";
   const hGrouped = groupFillsIntoTrades([
     sf("h1f1", H_SESSION, "buy", 100, 20.00, 97, 0, "2026-10-18T15:37:00.000Z"),
     sf("h1f2", H_SESSION, "sell", 100, 20.10, 97, 10, "2026-10-18T15:37:30.000Z"),
@@ -919,48 +924,128 @@ const RANGE = { start: "2026-10-01", end: "2026-10-31" };
     realTrades: [],
     simTrades: [hGrouped[0]],
     drAttempts: [hDoneAttempt],
-    // The user's finalized draft: its attempt is NOT in drAttempts and
-    // has NO unified trade — it never completed, so nothing exists to
-    // export. The journal reports it as one pending finalized draft.
-    drPendingFinalizedDrafts: [{ attemptId: H_ATT_PENDING, strategyVersionId: null }],
+    // A finalized draft the journal could not verify into a row
+    // (anchor reconciliation failed): withheld, and named here.
+    drWithheldFinalizedDrafts: [{ attemptId: H_ATT_WITHHELD, strategyVersionId: null }],
   };
   const oct17 = { start: "2026-10-17", end: "2026-10-17" };
 
-  // The reported panel state, reproduced: DR source + Oct 17 → 0.
+  // DR source + Oct 17 (the completed trade is dated Oct 18) → 0
+  // eligible, with BOTH absence causes named.
   const hSnap0 = buildExportSnapshot(hInput, { range: oct17, mode: "daily", source: "daily_replay" });
-  check("hints repro: reported panel state is eligible 0", hSnap0.counts.total === 0 && hSnap0.counts.dailyReplay === 0);
+  check("hints repro: panel state is eligible 0", hSnap0.counts.total === 0 && hSnap0.counts.dailyReplay === 0);
   const hHints0 = computeDrExportHints(hInput, { range: oct17, mode: "daily", source: "daily_replay" });
-  check("hints repro: pending finalized draft named (case B)", hHints0.pendingFinalizedDrafts === 1);
-  check("hints repro: out-of-range completed DR trade named (case C)", hHints0.outOfRangeDrTrades === 1);
+  check("hints repro: withheld finalized draft named (case W)", hHints0.withheldFinalizedDrafts === 1);
+  check("hints repro: out-of-range DR trade named (case C)", hHints0.outOfRangeDrTrades === 1);
 
   // Widening the range includes the completed trade (case C resolved)
-  // but must NOT pretend the pending draft became eligible (case B is
-  // resolved only by finishing the session).
+  // but must NOT pretend the withheld draft became eligible.
   const wide = { start: "2026-10-17", end: "2026-10-18" };
   const hSnap1 = buildExportSnapshot(hInput, { range: wide, mode: "custom", source: "daily_replay" });
   check("hints: widened range includes the completed DR trade", hSnap1.counts.dailyReplay === 1);
   const hHints1 = computeDrExportHints(hInput, { range: wide, mode: "custom", source: "daily_replay" });
   check("hints: widened range clears the range hint", hHints1.outOfRangeDrTrades === 0);
-  check("hints: widened range keeps the pending hint", hHints1.pendingFinalizedDrafts === 1);
+  check("hints: widened range keeps the withheld hint", hHints1.withheldFinalizedDrafts === 1);
 
   // Source scoping: a Real-Market-only export never shows DR hints.
   const hHintsReal = computeDrExportHints(hInput, { range: oct17, mode: "daily", source: "real" });
-  check("hints: real-only source suppresses both hints", hHintsReal.pendingFinalizedDrafts === 0 && hHintsReal.outOfRangeDrTrades === 0);
+  check("hints: real-only source suppresses both hints", hHintsReal.withheldFinalizedDrafts === 0 && hHintsReal.outOfRangeDrTrades === 0);
   // DR trades ride the coarse simulator class + All: hints apply there.
   const hHintsSim = computeDrExportHints(hInput, { range: oct17, mode: "daily", source: "simulator" });
-  check("hints: simulator source shows both hints", hHintsSim.pendingFinalizedDrafts === 1 && hHintsSim.outOfRangeDrTrades === 1);
+  check("hints: simulator source shows both hints", hHintsSim.withheldFinalizedDrafts === 1 && hHintsSim.outOfRangeDrTrades === 1);
   const hHintsAll = computeDrExportHints(hInput, { range: oct17, mode: "daily", source: "all" });
-  check("hints: all source shows both hints", hHintsAll.pendingFinalizedDrafts === 1 && hHintsAll.outOfRangeDrTrades === 1);
+  check("hints: all source shows both hints", hHintsAll.withheldFinalizedDrafts === 1 && hHintsAll.outOfRangeDrTrades === 1);
 
   // Attempt narrowing applies to both hints (panel-only narrowing).
-  const hHintsNarrowPending = computeDrExportHints(hInput, { range: oct17, mode: "daily", source: "daily_replay", attemptId: H_ATT_PENDING });
-  check("hints: attempt narrowing to the pending attempt keeps its hint", hHintsNarrowPending.pendingFinalizedDrafts === 1 && hHintsNarrowPending.outOfRangeDrTrades === 0);
+  const hHintsNarrowWithheld = computeDrExportHints(hInput, { range: oct17, mode: "daily", source: "daily_replay", attemptId: H_ATT_WITHHELD });
+  check("hints: attempt narrowing to the withheld attempt keeps its hint", hHintsNarrowWithheld.withheldFinalizedDrafts === 1 && hHintsNarrowWithheld.outOfRangeDrTrades === 0);
   const hHintsNarrowDone = computeDrExportHints(hInput, { range: oct17, mode: "daily", source: "daily_replay", attemptId: H_ATT_DONE });
-  check("hints: attempt narrowing to the completed attempt drops the pending hint", hHintsNarrowDone.pendingFinalizedDrafts === 0 && hHintsNarrowDone.outOfRangeDrTrades === 1);
+  check("hints: attempt narrowing to the completed attempt drops the withheld hint", hHintsNarrowDone.withheldFinalizedDrafts === 0 && hHintsNarrowDone.outOfRangeDrTrades === 1);
 
-  // Pre-feature inputs (no pending field) and in-range trades: no hints.
-  const hHintsLegacy = computeDrExportHints({ ...hInput, drPendingFinalizedDrafts: undefined }, { range: wide, mode: "custom", source: "daily_replay" });
-  check("hints: absent pending field + in-range trade = no hints", hHintsLegacy.pendingFinalizedDrafts === 0 && hHintsLegacy.outOfRangeDrTrades === 0);
+  // Pre-feature inputs (no withheld field) and in-range trades: no hints.
+  const hHintsLegacy = computeDrExportHints({ ...hInput, drWithheldFinalizedDrafts: undefined }, { range: wide, mode: "custom", source: "daily_replay" });
+  check("hints: absent withheld field + in-range trade = no hints", hHintsLegacy.withheldFinalizedDrafts === 0 && hHintsLegacy.outOfRangeDrTrades === 0);
+}
+
+/* ============ pre-completion finalized trades (2026-10-18) ============
+ * The journal now builds a unified row for a FINALIZED draft on an
+ * ACTIVE attempt (lib/drDrafts.buildPreCompletionTrade, keyed by the
+ * draft key). The export must treat it exactly like a completed DR
+ * trade: counted, in trades.csv, its timeline rows attributed, and
+ * strategy.json listing its (unclassified) attempt as unversioned. */
+{
+  const P_ATT = "a5555555-5555-4555-8555-555555555555";
+  const P_DRAFT_KEY = `dr:${P_ATT}:g0:c1`;
+  const P_BASE = 1760620800000; // 2026-10-16T13:20:00Z — candle period starts
+  let pseq = 0;
+  const pev = (type: DrEventType, payload: Record<string, unknown> = {}, idx = 0): DrEvent =>
+    ({ seq: ++pseq, type, wallTs: P_BASE + pseq * 5000, marketIdx: idx, marketTs: P_BASE + idx * 60000, payload });
+  const pEvents: DrEvent[] = [
+    pev("attempt_created", { ticker: "PRECO", startingBalance: 100000 }),
+    pev("session_started"),
+    pev("order_filled", { side: "buy", qty: 100, price: 10, candleIndex: 5 }, 5),
+    pev("risk_snapshot", { entry: 10, qty: 100, stopLoss: 9.5, takeProfit: 11, plannedRisk: 50, rewardRisk: 2 }, 5),
+    pev("order_filled", { side: "sell", qty: 100, price: 11, candleIndex: 9 }, 9),
+    pev("position_closed", { qty: 100, price: 11, realizedPnl: 100, sessionRealized: 100, reason: "target", unrealizedPnl: 0 }, 9),
+  ];
+  const pDraft: DrDraftRow = {
+    id: "d5555555-5555-4555-8555-555555555555", userId: "u1", draftKey: P_DRAFT_KEY, attemptId: P_ATT,
+    resetGeneration: 0, cycleIndex: 1, status: "finalized",
+    firstFillCandleIndex: 5, firstFillPrice: 10, firstFillQty: 100,
+    closeFillCandleIndex: 9, realizedPnl: 100,
+    eventFirstSeq: 3, eventLastSeq: 6, autoCapture: {}, finalizedSessionId: null,
+    finalizedTradeKey: null, finalizedAt: "2026-10-16T14:00:00Z", createdAt: "2026-10-16T13:29:00Z",
+    updatedAt: "2026-10-16T14:00:00Z",
+  };
+  const { cycles, lastGeneration } = splitCyclesByGeneration(pEvents);
+  const pCycle = cycles.find((c) => c.generation === lastGeneration && c.cycleIndex === 1)!;
+  const pTrade = buildPreCompletionTrade(pDraft, pCycle, { ticker: "PRECO", tradeDate: "2026-10-16" });
+  check("pre-completion: row builds from events + anchors", pTrade != null);
+  check("pre-completion: row keys off the DRAFT key, no session", pTrade?.tradeKey === P_DRAFT_KEY && pTrade?.sessionId === "");
+  check("pre-completion: row values (entry 10, exit 11, qty 100, P&L 100)",
+    pTrade?.entryPrice === 10 && pTrade?.exitPrice === 11 && pTrade?.qty === 100 && pTrade?.realizedPnl === 100);
+  const pDerived = deriveDrEvidence({ attemptId: P_ATT, trades: pTrade ? [pTrade] : [], events: pEvents });
+  const pEvidence = pTrade ? pDerived.byTradeKey.get(pTrade.tradeKey) : undefined;
+  check("pre-completion: evidence pairs the draft-key row (R = 100/50 = 2)", pEvidence?.rMultiple === 2);
+  const pAttempt: ExportDrAttemptInput = {
+    id: P_ATT, sessionId: null, strategyVersionId: null, status: "active",
+    startIndex: 4, createdAt: "2026-10-16T13:25:00Z", finishedAt: null,
+    ticker: "PRECO", tradeDate: "2026-10-16",
+  };
+  const pUnified: ExportUnifiedInput = {
+    key: P_DRAFT_KEY, source: "simulator", ticker: "PRECO", tradeDate: "2026-10-16",
+    direction: "long", entryPrice: 10, exitPrice: 11, qty: 100, realizedPnl: 100,
+    isOpen: false, rMultiple: pEvidence?.rMultiple ?? null,
+    sessionSource: "daily_replay", attemptId: P_ATT,
+  };
+  const pInput: ExportSnapshotInput = {
+    unified: [pUnified],
+    metas: {},
+    realTrades: [],
+    simTrades: pTrade ? [pTrade] : [],
+    drAttempts: [pAttempt],
+    drEvidence: pDerived.byTradeKey,
+    drEvents: pEvents.map((event, i) => ({ id: `pev-${i + 1}`, attemptId: P_ATT, event })),
+    drEventTradeKeys: new Map([[P_ATT, pDerived.eventTradeKey]]),
+    drDraftKeys: new Map([[P_DRAFT_KEY, { draftKey: P_DRAFT_KEY, autoCapture: {} }]]),
+  };
+  const pSnap = buildExportSnapshot(pInput, { range: { start: "2026-10-16", end: "2026-10-16" }, mode: "daily", source: "daily_replay" });
+  check("pre-completion: export counts the trade (eligible 1, DR 1)", pSnap.counts.total === 1 && pSnap.counts.dailyReplay === 1);
+  const pRec = pSnap.trades[0];
+  check("pre-completion: record is DR with R from evidence", pRec?.isDailyReplay === true && pRec?.rMultiple === 2 && pRec?.attemptId === P_ATT);
+  const pCsv = buildTradesCsv(pSnap, []);
+  check("pre-completion: trades.csv carries the row", pCsv.split("\r\n").filter((l) => l.includes("PRECO")).length === 1);
+  const pTimeline = buildDecisionTimelineCsv(pSnap);
+  check("pre-completion: decision_timeline.csv carries the trade's events",
+    pTimeline.includes("risk_snapshot") && pTimeline.includes("position_closed"));
+  const pStrategy = buildStrategyJson(pSnap) as { unversionedAttemptIds?: string[] } | null;
+  check("pre-completion: strategy.json lists the unclassified attempt as unversioned",
+    Array.isArray(pStrategy?.unversionedAttemptIds) && pStrategy!.unversionedAttemptIds!.includes(P_ATT));
+  const pHints = computeDrExportHints(pInput, { range: { start: "2026-10-16", end: "2026-10-16" }, mode: "daily", source: "daily_replay" });
+  check("pre-completion: no withheld/out-of-range hints for the included trade",
+    pHints.withheldFinalizedDrafts === 0 && pHints.outOfRangeDrTrades === 0);
+  const pHintsOut = computeDrExportHints(pInput, { range: { start: "2026-10-17", end: "2026-10-17" }, mode: "daily", source: "daily_replay" });
+  check("pre-completion: out-of-range hint covers pre-completion trades too", pHintsOut.outOfRangeDrTrades === 1);
 }
 
 console.log(`edgeExport tests: ${passed} passed, ${failed} failed`);

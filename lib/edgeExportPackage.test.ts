@@ -17,7 +17,8 @@ import {
   type ExportSnapshotInput, type ExportUnifiedInput,
 } from "./edgeExport";
 import { generateEdgePackage } from "./edgeExportPackage";
-import { deriveDrEvidence } from "./drTradeEvidence";
+import { deriveDrEvidence, splitCyclesByGeneration } from "./drTradeEvidence";
+import { groupedTradeFromCycle } from "./drDrafts";
 import type { DrEvent } from "./dailyReplayEvents";
 import JSZip from "jszip";
 import { inflateSync } from "node:zlib";
@@ -639,6 +640,102 @@ async function main() {
     const resPdf = await generateEdgePackage(mkPkgClient(), USER, pSnap, { includeScreenshots: true, includePdf: true });
     check("rep pdf: PDF built from the single included representative",
       resPdf.summary.pdfIncluded === true && resPdf.summary.screenshotFiles === 1);
+  }
+
+  /* ---- Pre-completion finalized trades (2026-10-18): chart context
+   * from the attempt's REVEALED candles via dr_get_revealed — no
+   * session row exists yet. Boundary rules identical: entry context
+   * strictly before the entry candle, entry candle flagged, post-
+   * entry only to the exit, nothing beyond. An RPC failure degrades
+   * to the standard unavailable path (no invention). ---- */
+  {
+    const QATT = "c4444444-4444-4444-8444-444444444444";
+    const QDRAFT = `dr:${QATT}:g0:c1`;
+    const QSEG = `dr_${QATT}_g0_c1`;
+    const QBASE = Date.UTC(2026, 9, 15, 13, 30, 0);
+    const qEvents: DrEvent[] = [
+      { seq: 1, type: "attempt_created", wallTs: QBASE, marketIdx: 4, marketTs: QBASE + 4 * 60000, payload: { ticker: "PREP", startingBalance: 100000 } },
+      { seq: 2, type: "order_filled", wallTs: QBASE + 1000, marketIdx: 5, marketTs: QBASE + 5 * 60000, payload: { side: "buy", qty: 100, price: 10, candleIndex: 5 } },
+      { seq: 3, type: "risk_snapshot", wallTs: QBASE + 1500, marketIdx: 5, marketTs: QBASE + 5 * 60000, payload: { entry: 10, qty: 100, stopLoss: 9.5, takeProfit: 11, plannedRisk: 50, rewardRisk: 2 } },
+      { seq: 4, type: "order_filled", wallTs: QBASE + 2000, marketIdx: 9, marketTs: QBASE + 9 * 60000, payload: { side: "sell", qty: 100, price: 11, candleIndex: 9 } },
+      { seq: 5, type: "position_closed", wallTs: QBASE + 2000, marketIdx: 9, marketTs: QBASE + 9 * 60000, payload: { qty: 100, price: 11, realizedPnl: 100, sessionRealized: 100, reason: "target", unrealizedPnl: 0 } },
+    ];
+    const qCycle = splitCyclesByGeneration(qEvents).cycles[0];
+    const qGrouped = groupedTradeFromCycle(qCycle, { tradeKey: QDRAFT, ticker: "PREP", tradeDate: "2026-10-15" });
+    check("pre pkg: pre-completion grouped trade builds", qGrouped != null);
+    const qDerived = deriveDrEvidence({ attemptId: QATT, trades: qGrouped ? [qGrouped] : [], events: qEvents });
+    const Q_ENTRY = `${USER}/${QSEG}/auto-entry-c6.png`;
+    const qInput: ExportSnapshotInput = {
+      unified: [{
+        key: QDRAFT, source: "simulator", ticker: "PREP", tradeDate: "2026-10-15",
+        direction: "long", entryPrice: 10, exitPrice: 11, qty: 100, realizedPnl: 100, isOpen: false,
+        rMultiple: 2, sessionSource: "daily_replay", attemptId: QATT,
+      }],
+      metas: {}, realTrades: [], simTrades: qGrouped ? [qGrouped] : [],
+      drAttempts: [{ id: QATT, sessionId: null, strategyVersionId: null, status: "active", startIndex: 4, createdAt: "2026-10-16T16:00:00Z", finishedAt: null, ticker: "PREP", tradeDate: "2026-10-15" }],
+      drEvidence: qDerived.byTradeKey,
+      drEvents: qEvents.map((event, i) => ({ id: `qev-${i + 1}`, attemptId: QATT, event })),
+      drEventTradeKeys: new Map([[QATT, qDerived.eventTradeKey]]),
+      strategies: [], strategyVersions: [],
+      drDraftKeys: new Map([[QDRAFT, {
+        draftKey: QDRAFT,
+        autoCapture: { entry: { path: Q_ENTRY, candleIndex: 5, status: "captured" } },
+      }]]),
+    };
+    const qSnap = buildExportSnapshot(qInput, { range: { start: "2026-10-01", end: "2026-10-31" }, mode: "custom", source: "daily_replay" });
+    check("pre pkg: snapshot counts the pre-completion trade", qSnap.counts.dailyReplay === 1);
+    const qCandles = Array.from({ length: 12 }, (_, i) => ({
+      t: QBASE + i * 60000, o: 10 + i * 0.1, h: 10.2 + i * 0.1, l: 9.9 + i * 0.1, c: 10.1 + i * 0.1, v: 1000 + i * 100,
+    }));
+    const rpcCalls: { fn: string; args: any }[] = [];
+    const mkQClient = (opts: { failRpc?: boolean } = {}) => ({
+      storage: {
+        from: (_bucket: string) => ({
+          list: async (prefix: string) => prefix === `${USER}/${QSEG}`
+            ? { data: [{ name: "auto-entry-c6.png", id: "q1", created_at: "2026-10-16T16:05:00.000Z" }], error: null }
+            : { data: [], error: null },
+          createSignedUrls: async (paths: string[]) => ({ data: paths.map((p) => ({ path: p, signedUrl: "https://signed.example/q", error: null })), error: null }),
+          download: async () => ({ data: new Blob([new Uint8Array(FAKE_PNG)]), error: null }),
+        }),
+      },
+      // No session row exists for the attempt — the sessions fetch
+      // legitimately returns nothing.
+      from: (_table: string) => ({
+        select: (_cols: string) => ({ in: async (_col: string, _ids: string[]) => ({ data: [], error: null }) }),
+      }),
+      rpc: async (fn: string, args: any) => {
+        rpcCalls.push({ fn, args });
+        if (opts.failRpc) return { data: null, error: { message: "rpc down" } };
+        // Revealed prefix: candles 0..9 (through the exit candle).
+        return { data: { position: 9, candles: qCandles.slice(0, 10) }, error: null };
+      },
+    }) as any;
+
+    const resQ = await generateEdgePackage(mkQClient(), USER, qSnap, { includeScreenshots: true, includePdf: false });
+    check("pre pkg: revealed candles fetched via dr_get_revealed for the sessionless attempt",
+      rpcCalls.some((c) => c.fn === "dr_get_revealed" && c.args?.p_attempt_id === QATT));
+    check("pre pkg: representative included from the draft-key prefix", resQ.summary.screenshotFiles === 1);
+    const zipQ = await JSZip.loadAsync(new Uint8Array(await resQ.blob.arrayBuffer()));
+    check("pre pkg: chart_context.csv built from revealed candles", !!zipQ.file("chart_context.csv"));
+    const ccQ = parseCsv(await zipQ.file("chart_context.csv")!.async("string")).slice(1);
+    check("pre pkg: sections are 5 entry / 1 final / 4 post (identical boundaries)",
+      ccQ.filter((r) => r[3] === "entry_context").length === 5
+      && ccQ.filter((r) => r[3] === "entry_candle_final").length === 1
+      && ccQ.filter((r) => r[3] === "post_entry_development").length === 4);
+    check("pre pkg: NOTHING beyond the exit candle (max index 9 of the revealed prefix)",
+      ccQ.length > 0 && Math.max(...ccQ.map((r) => Number(r[4]))) === 9);
+    check("pre pkg: no chart-context warnings on the revealed path",
+      !resQ.warnings.some((w) => w.includes("Chart context unavailable")));
+
+    /* RPC failure: standard degradation — no context, no invention */
+    const resQFail = await generateEdgePackage(mkQClient({ failRpc: true }), USER, qSnap, { includeScreenshots: true, includePdf: false });
+    const zipQFail = await JSZip.loadAsync(new Uint8Array(await resQFail.blob.arrayBuffer()));
+    check("pre pkg fail: package still produced, chart_context.csv absent",
+      !!zipQFail.file("trades.csv") && !zipQFail.file("chart_context.csv"));
+    check("pre pkg fail: unavailability is named in warnings",
+      resQFail.warnings.some((w) => w.includes("Chart context unavailable")));
+    check("pre pkg fail: representative still included (screenshots unaffected)",
+      resQFail.summary.screenshotFiles === 1);
   }
 
   console.log(`edgeExportPackage tests: ${passed} passed, ${failed} failed`);

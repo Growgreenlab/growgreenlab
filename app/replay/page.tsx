@@ -61,6 +61,7 @@ import { splitCyclesByGeneration } from "../../lib/drTradeEvidence";
 import { groupFillsIntoTrades, type RawFill } from "../../lib/journal";
 import { uploadScreenshotBlob, MAX_BYTES } from "../../lib/journalAttachments";
 import DrDraftReview from "../../components/DrDraftReview";
+import DrFinalizeConfirm from "../../components/DrFinalizeConfirm";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
 import { diag } from "../../lib/diag";
 import { DEFAULT_HOTKEYS, isTypingTarget } from "../../lib/hotkeys";
@@ -655,8 +656,6 @@ function ReplayPageInner() {
   const [drStrategies, setDrStrategies] = useState<Strategy[]>([]);
   const [drStrategyVersions, setDrStrategyVersions] = useState<StrategyVersion[]>([]);
   const [drStrategiesAvailable, setDrStrategiesAvailable] = useState<boolean | null>(null);
-  /** Version id selected for the NEXT lock ("" = no strategy). */
-  const [drStrategySel, setDrStrategySel] = useState<string>("");
   /** Attempts list for the strategies review surface. */
   const [drAttemptsList, setDrAttemptsList] = useState<DrAttemptLink[]>([]);
 
@@ -741,6 +740,21 @@ function ReplayPageInner() {
   >(null);
   const drNoticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [drReviewDraftKey, setDrReviewDraftKey] = useState<string | null>(null);
+  /** Draft awaiting finalize confirmation (the shared dialog). */
+  const [drFinalizeTarget, setDrFinalizeTarget] = useState<DrDraftRow | null>(null);
+  /** Collapsible workspace sections (2026-10-18 chart-first layout):
+   *  both start COLLAPSED so the chart keeps the vertical space;
+   *  the timeline additionally auto-opens when the session completes
+   *  (the review moment). Toggling never touches replay state. */
+  const [drTimelineOpen, setDrTimelineOpen] = useState(false);
+  const [drDraftsOpen, setDrDraftsOpen] = useState(false);
+  const drPhasePrevRef = useRef<string>("idle");
+  // Timeline auto-opens ONCE when the session transitions to done
+  // (the review moment); it stays collapsed through active trading.
+  useEffect(() => {
+    if (drPhasePrevRef.current !== "done" && drPhase === "done") setDrTimelineOpen(true);
+    drPhasePrevRef.current = drPhase;
+  }, [drPhase]);
   const drPendingEntryCaptureRef = useRef<{
     draftKey: string;
     candleIndex: number;
@@ -1013,16 +1027,17 @@ function ReplayPageInner() {
       });
       if (upErr) throw upErr;
       // 3) Create the sealed attempt; the feed ingests ONLY the
-      //    server-released prefix [0..start]. The selected strategy
-      //    version is bound NOW, server-side — it can never be
-      //    attached or changed later.
-      const boundVersionId = drStrategiesAvailable && drStrategySel ? drStrategySel : null;
-      const boundCtx = boundVersionId
-        ? resolveVersionContext(boundVersionId, drStrategies, drStrategyVersions)
-        : null;
+      //    server-released prefix [0..start]. Attempts bind NO
+      //    strategy version at lock time — the lock-screen strategy
+      //    selector was removed (2026-10-18 workflow fix, user's
+      //    direction), so strategy_version_id stays null and the
+      //    attempt arrives unclassified. The strategy system itself
+      //    (management UI, journal filters, export) is unchanged;
+      //    attempts locked before this change keep their binding,
+      //    which the resume path still reads back.
       const feed = new SealedCandleFeed(createDrTransport(supabase));
       feed.setTotal(pv.candles.length);
-      await feed.create(ds.id, pv.selected, boundVersionId);
+      await feed.create(ds.id, pv.selected, null);
       const info: DrInfo = {
         attemptId: feed.attemptId!,
         datasetId: ds.id,
@@ -1030,8 +1045,8 @@ function ReplayPageInner() {
         tradeDate: pv.meta.tradeDate,
         startIndex: pv.selected,
         total: pv.candles.length,
-        strategyVersionId: boundVersionId,
-        strategyLabel: boundCtx?.label ?? null,
+        strategyVersionId: null,
+        strategyLabel: null,
       };
       // Decision Timeline starts here: attempt_created is event #1.
       const startCandle = feed.candles[pv.selected];
@@ -1138,7 +1153,7 @@ function ReplayPageInner() {
     } finally {
       setDrBusy(false);
     }
-  }, [drPreview, bump, drStrategiesAvailable, drStrategySel, drStrategies, drStrategyVersions]);
+  }, [drPreview, bump]);
 
   // Step button for Daily Replay: release the next candle first when
   // the engine sits at the sealed end — exactly one candle, through
@@ -2749,28 +2764,27 @@ function ReplayPageInner() {
     } catch { /* keep the rows already on screen */ }
   };
 
-  /** Finalize from the Drafts strip: flip the flag, then copy any
-   *  draft-key annotations forward when a finalized key is known. */
+  /** Finalize confirm callback for the shared dialog (strip entry
+   *  point): flip the flag, copy any draft-key annotations forward
+   *  when a finalized key is known, then verify the flag landed
+   *  before the dialog may show its success state. */
   const finalizeDrDraftFromStrip = async (row: DrDraftRow): Promise<void> => {
-    try {
-      if (!isSupabaseConfigured()) return;
-      const supabase = createClient();
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
-      await finalizeDraft(supabase, row.id);
-      setDrDraftRows((prev) =>
-        prev.map((d) =>
-          d.id === row.id
-            ? { ...d, status: "finalized" as const, finalizedAt: new Date().toISOString() }
-            : d
-        )
+    if (!isSupabaseConfigured()) throw new Error("Supabase is not configured.");
+    const supabase = createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) throw new Error("Not signed in.");
+    await finalizeDraft(supabase, row.id);
+    if (row.finalizedTradeKey) {
+      await copyDraftMetaForward(
+        supabase, user.id, row.draftKey, row.finalizedTradeKey, row.finalizedSessionId
       );
-      if (row.finalizedTradeKey) {
-        await copyDraftMetaForward(
-          supabase, user.id, row.draftKey, row.finalizedTradeKey, row.finalizedSessionId
-        );
-      }
-    } catch { /* the row keeps its prior status; finalize is retryable */ }
+    }
+    const rows = await fetchDraftsForAttempts(supabase, [row.attemptId]).catch(() => null);
+    const fresh = rows?.find((d) => d.id === row.id);
+    if (fresh && fresh.status !== "finalized") {
+      throw new Error("Finalize did not land — please try again.");
+    }
+    if (rows && !drDraftsMissingRef.current) setDrDraftRows(rows);
   };
 
   /**
@@ -3101,32 +3115,10 @@ function ReplayPageInner() {
               </div>
             );
           })()}
-          {/* Strategy picker: the chosen version is BOUND to the
-              attempt when it is created at lock time, server-side,
-              and can never be attached or changed afterwards. */}
-          <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap", alignItems: "center" }}>
-            <span style={{ fontSize: 12.5, color: "var(--muted)" }}>Strategy for this attempt:</span>
-            {drStrategiesAvailable ? (
-              <select
-                className="input"
-                style={{ width: "auto" }}
-                value={drStrategySel}
-                onChange={(e) => setDrStrategySel(e.target.value)}
-                aria-label="Strategy version for this attempt"
-              >
-                <option value="">No strategy (unclassified)</option>
-                {drStrategies.filter((s) => !s.archivedAt).map((s) => (
-                  <optgroup key={s.id} label={s.name}>
-                    {drStrategyVersions.filter((v) => v.strategyId === s.id).sort((a, b) => b.version - a.version).map((v) => (
-                      <option key={v.id} value={v.id}>{strategyVersionLabel(s.name, v.version)} — {setupTypeLabel(v.setupType)}</option>
-                    ))}
-                  </optgroup>
-                ))}
-              </select>
-            ) : (
-              <span className="hint">Strategy tracking is not enabled on this deployment yet — this attempt will record no strategy.</span>
-            )}
-          </div>
+          {/* No strategy picker on this screen (2026-10-18 workflow
+              fix): attempts lock unclassified — strategy_version_id
+              stays null. Strategy management lives on the welcome
+              screen / journal; nothing here selects or binds one. */}
           <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
             <button
               className="btn primary big"
@@ -3168,15 +3160,6 @@ function ReplayPageInner() {
                 <div>
                   Starting balance: <b>{formatMoney(DAILY_REPLAY_STARTING_BALANCE)}</b>{" "}
                   (separate Daily Replay account — your Trade Lab balance is untouched)
-                </div>
-                <div>
-                  Strategy:{" "}
-                  <b>
-                    {drStrategiesAvailable && drStrategySel
-                      ? (resolveVersionContext(drStrategySel, drStrategies, drStrategyVersions)?.label ?? "Selected strategy")
-                      : "None — this attempt stays unclassified"}
-                  </b>{" "}
-                  (recorded on the attempt at lock; it cannot be changed later)
                 </div>
                 <div style={{ color: "var(--muted)" }}>
                   Once locked, the starting point cannot be changed for this attempt,
@@ -3820,52 +3803,106 @@ function ReplayPageInner() {
             </aside>
           </div>
 
-          {/* Daily Replay — Decision Timeline (review) */}
+          {/* Daily Replay — Decision Timeline (review). Collapsible
+              section BELOW the chart + controls row (chart-first
+              layout, 2026-10-18): collapsed by default so the chart
+              keeps the height; auto-opens when the session completes.
+              Toggling only shows/hides this section — replay state,
+              playback and the engine are untouched. */}
           {isDr && (
-            <details
-              open={drPhase === "done"}
+            <div
               style={{
                 marginTop: 10, padding: "8px 12px",
                 background: "rgba(255,255,255,0.02)",
                 border: "1px solid rgba(255,255,255,0.07)", borderRadius: 8,
               }}
             >
-              <summary style={{ cursor: "pointer", fontWeight: 700, fontSize: 13 }}>
-                Decision Timeline ({drEvents.length} events)
+              <button
+                type="button"
+                onClick={() => setDrTimelineOpen((o) => !o)}
+                aria-expanded={drTimelineOpen}
+                style={{
+                  display: "flex", width: "100%", alignItems: "center", gap: 8,
+                  background: "none", border: "none", padding: 0, cursor: "pointer",
+                  color: "inherit", fontWeight: 700, fontSize: 13, textAlign: "left",
+                }}
+              >
+                <span aria-hidden>{drTimelineOpen ? "▾" : "▸"}</span>
+                <span>Decision Timeline ({drEvents.length} events)</span>
                 {drEventsMissingRef.current && (
                   <span style={{ color: "var(--muted)", fontWeight: 400, fontSize: 12 }}>
-                    {" "}— on this device until Daily Replay storage is enabled
+                    — on this device until Daily Replay storage is enabled
                   </span>
                 )}
-              </summary>
-              {drHistoryNote && (
-                <div style={{ marginTop: 8, color: "#fbbf24", fontSize: 12.5 }}>
-                  {drHistoryNote}
-                </div>
-              )}
-              <div style={{ marginTop: 8, maxHeight: 260, overflowY: "auto", fontSize: 12.5, lineHeight: 1.9 }}>
-                {drEvents.map((e) => (
-                  <div key={e.seq} style={{ display: "flex", gap: 8 }}>
-                    <span style={{ color: "var(--muted)", whiteSpace: "nowrap" }}>
-                      {formatDrClock(e.marketTs ?? e.wallTs)}
-                    </span>
-                    <span>{describeDrEvent(e)}</span>
+              </button>
+              {drTimelineOpen && (
+                <>
+                  {drHistoryNote && (
+                    <div style={{ marginTop: 8, color: "#fbbf24", fontSize: 12.5 }}>
+                      {drHistoryNote}
+                    </div>
+                  )}
+                  <div style={{ marginTop: 8, maxHeight: 260, overflowY: "auto", fontSize: 12.5, lineHeight: 1.9 }}>
+                    {drEvents.map((e) => (
+                      <div key={e.seq} style={{ display: "flex", gap: 8 }}>
+                        <span style={{ color: "var(--muted)", whiteSpace: "nowrap" }}>
+                          {formatDrClock(e.marketTs ?? e.wallTs)}
+                        </span>
+                        <span>{describeDrEvent(e)}</span>
+                      </div>
+                    ))}
+                    {drEvents.length === 0 && (
+                      <div className="hint">No events recorded yet.</div>
+                    )}
                   </div>
-                ))}
-                {drEvents.length === 0 && (
-                  <div className="hint">No events recorded yet.</div>
-                )}
-              </div>
-            </details>
+                </>
+              )}
+            </div>
           )}
 
-          {/* Daily Replay — Trade Drafts (per-cycle durable records) */}
+          {/* Daily Replay — Trade Drafts (per-cycle durable records).
+              Collapsible, COLLAPSED BY DEFAULT (chart-first layout,
+              2026-10-18): the compact header always carries the
+              counts that matter — total drafts, how many still await
+              review, and any NOT-saved failure — so nothing urgent is
+              hidden by the collapse. */}
           {isDr && (
             <div
               className="card"
               style={{ marginTop: 10, padding: "10px 12px" }}
             >
-              <div style={{ fontWeight: 700, fontSize: 13 }}>Trade Drafts</div>
+              <button
+                type="button"
+                onClick={() => setDrDraftsOpen((o) => !o)}
+                aria-expanded={drDraftsOpen}
+                style={{
+                  display: "flex", width: "100%", alignItems: "center", gap: 8, flexWrap: "wrap",
+                  background: "none", border: "none", padding: 0, cursor: "pointer",
+                  color: "inherit", textAlign: "left",
+                }}
+              >
+                <span aria-hidden>{drDraftsOpen ? "▾" : "▸"}</span>
+                <span style={{ fontWeight: 700, fontSize: 13 }}>Trade Drafts</span>
+                {drDraftsAvailable !== false && (() => {
+                  const failedKeys = drFailedDraftKeys.filter((k) => !drDraftRows.some((d) => d.draftKey === k));
+                  const total = drDraftRowsSorted.length + failedKeys.length;
+                  const toReview = drDraftRowsSorted.filter(
+                    (r) => r.status === "draft" && !(r.resetGeneration < drStreamGen)
+                  ).length;
+                  const notSaved = failedKeys.length
+                    + drDraftRowsSorted.filter((r) => drDraftSaveStates[r.draftKey] === "failed").length;
+                  return (
+                    <span className="hint" style={{ fontSize: 12 }}>
+                      {total} draft{total === 1 ? "" : "s"}
+                      {toReview > 0 ? ` · ${toReview} to review` : ""}
+                      {notSaved > 0 && (
+                        <span style={{ color: "#f6465d", fontWeight: 600 }}> · {notSaved} NOT saved</span>
+                      )}
+                    </span>
+                  );
+                })()}
+              </button>
+              {drDraftsOpen && (<>
               {drDraftNotice && (
                 <div
                   style={{
@@ -3960,15 +3997,15 @@ function ReplayPageInner() {
                               style={{ padding: "2px 10px", fontSize: 11.5 }}
                               onClick={() => setDrReviewDraftKey(row.draftKey)}
                             >
-                              Review
+                              Review Draft
                             </button>
                             {row.status === "draft" && !derivedSuperseded && (
                               <button
                                 className="btn primary"
                                 style={{ padding: "2px 10px", fontSize: 11.5 }}
-                                onClick={() => { void finalizeDrDraftFromStrip(row); }}
+                                onClick={() => setDrFinalizeTarget(row)}
                               >
-                                Finalize
+                                Finalize Trade
                               </button>
                             )}
                           </span>
@@ -4013,6 +4050,7 @@ function ReplayPageInner() {
                   </div>
                 </>
               )}
+              </>)}
             </div>
           )}
 
@@ -4026,6 +4064,21 @@ function ReplayPageInner() {
               events={drEvents}
               onClose={() => setDrReviewDraftKey(null)}
               onChanged={() => { void refreshDrDraftRows(); }}
+            />
+          )}
+
+          {/* Finalize confirmation — the ONE shared dialog, also used
+              by the journal drafts card and the review drawer. */}
+          {drFinalizeTarget && (
+            <DrFinalizeConfirm
+              summary={{
+                ticker: drInfo?.ticker ?? null,
+                tradeDate: drInfo?.tradeDate ?? null,
+                cycleIndex: drFinalizeTarget.cycleIndex,
+                realizedPnl: drFinalizeTarget.realizedPnl,
+              }}
+              onConfirm={() => finalizeDrDraftFromStrip(drFinalizeTarget)}
+              onClose={() => setDrFinalizeTarget(null)}
             />
           )}
 

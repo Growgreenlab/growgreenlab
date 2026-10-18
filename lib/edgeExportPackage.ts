@@ -164,12 +164,19 @@ export async function generateEdgePackage(
   const timelineCsv = includeTimeline ? buildDecisionTimelineCsv(snapshot) : null;
 
   /* ---- chart context (Representative plan §5 S1.2, DR only) ----
-   * Built ONLY from the sessions' STORED candles (replay_sessions.
-   * candles), read through the caller's own RLS session. A fetch or
-   * validation failure never aborts the package and never invents
-   * data: the file is omitted and the reason is a warning. Also
-   * stamps the representative manifest entries' candleTime from the
-   * validated entry candle. */
+   * Built from the sessions' STORED candles (replay_sessions.
+   * candles) for completed attempts, read through the caller's own
+   * RLS session. For a PRE-COMPLETION trade (finalized draft, attempt
+   * still active — no session row exists yet) the candle source is
+   * the attempt's REVEALED candles via the owner RPC dr_get_revealed:
+   * the revealed prefix starts at index 0 exactly like the stored
+   * session array, so the boundary rules in buildTradeChartContext
+   * (entry context strictly before the entry candle, entry candle
+   * flagged, post-entry only to the exit, nothing beyond) are
+   * identical. A fetch or validation failure never aborts the
+   * package and never invents data: the trade degrades to the
+   * standard unavailable reason. Also stamps the representative
+   * manifest entries' candleTime from the validated entry candle. */
   let chartContextCsv: string | null = null;
   const representativeIncluded = manifest.some((e) => e.role === "representative" && e.status === "included");
   if (snapshot.dailyReplay && options.includeChartContext !== false) {
@@ -188,6 +195,21 @@ export async function generateEdgePackage(
           candlesBySession.set(row.id, row.candles);
         }
       }
+      // Pre-completion attempts (no session yet): revealed candles.
+      const preAttemptIds = [...new Set(drRecs
+        .filter((r) => r.attemptId && attemptSession.get(r.attemptId) == null)
+        .map((r) => r.attemptId as string))];
+      const candlesByAttempt = new Map<string, unknown>();
+      if (typeof (client as unknown as { rpc?: unknown }).rpc === "function") {
+        for (const attemptId of preAttemptIds) {
+          try {
+            const { data, error } = await client.rpc("dr_get_revealed", { p_attempt_id: attemptId });
+            if (error) throw new Error(error.message);
+            const revealed = (data as { candles?: unknown } | null)?.candles;
+            if (Array.isArray(revealed)) candlesByAttempt.set(attemptId, revealed);
+          } catch { /* degrades to the standard unavailable reason */ }
+        }
+      }
       const contexts = drRecs.map((r) => buildTradeChartContext({
         tradeId: r.exportId,
         tradeKey: r.tradeKey,
@@ -196,7 +218,9 @@ export async function generateEdgePackage(
         entryCandleIndex: r.entryCandleIndex,
         exitCandleIndex: r.exitCandleIndex,
         recordedEntryTime: r.entryTime,
-        candles: candlesBySession.get(sessionIdFor(r.tradeKey, r.attemptId)),
+        candles: r.attemptId && candlesByAttempt.has(r.attemptId)
+          ? candlesByAttempt.get(r.attemptId)
+          : candlesBySession.get(sessionIdFor(r.tradeKey, r.attemptId)),
       }));
       for (const ctx of contexts) {
         if (!ctx.available || !ctx.entryTime) continue;

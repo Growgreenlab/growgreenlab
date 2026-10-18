@@ -16,7 +16,12 @@
  * journal_trade_meta under the draft key; finalizing flips the
  * draft's status flag only (it never writes journal rows) and copies
  * the draft-key meta row forward to the finalized key when one is
- * known and no row exists there yet.
+ * known and no row exists there yet. Since the 2026-10-18 workflow
+ * fix, a finalized draft's trade is journal-visible immediately
+ * (pre-completion row keyed by the draft key) — finalization here
+ * goes through the ONE shared confirmation dialog
+ * (components/DrFinalizeConfirm.tsx), same as every other entry
+ * point.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createClient, isSupabaseConfigured } from "../lib/supabaseClient";
@@ -42,6 +47,7 @@ import {
   resolveRepresentative,
   withRepresentativeSelection,
 } from "../lib/drRepresentative";
+import DrFinalizeConfirm from "./DrFinalizeConfirm";
 
 /* Annotation option lists — mirrored EXACTLY from app/journal/page.tsx
  * (its SETUPS / HOD_CLASSES / GRADES / EMOTIONS / MISTAKES constants),
@@ -144,8 +150,12 @@ export default function DrDraftReview(props: {
   events: DrEvent[];
   onClose: () => void;
   onChanged: () => void;
+  /** Optional in-app "View in Trade Journal" action for the finalize
+   *  confirmation's success state (journal hosts). Defaults to a
+   *  plain /journal link inside the dialog. */
+  onViewInJournal?: () => void;
 }) {
-  const { draft, ticker, tradeDate, attemptStatus, events, onClose, onChanged } = props;
+  const { draft, ticker, tradeDate, attemptStatus, events, onClose, onChanged, onViewInJournal } = props;
 
   /* ---- cycle resolution ---- */
   const cycle = useMemo(() => {
@@ -215,11 +225,9 @@ export default function DrDraftReview(props: {
   const statusLine =
     effectiveStatus === "draft"
       ? "Draft — not in journal analytics yet."
-      : effectiveStatus === "finalized" && !draft.finalizedTradeKey
-        ? "Finalized — will appear in the journal when this attempt completes."
-        : effectiveStatus === "finalized"
-          ? "Finalized — in the journal."
-          : "Superseded — this position closed before a replay reset; its fills were not carried into the saved session, so it cannot be finalized.";
+      : effectiveStatus === "finalized"
+        ? "Finalized — in the journal (Trade Journal → Daily Replay / Backtest)."
+        : "Superseded — this position closed before a replay reset; its fills were not carried into the saved session, so it cannot be finalized.";
 
   /* ---- screenshots ---- */
   const [userId, setUserId] = useState<string | null>(null);
@@ -439,29 +447,20 @@ export default function DrDraftReview(props: {
     );
   };
 
-  /* ---- finalize ---- */
-  const [finalizing, setFinalizing] = useState(false);
-  const [finalizeMsg, setFinalizeMsg] = useState<string | null>(null);
+  /* ---- finalize (via the ONE shared confirmation dialog) ---- */
+  const [finalizeOpen, setFinalizeOpen] = useState(false);
   const handleFinalize = async () => {
-    if (finalizing || effectiveStatus !== "draft" || !cycle) return;
-    setFinalizing(true);
-    setFinalizeMsg(null);
-    try {
-      if (!isSupabaseConfigured()) throw new Error("Supabase is not configured.");
-      const client = createClient();
-      const { data: { user } } = await client.auth.getUser();
-      if (!user) throw new Error("Not signed in.");
-      await finalizeDraft(client, draft.id);
-      setLocalStatus("finalized");
-      if (draft.finalizedTradeKey) {
-        await copyMetaForward(client, user.id, draft.draftKey, draft.finalizedTradeKey, draft.finalizedSessionId);
-      }
-      onChanged();
-    } catch (e) {
-      setFinalizeMsg(e instanceof Error ? e.message : "Finalize failed.");
-    } finally {
-      setFinalizing(false);
+    if (effectiveStatus !== "draft" || !cycle) return;
+    if (!isSupabaseConfigured()) throw new Error("Supabase is not configured.");
+    const client = createClient();
+    const { data: { user } } = await client.auth.getUser();
+    if (!user) throw new Error("Not signed in.");
+    await finalizeDraft(client, draft.id);
+    setLocalStatus("finalized");
+    if (draft.finalizedTradeKey) {
+      await copyMetaForward(client, user.id, draft.draftKey, draft.finalizedTradeKey, draft.finalizedSessionId);
     }
+    onChanged();
   };
 
   const boolSelectValue = (v: boolean | null) => (v == null ? "" : v ? "yes" : "no");
@@ -760,13 +759,12 @@ export default function DrDraftReview(props: {
           </div>
         </div>
 
-        {/* Finalize */}
+        {/* Finalize — opens the shared confirmation dialog */}
         {effectiveStatus === "draft" && cycle && (
           <div style={{ marginTop: 16, borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 12, display: "flex", gap: 8, alignItems: "center" }}>
-            <button type="button" className="btn primary big" onClick={() => { void handleFinalize(); }} disabled={finalizing}>
-              {finalizing ? "Finalizing…" : "Finalize Trade"}
+            <button type="button" className="btn primary big" onClick={() => setFinalizeOpen(true)}>
+              Finalize Trade
             </button>
-            {finalizeMsg && <span style={{ fontSize: 13, color: "#f6465d" }}>{finalizeMsg}</span>}
           </div>
         )}
         {effectiveStatus === "draft" && !cycle && (
@@ -775,6 +773,14 @@ export default function DrDraftReview(props: {
           </div>
         )}
       </div>
+      {finalizeOpen && (
+        <DrFinalizeConfirm
+          summary={{ ticker, tradeDate, cycleIndex: draft.cycleIndex, realizedPnl: draft.realizedPnl }}
+          onConfirm={handleFinalize}
+          onClose={() => setFinalizeOpen(false)}
+          onViewInJournal={onViewInJournal}
+        />
+      )}
     </div>
   );
 }

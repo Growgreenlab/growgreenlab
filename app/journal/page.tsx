@@ -8,7 +8,7 @@ import { breakdown, riskMetrics, edgeInsights, dailyPnl, isDailyReplayTrade, typ
 import { listScreenshots, removeScreenshots, uploadScreenshots, validateScreenshotFile } from "../../lib/journalAttachments";
 import EdgeExportPanel from "../../components/EdgeExportPanel";
 import type { ExportSnapshotInput, ExportDrAttemptInput, ExportDrEventInput } from "../../lib/edgeExport";
-import { deriveDrEvidence, type DrAttemptEvidence, type DrTradeEvidence } from "../../lib/drTradeEvidence";
+import { deriveDrEvidence, splitCyclesByGeneration, type DrAttemptEvidence, type DrTradeEvidence } from "../../lib/drTradeEvidence";
 import { describeDrEvent, type DrEvent } from "../../lib/dailyReplayEvents";
 import {
   mapStrategyRow, mapStrategyVersionRow, mapAttemptRow, resolveVersionContext,
@@ -16,11 +16,13 @@ import {
 } from "../../lib/strategies";
 import {
   fetchDraftsForUser, finalizeDraft, supersedeDraft, writeDraftMapping,
-  reconcileDrafts, computeDrExclusions, draftListCounts, upsertDraft, type DrDraftRow,
+  reconcileDrafts, computeDrExclusions, draftListCounts, upsertDraft,
+  buildPreCompletionTrade, groupedTradeFromCycle, draftKeyFor, type DrDraftRow,
 } from "../../lib/drDrafts";
 import { formatSigned } from "../../lib/engine";
 import { representativeSourceLabel, resolveRepresentative } from "../../lib/drRepresentative";
 import DrDraftReview from "../../components/DrDraftReview";
+import DrFinalizeConfirm from "../../components/DrFinalizeConfirm";
 
 type Tab = "overview" | "trades" | "review" | "calendar" | "analytics";
 type Period = "today" | "week" | "month" | "30d" | "90d" | "ytd" | "all";
@@ -117,6 +119,16 @@ interface DrJournalData {
   evidenceByAttempt: Map<string, DrAttemptEvidence>;
   eventsByAttempt: Map<string, ExportDrEventInput[]>;
   attemptsExport: ExportDrAttemptInput[];
+  /** Pre-completion journal rows for FINALIZED drafts on attempts
+   *  with no session yet (2026-10-18 workflow fix): built from the
+   *  attempts' events + draft anchors, keyed by draft key. An attempt
+   *  appears here ONLY while it has no session row — at completion
+   *  the canonical session row replaces these, never coexists. */
+  preTrades: GroupedTrade[];
+  /** Finalized drafts whose pre-completion row was WITHHELD because
+   *  the cycle could not be reconciled with the draft's anchors —
+   *  surfaced to the export panel as a named hint, never silent. */
+  withheldFinalized: { attemptId: string; strategyVersionId: string | null }[];
 }
 
 const SETUPS = ["HOD breakout", "EMA pullback", "VWAP pullback", "Clean breakout", "Weak breakout", "Failed breakout", "Anticipation", "Other"];
@@ -163,6 +175,7 @@ export default function JournalPage() {
   const [drData, setDrData] = useState<DrJournalData>({
     attempts: [], strategies: [], strategyVersions: [], strategiesAvailable: false,
     evidenceByKey: new Map(), evidenceByAttempt: new Map(), eventsByAttempt: new Map(), attemptsExport: [],
+    preTrades: [], withheldFinalized: [],
   });
   // Daily Replay per-cycle trade drafts (Phase D): the durable draft
   // rows for ALL of the user's attempts (linked and unlinked), plus the
@@ -173,6 +186,8 @@ export default function JournalPage() {
   const [drResetCounts, setDrResetCounts] = useState<Map<string, number>>(new Map());
   const [drDraftsView, setDrDraftsView] = useState(false);
   const [reviewDraft, setReviewDraft] = useState<DrDraftRow | null>(null);
+  // Draft awaiting finalize confirmation (the shared dialog).
+  const [finalizeTarget, setFinalizeTarget] = useState<DrDraftRow | null>(null);
   const [draftEventsByAttempt, setDraftEventsByAttempt] = useState<Map<string, DrEvent[]>>(new Map());
   const reconcileRanRef = useRef(false);
 
@@ -206,6 +221,9 @@ export default function JournalPage() {
   const draftForTrade = (key: string, attemptId?: string | null): DrDraftRow | undefined => {
     const byFinal = drDrafts.find((d) => d.finalizedTradeKey === key);
     if (byFinal) return byFinal;
+    // Pre-completion rows key off the draft key itself.
+    const byDraftKey = drDrafts.find((d) => d.draftKey === key);
+    if (byDraftKey) return byDraftKey;
     if (!attemptId) return undefined;
     const seq = Number.parseInt(key.slice(key.lastIndexOf(":") + 1), 10);
     if (!Number.isFinite(seq)) return undefined;
@@ -276,13 +294,17 @@ export default function JournalPage() {
       try {
         const sessionById = new Map((sessions ?? []).map((s: any) => [s.id, s]));
         let attempts: DrAttemptLink[] = [];
+        const attemptDatasetId = new Map<string, string>();
         try {
           const { data: attRows, error: attErr } = await supabase
             .from("daily_replay_attempts")
-            .select("id,session_id,strategy_version_id,status,start_index,created_at,finished_at")
+            .select("id,session_id,dataset_id,strategy_version_id,status,start_index,created_at,finished_at")
             .order("created_at", { ascending: false })
             .limit(500);
-          if (!attErr && attRows) attempts = attRows.map((r: any) => mapAttemptRow(r));
+          if (!attErr && attRows) {
+            attempts = attRows.map((r: any) => mapAttemptRow(r));
+            for (const r of attRows as any[]) if (r.dataset_id) attemptDatasetId.set(r.id, r.dataset_id);
+          }
         } catch { /* attempts table unavailable — pre-DR database */ }
         // All of the user's Daily Replay trade drafts (any attempt,
         // linked or not). Tolerated failure (e.g. the drafts migration
@@ -308,10 +330,41 @@ export default function JournalPage() {
         } catch { /* strategies migration not applied yet */ }
 
         const linked = attempts.filter((a) => a.sessionId && sessionById.has(a.sessionId));
-        const eventsByAttempt = new Map<string, ExportDrEventInput[]>();
-        if (linked.length > 0) {
+        // Pre-completion candidates (2026-10-18 workflow fix):
+        // attempts with at least one FINALIZED draft but no session
+        // row yet. Their finalized trades are journal-visible NOW —
+        // rows are built from the attempts' events + the drafts'
+        // anchors further below. An attempt leaves this set the
+        // moment a session exists; the canonical session row then
+        // owns the trade and the two never coexist.
+        const finalizedAttemptIds = new Set(
+          fetchedDrafts.filter((d) => d.status === "finalized").map((d) => d.attemptId),
+        );
+        const candidates = attempts.filter(
+          (a) => finalizedAttemptIds.has(a.id) && !(a.sessionId && sessionById.has(a.sessionId)),
+        );
+        // Dataset identity (ticker / trade date) for candidates —
+        // their trades have no session row to read it from.
+        const datasetById = new Map<string, { ticker: string; tradeDate: string }>();
+        if (candidates.length > 0) {
           try {
-            const ids = linked.map((a) => a.id);
+            const dsIds = [...new Set(candidates.map((a) => attemptDatasetId.get(a.id)).filter(Boolean))] as string[];
+            if (dsIds.length > 0) {
+              const { data: dsRows, error: dsErr } = await supabase
+                .from("daily_replay_datasets")
+                .select("id,ticker,trade_date")
+                .in("id", dsIds);
+              if (!dsErr && dsRows) {
+                for (const r of dsRows as any[]) datasetById.set(r.id, { ticker: r.ticker, tradeDate: r.trade_date });
+              }
+            }
+          } catch { /* dataset lookup unavailable — candidates degrade to withheld */ }
+        }
+        const eventsByAttempt = new Map<string, ExportDrEventInput[]>();
+        const eventAttempts = [...linked, ...candidates];
+        if (eventAttempts.length > 0) {
+          try {
+            const ids = eventAttempts.map((a) => a.id);
             const { data: evRows, error: evErr } = await supabase
               .from("daily_replay_events")
               .select("id,attempt_id,seq,type,wall_ts,market_idx,market_ts,payload")
@@ -348,21 +401,83 @@ export default function JournalPage() {
           evidenceByAttempt.set(a.id, derived);
           for (const [k, v] of derived.byTradeKey) evidenceByKey.set(k, v);
         }
-        const attemptsExport: ExportDrAttemptInput[] = linked.map((a) => {
-          const s: any = a.sessionId ? sessionById.get(a.sessionId) : null;
-          return {
-            id: a.id, sessionId: a.sessionId, strategyVersionId: a.strategyVersionId,
-            status: a.status, startIndex: a.startIndex, createdAt: a.createdAt, finishedAt: a.finishedAt,
-            ticker: s?.ticker ?? null, tradeDate: s?.trade_date ?? null,
-          };
-        });
-        setDrData({ attempts, strategies, strategyVersions, strategiesAvailable, evidenceByKey, evidenceByAttempt, eventsByAttempt, attemptsExport });
 
-        // Reset counts per linked attempt (session_reset events in the
-        // loaded stream) — the final generation coordinate the draft
-        // exclusion + meta fallback match on.
+        // Pre-completion rows + evidence for candidate attempts
+        // (2026-10-18). Evidence derivation runs over ALL
+        // final-generation closed cycles — pairing inside
+        // deriveDrEvidence is ordinal across the attempt's pairable
+        // cycles — keyed by each cycle's draft key. A row joins the
+        // journal only for cycles whose draft is FINALIZED and
+        // reconciles with its anchors (buildPreCompletionTrade);
+        // anything else is withheld and named, never fabricated.
+        const preTrades: GroupedTrade[] = [];
+        const withheldFinalized: { attemptId: string; strategyVersionId: string | null }[] = [];
+        for (const a of candidates) {
+          const dsId = attemptDatasetId.get(a.id);
+          const ds = dsId ? datasetById.get(dsId) : undefined;
+          const events = (eventsByAttempt.get(a.id) ?? []).map((e) => e.event);
+          const { cycles, lastGeneration } = splitCyclesByGeneration(events);
+          const finalCycles = cycles.filter((c) => c.generation === lastGeneration && c.closed);
+          if (ds) {
+            const cycleTrades: GroupedTrade[] = [];
+            for (const c of finalCycles) {
+              const d = fetchedDrafts.find(
+                (x) => x.attemptId === a.id && x.resetGeneration === c.generation && x.cycleIndex === c.cycleIndex,
+              );
+              const t = groupedTradeFromCycle(c, {
+                tradeKey: d?.draftKey ?? draftKeyFor(a.id, c.generation, c.cycleIndex),
+                ticker: ds.ticker, tradeDate: ds.tradeDate,
+              });
+              if (t) cycleTrades.push(t);
+            }
+            if (cycleTrades.length > 0) {
+              const derived = deriveDrEvidence({ attemptId: a.id, trades: cycleTrades, events });
+              evidenceByAttempt.set(a.id, derived);
+              for (const [k, v] of derived.byTradeKey) evidenceByKey.set(k, v);
+            }
+          }
+          for (const d of fetchedDrafts) {
+            if (d.attemptId !== a.id || d.status !== "finalized") continue;
+            // A finalized draft from before a replay reset can never
+            // map to a journal trade (its fills were wiped) — it is
+            // neither row-eligible nor "withheld"; it stays a
+            // Finalized-history entry only.
+            if (d.resetGeneration !== lastGeneration) continue;
+            const cycle = finalCycles.find((c) => c.cycleIndex === d.cycleIndex);
+            const row = ds && cycle
+              ? buildPreCompletionTrade(d, cycle, { ticker: ds.ticker, tradeDate: ds.tradeDate })
+              : null;
+            if (row) preTrades.push(row);
+            else withheldFinalized.push({ attemptId: a.id, strategyVersionId: a.strategyVersionId });
+          }
+        }
+
+        const attemptsExport: ExportDrAttemptInput[] = [
+          ...linked.map((a) => {
+            const s: any = a.sessionId ? sessionById.get(a.sessionId) : null;
+            return {
+              id: a.id, sessionId: a.sessionId, strategyVersionId: a.strategyVersionId,
+              status: a.status, startIndex: a.startIndex, createdAt: a.createdAt, finishedAt: a.finishedAt,
+              ticker: s?.ticker ?? null, tradeDate: s?.trade_date ?? null,
+            };
+          }),
+          ...candidates.map((a) => {
+            const dsId = attemptDatasetId.get(a.id);
+            const ds = dsId ? datasetById.get(dsId) : undefined;
+            return {
+              id: a.id, sessionId: a.sessionId, strategyVersionId: a.strategyVersionId,
+              status: a.status, startIndex: a.startIndex, createdAt: a.createdAt, finishedAt: a.finishedAt,
+              ticker: ds?.ticker ?? null, tradeDate: ds?.tradeDate ?? null,
+            };
+          }),
+        ];
+        setDrData({ attempts, strategies, strategyVersions, strategiesAvailable, evidenceByKey, evidenceByAttempt, eventsByAttempt, attemptsExport, preTrades, withheldFinalized });
+
+        // Reset counts per event-loaded attempt (session_reset events
+        // in the loaded stream) — the final generation coordinate the
+        // draft exclusion + meta fallback match on.
         const resetCounts = new Map<string, number>();
-        for (const a of linked) {
+        for (const a of eventAttempts) {
           const evs = eventsByAttempt.get(a.id) ?? [];
           resetCounts.set(a.id, evs.filter((e) => e.event.type === "session_reset").length);
         }
@@ -531,6 +646,40 @@ export default function JournalPage() {
         strategyLabel: ctx?.label ?? null,
       };
     });
+    // Pre-completion Daily Replay trades (2026-10-18 workflow fix):
+    // FINALIZED drafts on attempts with no session yet, keyed by
+    // draft key. load() builds these ONLY for sessionless attempts,
+    // so a canonical session row and a pre-completion row for the
+    // same trade can never coexist — at completion the session row
+    // replaces this one.
+    const attemptById = new Map(drData.attempts.map((a) => [a.id, a]));
+    const pre: UnifiedTrade[] = drData.preTrades.map((t) => {
+      const draft = drDrafts.find((d) => d.draftKey === t.tradeKey) ?? null;
+      const attempt = draft ? attemptById.get(draft.attemptId) ?? null : null;
+      const evidence = drData.evidenceByKey.get(t.tradeKey);
+      const ctx = attempt?.strategyVersionId
+        ? resolveVersionContext(attempt.strategyVersionId, drData.strategies, drData.strategyVersions)
+        : null;
+      return {
+        key: t.tradeKey,
+        source: "simulator" as const,
+        ticker: t.ticker,
+        tradeDate: t.tradeDate,
+        direction: t.direction,
+        entryPrice: t.entryPrice,
+        exitPrice: t.exitPrice,
+        qty: t.qty,
+        realizedPnl: t.realizedPnl,
+        isOpen: false,
+        rMultiple: evidence ? evidence.rMultiple : t.rMultiple,
+        sessionSource: "daily_replay",
+        attemptId: attempt?.id ?? null,
+        strategyId: ctx?.strategy.id ?? null,
+        strategyVersionId: attempt?.strategyVersionId ?? null,
+        strategyName: ctx?.strategy.name ?? null,
+        strategyLabel: ctx?.label ?? null,
+      };
+    });
     const rl: UnifiedTrade[] = realTrades.map((t) => ({
       key: `real:${t.id}`,
       source: "real" as const,
@@ -550,8 +699,8 @@ export default function JournalPage() {
       strategyName: null,
       strategyLabel: null,
     }));
-    return [...sim, ...rl].sort((a, b) => b.tradeDate.localeCompare(a.tradeDate));
-  }, [trades, realTrades, drData, drExcluded]);
+    return [...sim, ...pre, ...rl].sort((a, b) => b.tradeDate.localeCompare(a.tradeDate));
+  }, [trades, realTrades, drData, drExcluded, drDrafts]);
 
   // Filter by source + period + search (date-string comparison avoids TZ bugs).
   // ONE filtered set: overview, trades, review, calendar, analytics and
@@ -593,7 +742,7 @@ export default function JournalPage() {
   // Enriched view for Analytics: the SAME filtered closed set, joined with
   // Trade DNA annotations and the underlying records (timestamps, stop, risk).
   const analyticsTrades: AnalyticsTrade[] = useMemo(() => {
-    const simByKey = new Map(trades.map((t) => [t.tradeKey, t]));
+    const simByKey = new Map([...trades, ...drData.preTrades].map((t) => [t.tradeKey, t]));
     const realById = new Map(realTrades.map((t) => [`real:${t.id}`, t]));
     return closedFiltered.map((t) => {
       const meta = metaForTrade(t.key, t.attemptId);
@@ -657,7 +806,9 @@ export default function JournalPage() {
   const selected = selectedKey
     ? (selectedKey.startsWith("real:")
         ? realTrades.find((t) => `real:${t.id}` === selectedKey) ?? null
-        : trades.find((t) => t.tradeKey === selectedKey) ?? null)
+        : trades.find((t) => t.tradeKey === selectedKey)
+          ?? drData.preTrades.find((t) => t.tradeKey === selectedKey)
+          ?? null)
     : null;
   const selectedMeta = selectedKey
     ? (metaForTrade(selectedKey, unified.find((t) => t.key === selectedKey)?.attemptId ?? null) ?? null)
@@ -807,17 +958,25 @@ export default function JournalPage() {
       ?? [])
     : [];
 
-  const finalizeDraftFromJournal = async (draft: DrDraftRow) => {
-    try {
-      const supabase = createClient();
-      await finalizeDraft(supabase, draft.id);
-      if (draft.finalizedTradeKey) {
-        const sessionId = draft.finalizedSessionId
-          ?? drData.attempts.find((a) => a.id === draft.attemptId)?.sessionId
-          ?? null;
-        await copyDraftMetaForward(supabase, draft.draftKey, draft.finalizedTradeKey, sessionId);
-      }
-    } catch { /* finalize is guarded server-side; load() resyncs state */ }
+  // Finalize confirm callback for the shared dialog: flips the
+  // draft's flag, copies any draft-key annotations forward when a
+  // canonical key is already known, then VERIFIES the flag landed
+  // (a silent no-op must surface as an error in the dialog, not as a
+  // false success state) and resyncs the page.
+  const confirmFinalizeFromJournal = async (draft: DrDraftRow) => {
+    const supabase = createClient();
+    await finalizeDraft(supabase, draft.id);
+    if (draft.finalizedTradeKey) {
+      const sessionId = draft.finalizedSessionId
+        ?? drData.attempts.find((a) => a.id === draft.attemptId)?.sessionId
+        ?? null;
+      await copyDraftMetaForward(supabase, draft.draftKey, draft.finalizedTradeKey, sessionId);
+    }
+    const fresh = await fetchDraftsForUser(supabase).catch(() => null);
+    const row = fresh?.find((d) => d.id === draft.id);
+    if (row && row.status !== "finalized") {
+      throw new Error("Finalize did not land — please try again.");
+    }
     load();
   };
 
@@ -839,6 +998,45 @@ export default function JournalPage() {
   // total always equals the number of rows the card lists (finalized
   // drafts included); the still-open remainder is labeled "to review".
   const drCounts = draftListCounts(drDrafts, (d) => draftDisplayStatus(d).superseded);
+
+  // One row renderer for the drafts card's two lists: the actionable
+  // list (unfinalized drafts awaiting review) and the collapsed
+  // "Finalized" history subsection.
+  const renderDraftRow = (d: DrDraftRow, actionable: boolean) => {
+    const disp = draftDisplayStatus(d);
+    const attempt = drData.attempts.find((a) => a.id === d.attemptId) ?? null;
+    const exp = drData.attemptsExport.find((a) => a.id === d.attemptId) ?? null;
+    return (
+      <div key={d.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,0.06)", flexWrap: "wrap", opacity: disp.superseded ? 0.65 : 1 }}>
+        <span style={{ fontSize: 13 }}>
+          <b>{exp?.ticker ?? "Daily Replay"}</b>{" "}
+          <span className="hint">
+            {attempt?.createdAt ? attempt.createdAt.slice(0, 10) : ""}
+            {exp?.tradeDate ? ` · ${exp.tradeDate}` : ""}
+            {` · cycle ${d.cycleIndex} (gen ${d.resetGeneration})`}
+            {` · candle #${d.firstFillCandleIndex + 1} → #${d.closeFillCandleIndex + 1}`}
+          </span>{" "}
+          <span style={{
+            fontSize: 10, padding: "2px 8px", borderRadius: 10, fontWeight: 600,
+            background: disp.superseded ? "rgba(255,255,255,0.08)" : d.status === "finalized" ? "rgba(16,185,129,0.15)" : "rgba(251,191,36,0.12)",
+            border: disp.superseded ? "1px solid rgba(255,255,255,0.2)" : d.status === "finalized" ? "1px solid rgba(16,185,129,0.4)" : "1px solid rgba(251,191,36,0.45)",
+            color: disp.superseded ? "var(--muted)" : d.status === "finalized" ? "#34d399" : "#fbbf24",
+            textDecoration: disp.superseded ? "line-through" : "none",
+          }}>{disp.label}</span>
+        </span>
+        <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <span className="num" style={{ fontWeight: 700, color: d.realizedPnl > 0 ? "var(--emerald-bright)" : d.realizedPnl < 0 ? "#f6465d" : "var(--muted)" }}>{formatSigned(d.realizedPnl)}</span>
+          <button className="btn" style={{ padding: "3px 10px", fontSize: 12 }} onClick={() => openDraftReview(d)}>Review Draft</button>
+          {actionable && d.status === "draft" && !disp.superseded && (
+            <button className="btn" style={{ padding: "3px 10px", fontSize: 12 }} onClick={() => setFinalizeTarget(d)}>Finalize Trade</button>
+          )}
+        </span>
+      </div>
+    );
+  };
+  const draftsSorted = [...drDrafts].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const actionableDrafts = draftsSorted.filter((d) => d.status !== "finalized");
+  const finalizedDrafts = draftsSorted.filter((d) => d.status === "finalized");
 
   if (loading) return <div className="wrap" style={{ padding: 40 }}><p className="hint">Loading journal…</p></div>;
   if (error) return <div className="wrap" style={{ padding: 40 }}><div className="err">{error}</div><p style={{ marginTop: 12 }}><Link href="/replay">← Back to simulator</Link></p></div>;
@@ -922,41 +1120,21 @@ export default function JournalPage() {
             </span>
           </div>
           <p className="hint" style={{ margin: "0 0 12px", fontSize: 12 }}>
-            Closed Daily Replay position cycles, captured as drafts. A draft appears in the journal, analytics and exports only after it is finalized and its attempt has completed.
+            Closed Daily Replay position cycles, captured as drafts while you replay. Review a draft, then finalize it — a finalized trade appears in Trade Journal → Daily Replay / Backtest, analytics and AI Edge exports right away; the replay session does not need to be completed first.
           </p>
           {drDrafts.length === 0 && <p className="hint" style={{ margin: 0 }}>No Daily Replay drafts yet.</p>}
-          {[...drDrafts].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map((d) => {
-            const disp = draftDisplayStatus(d);
-            const attempt = drData.attempts.find((a) => a.id === d.attemptId) ?? null;
-            const exp = drData.attemptsExport.find((a) => a.id === d.attemptId) ?? null;
-            return (
-              <div key={d.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,0.06)", flexWrap: "wrap", opacity: disp.superseded ? 0.65 : 1 }}>
-                <span style={{ fontSize: 13 }}>
-                  <b>{exp?.ticker ?? "Daily Replay"}</b>{" "}
-                  <span className="hint">
-                    {attempt?.createdAt ? attempt.createdAt.slice(0, 10) : ""}
-                    {exp?.tradeDate ? ` · ${exp.tradeDate}` : ""}
-                    {` · cycle ${d.cycleIndex} (gen ${d.resetGeneration})`}
-                    {` · candle #${d.firstFillCandleIndex + 1} → #${d.closeFillCandleIndex + 1}`}
-                  </span>{" "}
-                  <span style={{
-                    fontSize: 10, padding: "2px 8px", borderRadius: 10, fontWeight: 600,
-                    background: disp.superseded ? "rgba(255,255,255,0.08)" : d.status === "finalized" ? "rgba(16,185,129,0.15)" : "rgba(251,191,36,0.12)",
-                    border: disp.superseded ? "1px solid rgba(255,255,255,0.2)" : d.status === "finalized" ? "1px solid rgba(16,185,129,0.4)" : "1px solid rgba(251,191,36,0.45)",
-                    color: disp.superseded ? "var(--muted)" : d.status === "finalized" ? "#34d399" : "#fbbf24",
-                    textDecoration: disp.superseded ? "line-through" : "none",
-                  }}>{disp.label}</span>
-                </span>
-                <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <span className="num" style={{ fontWeight: 700, color: d.realizedPnl > 0 ? "var(--emerald-bright)" : d.realizedPnl < 0 ? "#f6465d" : "var(--muted)" }}>{formatSigned(d.realizedPnl)}</span>
-                  <button className="btn" style={{ padding: "3px 10px", fontSize: 12 }} onClick={() => openDraftReview(d)}>Review</button>
-                  {d.status === "draft" && !disp.superseded && (
-                    <button className="btn" style={{ padding: "3px 10px", fontSize: 12 }} onClick={() => finalizeDraftFromJournal(d)}>Finalize</button>
-                  )}
-                </span>
-              </div>
-            );
-          })}
+          {drDrafts.length > 0 && actionableDrafts.length === 0 && (
+            <p className="hint" style={{ margin: "0 0 4px" }}>No drafts awaiting review — every draft is finalized.</p>
+          )}
+          {actionableDrafts.map((d) => renderDraftRow(d, true))}
+          {finalizedDrafts.length > 0 && (
+            <details style={{ marginTop: 10 }}>
+              <summary style={{ cursor: "pointer", fontSize: 13, fontWeight: 600, padding: "6px 0" }}>
+                Finalized ({finalizedDrafts.length}) <span className="hint" style={{ fontWeight: 400 }}>— already in the journal</span>
+              </summary>
+              {finalizedDrafts.map((d) => renderDraftRow(d, false))}
+            </details>
+          )}
         </div>
       )}
       {!drDraftsView && tab === "overview" && <OverviewTab metrics={metrics} simMetrics={simMetrics} realMetrics={realMetrics} drMetrics={drMetrics} cumPnl={cumPnl} trades={filtered} sourceTotalCount={sourceTotalCount} sourceClosedCount={sourceClosedCount} period={period} setPeriod={setPeriod} sourceFilter={sourceFilter} avgR={analyticsRisk.avgR} maxDrawdown={analyticsRisk.maxDrawdownUSD} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} onAddRealTrade={() => { setEditingReal(null); setTab("trades"); setShowRealForm(true); }} onImportBroker={() => { setTab("trades"); setShowImport(true); }} />}
@@ -964,24 +1142,30 @@ export default function JournalPage() {
       {!drDraftsView && tab === "review" && <ReviewTab tradeKey={selectedKey} simTrade={!isRealSelected ? (selected as GroupedTrade | null) : null} realTrade={isRealSelected ? (selected as RealTrade | null) : null} meta={selectedMeta} onSaved={load} onEditReal={startEditReal} onDeleteReal={startDeleteReal} drInfo={selectedDrInfo} drDraftKey={selectedKey ? (draftForTrade(selectedKey, unified.find((t) => t.key === selectedKey)?.attemptId ?? null)?.draftKey ?? null) : null} drAutoCapture={selectedKey ? (draftForTrade(selectedKey, unified.find((t) => t.key === selectedKey)?.attemptId ?? null)?.autoCapture ?? null) : null} />}
       {!drDraftsView && tab === "calendar" && <CalendarTab trades={closedFiltered} metas={metas} selectedDay={selectedCalDay} onSelectDay={setSelectedCalDay} onSelectTrade={(k) => { setSelectedKey(k); setTab("review"); }} />}
       {!drDraftsView && tab === "analytics" && <AnalyticsTab trades={analyticsTrades} onSelect={(k) => { setSelectedKey(k); setTab("review"); }} exportInput={{
-        unified, metas, realTrades, simTrades: trades,
+        unified, metas, realTrades, simTrades: [...trades, ...drData.preTrades],
         drAttempts: drData.attemptsExport,
         drEvidence: drData.evidenceByKey,
         drEvents: [...drData.eventsByAttempt.values()].flat(),
         drEventTradeKeys: new Map([...drData.evidenceByAttempt.entries()].map(([id, d]) => [id, d.eventTradeKey])),
         strategies: drData.strategies,
         strategyVersions: drData.strategyVersions,
-        drDraftKeys: new Map(drDrafts.filter((d) => d.finalizedTradeKey).map((d) => [d.finalizedTradeKey!, { draftKey: d.draftKey, autoCapture: d.autoCapture }])),
-        // Finalized drafts whose attempt never completed (no session):
-        // invisible in the journal + export by design — the export
-        // panel names the count + remedy instead of a silent 0.
-        drPendingFinalizedDrafts: drDrafts
-          .filter((d) => d.status === "finalized")
-          .filter((d) => !(drData.attempts.find((a) => a.id === d.attemptId)?.sessionId ?? null))
-          .map((d) => ({
-            attemptId: d.attemptId,
-            strategyVersionId: drData.attempts.find((a) => a.id === d.attemptId)?.strategyVersionId ?? null,
-          })),
+        // Post-completion trades key by their finalized trade key;
+        // pre-completion trades (finalized drafts on active attempts)
+        // key by the draft key itself — the same prefix their
+        // screenshots already live under, so representative
+        // resolution and the union listing work unchanged.
+        drDraftKeys: new Map<string, { draftKey: string; autoCapture: Record<string, unknown> }>([
+          ...drDrafts.filter((d) => d.finalizedTradeKey).map((d) => [d.finalizedTradeKey!, { draftKey: d.draftKey, autoCapture: d.autoCapture }] as const),
+          ...drData.preTrades.flatMap((t) => {
+            const d = drDrafts.find((x) => x.draftKey === t.tradeKey);
+            return d ? [[t.tradeKey, { draftKey: d.draftKey, autoCapture: d.autoCapture }] as const] : [];
+          }),
+        ]),
+        // Finalized drafts whose pre-completion row was withheld
+        // (anchor reconciliation failed) — the export panel names the
+        // count instead of a silent absence. All other finalized
+        // drafts are INCLUDED via `unified`, session or not.
+        drWithheldFinalizedDrafts: drData.withheldFinalized,
       }} />}
 
       {activeDraft && (
@@ -993,6 +1177,21 @@ export default function JournalPage() {
           events={activeDraftEvents}
           onClose={() => setReviewDraft(null)}
           onChanged={() => load()}
+          onViewInJournal={() => { setReviewDraft(null); setDrDraftsView(false); setSourceFilter("daily_replay"); setTab("trades"); }}
+        />
+      )}
+
+      {finalizeTarget && (
+        <DrFinalizeConfirm
+          summary={{
+            ticker: drData.attemptsExport.find((a) => a.id === finalizeTarget.attemptId)?.ticker ?? null,
+            tradeDate: drData.attemptsExport.find((a) => a.id === finalizeTarget.attemptId)?.tradeDate ?? null,
+            cycleIndex: finalizeTarget.cycleIndex,
+            realizedPnl: finalizeTarget.realizedPnl,
+          }}
+          onConfirm={() => confirmFinalizeFromJournal(finalizeTarget)}
+          onClose={() => setFinalizeTarget(null)}
+          onViewInJournal={() => { setDrDraftsView(false); setSourceFilter("daily_replay"); setTab("trades"); }}
         />
       )}
 
@@ -1408,7 +1607,9 @@ function DrAttemptCard({ info, tradeKeyVal }: { info: DrReviewInfo; tradeKeyVal:
   const ownSeqs = new Set(info.tradeEventSeqs);
   const ownEvents = info.events.filter((e) => ownSeqs.has(e.event.seq));
   const shown = showAll ? info.events : ownEvents;
-  const lifecycle = info.resumed ? "Completed after resume" : "Completed";
+  const lifecycle = info.attempt?.status === "finished"
+    ? (info.resumed ? "Completed after resume" : "Completed")
+    : "Session still in progress — trade finalized from its draft";
   return (
     <div className="card" style={{ padding: 16 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
@@ -1528,7 +1729,10 @@ function ReviewTab({ tradeKey, simTrade, realTrade, meta, onSaved, onEditReal, o
       if (!user) throw new Error("Not signed in.");
       const payload = {
         user_id: user.id,
-        session_id: isReal ? null : simTrade!.sessionId,
+        // Pre-completion Daily Replay trades have no session yet
+        // (sessionId "") — the meta row records null, like draft
+        // reviews do, until the canonical row takes over.
+        session_id: isReal ? null : (simTrade!.sessionId || null),
         trade_key: tradeKeyVal,
         setup_tag: form.setup_tag ?? null,
         hod_class: form.hod_class ?? null,

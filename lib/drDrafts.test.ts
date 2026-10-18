@@ -7,10 +7,12 @@
  */
 import {
   buildDraftPayload,
+  buildPreCompletionTrade,
   computeDrExclusions,
   draftKeyFor,
   draftListCounts,
   draftsForAttempt,
+  groupedTradeFromCycle,
   latestClosedCycle,
   mapDraftRow,
   reconcileDrafts,
@@ -424,6 +426,74 @@ seq = 0;
   eq("15 mixed: buckets partition the total", c2.toReview + c2.finalized + c2.superseded, c2.total);
 
   eq("15 empty list", draftListCounts([], () => false), { total: 0, toReview: 0, finalized: 0, superseded: 0 });
+}
+
+/* ===== 16. Pre-completion journal rows (finalized ⇒ visible, 2026-10-18) =====
+ * buildPreCompletionTrade is the journal's pre-completion row source:
+ * a FINALIZED draft's trade exists in the journal (keyed by the draft
+ * key) even while its attempt is still active. The row is built from
+ * the cycle's events and VERIFIED against the draft's anchors — any
+ * mismatch withholds the row (null), never fabricates numbers. */
+{
+  seq = 0;
+  const events = cleanCycleEvents();
+  const { cycles } = splitCyclesByGeneration(events);
+  const cycle = cycles[0];
+  const fin = draftRow({ status: "finalized", finalizedAt: "2026-10-17T01:00:00Z" });
+  const row = buildPreCompletionTrade(fin, cycle, { ticker: "DEMO", tradeDate: "2026-10-16" });
+  check("16 row builds for a finalized draft", row != null);
+  eq("16 row keys off the draft key; no session exists", [row?.tradeKey, row?.sessionId], [draftKeyFor(ATT, 0, 1), ""]);
+  eq("16 row source is daily_replay", row?.source, "daily_replay");
+  eq("16 row entry/exit/qty/P&L", [row?.entryPrice, row?.exitPrice, row?.qty, row?.realizedPnl], [10, 11, 100, 100]);
+  eq("16 row fills: buy + sell, sell carries the exit event's realized P&L",
+    row?.fills.map((f) => [f.side, f.qty, f.price, f.candle_index, f.realized_pnl]),
+    [["buy", 100, 10, 5, 0], ["sell", 100, 11, 9, 100]]);
+  eq("16 row entry/exit times come from the fills' candle times",
+    [row?.entryTime, row?.exitTime],
+    [new Date(1760000000000 + 5 * 60000).toISOString(), new Date(1760000000000 + 9 * 60000).toISOString()]);
+
+  // Parity with the canonical session path for the same fills.
+  const viaSession = groupFillsIntoTrades([
+    fill("buy", 100, 10, 5), fill("sell", 100, 11, 9, 100),
+  ], { id: SID, ticker: "DEMO", trade_date: "2026-10-16", source: "daily_replay" });
+  eq("16 parity with groupFillsIntoTrades (entry/exit/qty/P&L)",
+    [row?.entryPrice, row?.exitPrice, row?.qty, row?.realizedPnl],
+    [viaSession[0].entryPrice, viaSession[0].exitPrice, viaSession[0].qty, viaSession[0].realizedPnl]);
+
+  // Withholding: unfinalized drafts and anchor mismatches never build.
+  eq("16 unfinalized draft builds nothing", buildPreCompletionTrade(draftRow({}), cycle, { ticker: "DEMO", tradeDate: "2026-10-16" }), null);
+  eq("16 anchor price mismatch withheld", buildPreCompletionTrade(draftRow({ status: "finalized", firstFillPrice: 10.5 }), cycle, { ticker: "DEMO", tradeDate: "2026-10-16" }), null);
+  eq("16 anchor qty mismatch withheld", buildPreCompletionTrade(draftRow({ status: "finalized", firstFillQty: 50 }), cycle, { ticker: "DEMO", tradeDate: "2026-10-16" }), null);
+  eq("16 anchor candle mismatch withheld", buildPreCompletionTrade(draftRow({ status: "finalized", firstFillCandleIndex: 6 }), cycle, { ticker: "DEMO", tradeDate: "2026-10-16" }), null);
+  eq("16 realized mismatch withheld", buildPreCompletionTrade(draftRow({ status: "finalized", realizedPnl: 99 }), cycle, { ticker: "DEMO", tradeDate: "2026-10-16" }), null);
+  eq("16 generation mismatch withheld", buildPreCompletionTrade(draftRow({ status: "finalized", resetGeneration: 1 }), cycle, { ticker: "DEMO", tradeDate: "2026-10-16" }), null);
+  eq("16 cycle mismatch withheld", buildPreCompletionTrade(draftRow({ status: "finalized", cycleIndex: 2, draftKey: draftKeyFor(ATT, 0, 2) }), cycle, { ticker: "DEMO", tradeDate: "2026-10-16" }), null);
+
+  // Partial exits: each sell fill carries its own exit event's P&L;
+  // the exit price is the qty-weighted average, as in the journal.
+  seq = 0;
+  const partialEvents = [
+    ev("order_filled", { side: "buy", qty: 100, price: 10, candleIndex: 5 }, 5),
+    ev("order_filled", { side: "sell", qty: 60, price: 11, candleIndex: 7 }, 7),
+    ev("partial_exit", { qty: 60, price: 11, realizedPnl: 60, sessionRealized: 60, reason: "manual", unrealizedPnl: 0 }, 7),
+    ev("order_filled", { side: "sell", qty: 40, price: 12, candleIndex: 9 }, 9),
+    ev("position_closed", { qty: 40, price: 12, realizedPnl: 80, sessionRealized: 140, reason: "manual", unrealizedPnl: 0 }, 9),
+  ];
+  const pCycle = splitCyclesByGeneration(partialEvents).cycles[0];
+  const pRow = groupedTradeFromCycle(pCycle, { tradeKey: draftKeyFor(ATT, 0, 1), ticker: "DEMO", tradeDate: "2026-10-16" });
+  eq("16 partial-exit fills carry per-exit realized P&L",
+    pRow?.fills.map((f) => f.realized_pnl), [0, 60, 80]);
+  check("16 partial-exit weighted exit + summed realized (11.40 / 140)",
+    pRow != null && Math.abs(pRow.exitPrice - 11.4) < 1e-9 && pRow.realizedPnl === 140,
+    `exit=${pRow?.exitPrice} pnl=${pRow?.realizedPnl}`);
+  const pDraft = draftRow({ status: "finalized", realizedPnl: 140, closeFillCandleIndex: 9 });
+  check("16 partial-exit cycle verifies against its draft", buildPreCompletionTrade(pDraft, pCycle, { ticker: "DEMO", tradeDate: "2026-10-16" }) != null);
+
+  // Open cycle (no close event) never builds a row.
+  seq = 0;
+  const openEvents = [ev("order_filled", { side: "buy", qty: 100, price: 10, candleIndex: 5 }, 5)];
+  const oCycle = splitCyclesByGeneration(openEvents).cycles[0];
+  eq("16 open cycle builds nothing", groupedTradeFromCycle(oCycle, { tradeKey: "k", ticker: "DEMO", tradeDate: "2026-10-16" }), null);
 }
 
 console.log(`=== drDrafts RESULT: ${passed} passed, ${failed} failed ===`);

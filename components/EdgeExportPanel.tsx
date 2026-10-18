@@ -278,9 +278,9 @@ export default function EdgeExportPanel({ input }: { input: ExportSnapshotInput 
         </div>
       )}
 
-      {drHints && drHints.pendingFinalizedDrafts > 0 && (
+      {drHints && drHints.withheldFinalizedDrafts > 0 && (
         <div style={{ marginTop: 10, padding: "9px 12px", borderRadius: 8, background: "rgba(56,189,248,0.07)", border: "1px solid rgba(56,189,248,0.3)", fontSize: 12.5 }}>
-          {drHints.pendingFinalizedDrafts} finalized Daily Replay draft{drHints.pendingFinalizedDrafts === 1 ? " is" : "s are"} not included yet — the replay session hasn&apos;t been completed, so the trade doesn&apos;t exist in the journal yet. Finish the session in Daily Replay and it will appear here and in the export. Widening the date range does not include it.
+          {drHints.withheldFinalizedDrafts} finalized Daily Replay draft{drHints.withheldFinalizedDrafts === 1 ? "" : "s"} could not be verified from the recorded replay events, so the trade{drHints.withheldFinalizedDrafts === 1 ? " is" : "s are"} not included in the journal or this export. Finalized drafts are otherwise included as soon as they are finalized — the session does not need to be completed.
         </div>
       )}
       {drHints && drHints.outOfRangeDrTrades > 0 && (
