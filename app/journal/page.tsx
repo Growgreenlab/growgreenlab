@@ -17,7 +17,7 @@ import {
 import {
   fetchDraftsForUser, finalizeDraft, supersedeDraft, writeDraftMapping,
   reconcileDrafts, computeDrExclusions, draftListCounts, upsertDraft,
-  buildPreCompletionTrade, groupedTradeFromCycle, draftKeyFor, type DrDraftRow,
+  buildPreCompletionTradeFromEvents, groupedTradeFromCycle, draftKeyFor, type DrDraftRow,
 } from "../../lib/drDrafts";
 import { formatSigned } from "../../lib/engine";
 import { representativeSourceLabel, resolveRepresentative } from "../../lib/drRepresentative";
@@ -134,6 +134,14 @@ interface DrJournalData {
    *  the cycle could not be reconciled with the draft's anchors —
    *  surfaced to the export panel as a named hint, never silent. */
   withheldFinalized: { attemptId: string; strategyVersionId: string | null }[];
+  /** Finalized drafts whose trade is NOT displayed as a journal row,
+   *  with the reason — rendered as an explicit note on the draft's
+   *  Finalized-history row so a finalized trade never vanishes
+   *  without a trace: "unreconciled" (the recorded events could not
+   *  be cross-verified against the draft, even via the draft-window
+   *  fallback) or "pre_reset" (the replay session was reset after
+   *  finalizing, wiping the trade from any future session). */
+  undisplayedFinalized: { draftKey: string; reason: "unreconciled" | "pre_reset" }[];
 }
 
 const SETUPS = ["HOD breakout", "EMA pullback", "VWAP pullback", "Clean breakout", "Weak breakout", "Failed breakout", "Anticipation", "Other"];
@@ -180,7 +188,7 @@ export default function JournalPage() {
   const [drData, setDrData] = useState<DrJournalData>({
     attempts: [], strategies: [], strategyVersions: [], strategiesAvailable: false,
     evidenceByKey: new Map(), evidenceByAttempt: new Map(), eventsByAttempt: new Map(), attemptsExport: [],
-    preTrades: [], withheldFinalized: [], tickerByAttempt: new Map(),
+    preTrades: [], withheldFinalized: [], undisplayedFinalized: [], tickerByAttempt: new Map(),
   });
   // Daily Replay per-cycle trade drafts (Phase D): the durable draft
   // rows for ALL of the user's attempts (linked and unlinked), plus the
@@ -385,13 +393,27 @@ export default function JournalPage() {
         if (eventAttempts.length > 0) {
           try {
             const ids = eventAttempts.map((a) => a.id);
-            const { data: evRows, error: evErr } = await supabase
-              .from("daily_replay_events")
-              .select("id,attempt_id,seq,type,wall_ts,market_idx,market_ts,payload")
-              .in("attempt_id", ids)
-              .order("seq", { ascending: true })
-              .limit(20000);
-            if (!evErr && evRows) {
+            // Paginated fetch: PostgREST caps every response at the
+            // project's max-rows (1000 by default) no matter how
+            // large a LIMIT is requested, so a single big query
+            // silently truncates the streams of exactly the heavy
+            // accounts that have many attempts — a candidate
+            // attempt's later events (its fills and close) are the
+            // first to fall off, and its finalized trades then fail
+            // reconstruction for no visible reason. Page through
+            // with range requests ordered by (attempt_id, seq)
+            // until a short page lands.
+            const EV_PAGE = 1000;
+            const EV_MAX = 50000;
+            for (let from = 0; from < EV_MAX; from += EV_PAGE) {
+              const { data: evRows, error: evErr } = await supabase
+                .from("daily_replay_events")
+                .select("id,attempt_id,seq,type,wall_ts,market_idx,market_ts,payload")
+                .in("attempt_id", ids)
+                .order("attempt_id", { ascending: true })
+                .order("seq", { ascending: true })
+                .range(from, from + EV_PAGE - 1);
+              if (evErr || !evRows) break;
               for (const r of evRows as any[]) {
                 const event: DrEvent = {
                   seq: Number(r.seq),
@@ -405,6 +427,7 @@ export default function JournalPage() {
                 arr.push({ id: r.id, attemptId: r.attempt_id, event });
                 eventsByAttempt.set(r.attempt_id, arr);
               }
+              if (evRows.length < EV_PAGE) break;
             }
           } catch { /* events unavailable — evidence stays unrecorded */ }
         }
@@ -432,6 +455,7 @@ export default function JournalPage() {
         // anything else is withheld and named, never fabricated.
         const preTrades: GroupedTrade[] = [];
         const withheldFinalized: { attemptId: string; strategyVersionId: string | null }[] = [];
+        const undisplayedFinalized: { draftKey: string; reason: "unreconciled" | "pre_reset" }[] = [];
         for (const a of candidates) {
           const dsId = attemptDatasetId.get(a.id);
           const ds = dsId ? datasetById.get(dsId) : undefined;
@@ -459,16 +483,45 @@ export default function JournalPage() {
           for (const d of fetchedDrafts) {
             if (d.attemptId !== a.id || d.status !== "finalized") continue;
             // A finalized draft from before a replay reset can never
-            // map to a journal trade (its fills were wiped) — it is
-            // neither row-eligible nor "withheld"; it stays a
-            // Finalized-history entry only.
-            if (d.resetGeneration !== lastGeneration) continue;
-            const cycle = finalCycles.find((c) => c.cycleIndex === d.cycleIndex);
-            const row = ds && cycle
-              ? buildPreCompletionTrade(d, cycle, { ticker: ds.ticker, tradeDate: ds.tradeDate })
+            // map to a journal trade (its fills were wiped from any
+            // future session) — no row is built, but the absence is
+            // NAMED on its Finalized-history row, never silent.
+            if (d.resetGeneration !== lastGeneration) {
+              undisplayedFinalized.push({ draftKey: d.draftKey, reason: "pre_reset" });
+              continue;
+            }
+            // Cycle-based build first; when the server-side stream
+            // copy is too damaged for it (a lost close-burst event),
+            // the draft-window fallback inside
+            // buildPreCompletionTradeFromEvents cross-verifies the
+            // draft's own recorded window instead.
+            const row = ds
+              ? buildPreCompletionTradeFromEvents(d, events, { ticker: ds.ticker, tradeDate: ds.tradeDate })
               : null;
             if (row) preTrades.push(row);
-            else withheldFinalized.push({ attemptId: a.id, strategyVersionId: a.strategyVersionId });
+            else {
+              withheldFinalized.push({ attemptId: a.id, strategyVersionId: a.strategyVersionId });
+              undisplayedFinalized.push({ draftKey: d.draftKey, reason: "unreconciled" });
+            }
+          }
+        }
+
+        // Finalized drafts on COMPLETED attempts whose trade never
+        // reached the session: finalized before a reset wiped its
+        // fills, so completion reconcile could never pair it (its
+        // finalized_trade_key stays null forever). Name the absence
+        // on its history row as well — the note must not disappear
+        // just because the attempt later completed.
+        for (const a of linked) {
+          const evs = (eventsByAttempt.get(a.id) ?? []).map((e) => e.event);
+          const resets = evs.filter((e) => e.type === "session_reset").length;
+          if (resets === 0) continue;
+          for (const d of fetchedDrafts) {
+            if (d.attemptId !== a.id || d.status !== "finalized") continue;
+            if (d.finalizedTradeKey) continue;
+            if (d.resetGeneration < resets) {
+              undisplayedFinalized.push({ draftKey: d.draftKey, reason: "pre_reset" });
+            }
           }
         }
 
@@ -497,7 +550,7 @@ export default function JournalPage() {
           const ds = dsId ? datasetById.get(dsId) : undefined;
           if (ds) tickerByAttempt.set(a.id, ds);
         }
-        setDrData({ attempts, strategies, strategyVersions, strategiesAvailable, evidenceByKey, evidenceByAttempt, eventsByAttempt, attemptsExport, preTrades, withheldFinalized, tickerByAttempt });
+        setDrData({ attempts, strategies, strategyVersions, strategiesAvailable, evidenceByKey, evidenceByAttempt, eventsByAttempt, attemptsExport, preTrades, withheldFinalized, undisplayedFinalized, tickerByAttempt });
 
         // Reset counts per event-loaded attempt (session_reset events
         // in the loaded stream) — the final generation coordinate the
@@ -1159,6 +1212,24 @@ export default function JournalPage() {
               background: "rgba(251,191,36,0.12)", border: "1px solid rgba(251,191,36,0.45)", color: "#fbbf24",
             }}>Entry screenshot failed</span>
           )}
+          {(() => {
+            // A finalized draft whose trade is NOT a journal row must
+            // say so on its own history row — never vanish silently.
+            const undisp = d.status === "finalized"
+              ? drData.undisplayedFinalized.find((u) => u.draftKey === d.draftKey)
+              : undefined;
+            if (!undisp) return null;
+            return (
+              <span style={{
+                fontSize: 10, padding: "2px 8px", borderRadius: 10, fontWeight: 600,
+                background: "rgba(251,191,36,0.12)", border: "1px solid rgba(251,191,36,0.45)", color: "#fbbf24",
+              }}>
+                {undisp.reason === "pre_reset"
+                  ? "Not in journal — session was reset after finalizing"
+                  : "Not in journal — couldn't be rebuilt from the recorded events"}
+              </span>
+            );
+          })()}
         </span>
         <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <span className="num" style={{ fontWeight: 700, color: d.realizedPnl > 0 ? "var(--emerald-bright)" : d.realizedPnl < 0 ? "#f6465d" : "var(--muted)" }}>{formatSigned(d.realizedPnl)}</span>
@@ -1399,7 +1470,12 @@ export default function JournalPage() {
               {finalizedDrafts.length > 0 && (
                 <details style={{ marginTop: 10 }}>
                   <summary style={{ cursor: "pointer", fontSize: 13, fontWeight: 600, padding: "6px 0" }}>
-                    Finalized ({finalizedDrafts.length}) <span className="hint" style={{ fontWeight: 400 }}>— already in the journal</span>
+                    Finalized ({finalizedDrafts.length}) <span className="hint" style={{ fontWeight: 400 }}>
+                      — in the journal{(() => {
+                        const n = finalizedDrafts.filter((d) => drData.undisplayedFinalized.some((u) => u.draftKey === d.draftKey)).length;
+                        return n > 0 ? `, except ${n} that couldn't be displayed (noted on ${n === 1 ? "its row" : "their rows"} below)` : "";
+                      })()}
+                    </span>
                   </summary>
                   {finalizedDrafts.map((d) => renderDraftRow(d, false))}
                 </details>

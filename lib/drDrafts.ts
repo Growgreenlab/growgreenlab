@@ -540,6 +540,31 @@ export function groupedTradeFromCycle(
       }
     }
   }
+  // The Daily Replay engine is long-only: a cycle can never
+  // legitimately sell more than it bought. Excess sells prove a
+  // buy fill is missing from the stream — the cycle's shape cannot
+  // be trusted, so no row is built from it (the draft-window
+  // fallback applies the same test more strictly).
+  let bq = 0, sq = 0;
+  for (const f of fills) { if (f.side === "buy") bq += f.qty; else sq += f.qty; }
+  if (sq > bq) return null;
+  return assembleCycleTrade(fills, cycle.realizedSum, cycle.cycleIndex, meta);
+}
+
+/**
+ * The shared tail of the pre-completion builders: turn a cycle's
+ * fills (in seq order, sell fills carrying their exit P&L) plus the
+ * cycle's authoritative realized total into a GroupedTrade, using
+ * exactly groupFillsIntoTrades' conventions (qty-weighted average
+ * entry/exit, direction from the larger side). Null when the fills
+ * cannot form a closed trade — never a fabricated row.
+ */
+function assembleCycleTrade(
+  fills: RawFill[],
+  realizedPnl: number,
+  sequence: number,
+  meta: { tradeKey: string; ticker: string; tradeDate: string },
+): GroupedTrade | null {
   if (fills.length === 0) return null;
   let buyQty = 0, buyValue = 0, sellQty = 0, sellValue = 0;
   for (const f of fills) {
@@ -554,14 +579,14 @@ export function groupedTradeFromCycle(
     ticker: meta.ticker,
     tradeDate: meta.tradeDate,
     source: "daily_replay",
-    sequence: cycle.cycleIndex,
+    sequence,
     direction,
     entryPrice: direction === "long" ? buyValue / buyQty : sellValue / sellQty,
     exitPrice: direction === "long" ? sellValue / sellQty : buyValue / buyQty,
     qty: direction === "long" ? buyQty : sellQty,
     entryTime: fills[0].candle_time,
     exitTime: fills[fills.length - 1].candle_time,
-    realizedPnl: cycle.realizedSum,
+    realizedPnl,
     fees: 0,
     fills,
     rMultiple: null, // overlaid from recorded evidence by the caller
@@ -594,4 +619,285 @@ export function buildPreCompletionTrade(
   if (ff.payload.qty !== draft.firstFillQty) return null;
   if (Math.abs(cycle.realizedSum - draft.realizedPnl) > ANCHOR_PNL_EPS) return null;
   return groupedTradeFromCycle(cycle, { tradeKey: draft.draftKey, ticker: meta.ticker, tradeDate: meta.tradeDate });
+}
+
+/**
+ * Fallback pre-completion builder over the draft's OWN recorded
+ * event window — used only when the cycle-based build above fails.
+ *
+ * Why this exists: the journal reads the SERVER copy of the event
+ * stream, and that copy can be incomplete (the recorder's flush can
+ * drop an event from a close burst; a capped fetch can truncate the
+ * stream). One lost `position_closed` makes the cycle read "open"
+ * and one lost closing `order_filled` leaves the cycle sell-less —
+ * the trade then vanishes even though the draft row, written from
+ * the live engine at the close, is complete and self-consistent.
+ *
+ * The draft row records the exact seq window of its cycle
+ * (event_first_seq .. event_last_seq: first entry fill through
+ * position_closed) plus its anchors. Within that window the
+ * recorder's records are DUAL: every exit exists both as an
+ * `order_filled` (qty/price) and as the `partial_exit` /
+ * `position_closed` event emitted immediately after it (qty/price/
+ * realizedPnl, built by the recorder from that same fill). This
+ * builder cross-verifies the three records against each other:
+ *
+ *   - the window's first order_filled must be the draft's recorded
+ *     first fill (candle / price / qty, exact anchors);
+ *   - buy quantity must equal exit quantity (position fully closed
+ *     inside the window);
+ *   - realized P&L is the DRAFT's recorded total; exit events that
+ *     survive must not contradict it. A lost exit event leaves its
+ *     fill unpaired — the residual (draft total minus the paired
+ *     exits' realized sum) is exactly that exit's recorded P&L and
+ *     is carried by the unpaired sell fill, so per-fill figures
+ *     still sum to the recorded total. A lost order_filled is
+ *     reconstituted from its surviving exit event (same qty/price/
+ *     realized the recorder derived from the fill).
+ *
+ * Anything that cannot be cross-verified this way (entry fill
+ * lost, quantities unbalanced, two surviving records contradicting
+ * the draft's total) returns null — withheld, never fabricated.
+ */
+export function groupedTradeFromDraftWindow(
+  draft: DrDraftRow,
+  events: DrEvent[],
+  meta: { ticker: string; tradeDate: string },
+): GroupedTrade | null {
+  if (draft.status !== "finalized") return null;
+  if (!(draft.eventFirstSeq > 0) || draft.eventLastSeq < draft.eventFirstSeq) return null;
+  const win = events
+    .filter((e) => e.seq >= draft.eventFirstSeq && e.seq <= draft.eventLastSeq)
+    .sort((a, b) => a.seq - b.seq);
+  if (win.length === 0) return null;
+
+  // Gate 1: the window's first fill must be the draft's first fill.
+  const firstFillEvent = win.find((e) => e.type === "order_filled");
+  if (!firstFillEvent || firstFillEvent.payload.side !== "buy") return null;
+  const ffCandle = typeof firstFillEvent.payload.candleIndex === "number"
+    ? firstFillEvent.payload.candleIndex
+    : firstFillEvent.marketIdx;
+  if (ffCandle !== draft.firstFillCandleIndex) return null;
+  if (typeof firstFillEvent.payload.price !== "number"
+    || Math.abs(firstFillEvent.payload.price - draft.firstFillPrice) > ANCHOR_PRICE_EPS) return null;
+  if (firstFillEvent.payload.qty !== draft.firstFillQty) return null;
+
+  const fills: RawFill[] = [];
+  // Sell fills whose exit event has not been seen yet, in seq order
+  // (a lost exit event leaves its fill queued here; pairing with a
+  // surviving exit event is by the qty the exit event records).
+  const unpairedSells: RawFill[] = [];
+  let assignedRealized = 0;
+  const makeFill = (
+    side: "buy" | "sell", qty: number, price: number, candleIndex: number, e: DrEvent,
+  ): RawFill => {
+    const candleTime = e.marketTs != null ? new Date(e.marketTs).toISOString() : null;
+    return {
+      id: `${draft.draftKey}:f${e.seq}`,
+      session_id: "",
+      side,
+      qty,
+      price,
+      candle_index: candleIndex,
+      candle_time: candleTime,
+      realized_pnl: 0,
+      created_at: candleTime ?? new Date(e.wallTs).toISOString(),
+    };
+  };
+  // Sell fills reconstituted from exit events (their own
+  // order_filled record was missing at that point in the walk). If
+  // the real order_filled shows up LATER in the window — a flushed
+  // batch can persist a position_closed ahead of its fill — it
+  // replaces the reconstituted fill instead of duplicating it.
+  const synthesized: RawFill[] = [];
+  for (const e of win) {
+    if (e.type === "order_filled") {
+      const side = e.payload.side === "sell" ? "sell" : "buy";
+      const qty = typeof e.payload.qty === "number" ? e.payload.qty : 0;
+      const price = typeof e.payload.price === "number" ? e.payload.price : 0;
+      if (!(qty > 0) || !(price > 0)) continue;
+      const candleIndex = typeof e.payload.candleIndex === "number" ? e.payload.candleIndex : (e.marketIdx ?? 0);
+      if (side === "sell") {
+        const dupIdx = synthesized.findIndex(
+          (f) => f.qty === qty && Math.abs(f.price - price) <= ANCHOR_PRICE_EPS && f.candle_index === candleIndex,
+        );
+        if (dupIdx >= 0) {
+          const [kept] = synthesized.splice(dupIdx, 1);
+          kept.id = `${draft.draftKey}:f${e.seq}`; // adopt the real fill's identity
+          continue;
+        }
+      }
+      const fill = makeFill(side, qty, price, candleIndex, e);
+      fills.push(fill);
+      if (side === "sell") unpairedSells.push(fill);
+    } else if (e.type === "partial_exit" || e.type === "position_closed") {
+      const realized = typeof e.payload.realizedPnl === "number" ? e.payload.realizedPnl : null;
+      if (realized == null) return null; // exit record too damaged to cross-verify
+      // Correspondence: the exit event records its own fill's qty.
+      // Pair it with the unpaired sell of the same qty — the
+      // earliest for a partial exit (its fill immediately precedes
+      // it), the latest for the closing exit (its fill is the
+      // cycle's final sell). No qty match means this exit's own
+      // fill was lost: reconstitute it from the payload (the
+      // recorder's dual record of that fill) and leave the unpaired
+      // sells to the residual check below.
+      const q = typeof e.payload.qty === "number" ? e.payload.qty : 0;
+      let pairIdx = -1;
+      if (e.type === "position_closed") {
+        for (let i = unpairedSells.length - 1; i >= 0; i--) {
+          if (unpairedSells[i].qty === q) { pairIdx = i; break; }
+        }
+      } else {
+        for (let i = 0; i < unpairedSells.length; i++) {
+          if (unpairedSells[i].qty === q) { pairIdx = i; break; }
+        }
+      }
+      if (pairIdx >= 0) {
+        const [pair] = unpairedSells.splice(pairIdx, 1);
+        pair.realized_pnl = realized;
+        assignedRealized += realized;
+      } else {
+        const qty = q;
+        const price = typeof e.payload.price === "number" ? e.payload.price : 0;
+        if (!(qty > 0) || !(price > 0)) return null;
+        const fill = makeFill("sell", qty, price, e.marketIdx ?? draft.closeFillCandleIndex, e);
+        fill.realized_pnl = realized;
+        assignedRealized += realized;
+        fills.push(fill);
+        synthesized.push(fill);
+      }
+    }
+  }
+
+  // Gate 2: the window must contain a fully closed position.
+  let buyQty = 0, sellQty = 0;
+  for (const f of fills) {
+    if (f.side === "buy") buyQty += f.qty;
+    else sellQty += f.qty;
+  }
+  if (buyQty <= 0 || sellQty !== buyQty) return null;
+
+  // Gate 3: realized consistency with the draft's recorded total.
+  const residual = draft.realizedPnl - assignedRealized;
+  if (Math.abs(residual) > ANCHOR_PNL_EPS) {
+    const carrier = unpairedSells[unpairedSells.length - 1];
+    if (carrier) {
+      // Exit event(s) lost while their fills survive: the residual
+      // is exactly the lost exits' realized P&L (a single unpaired
+      // sell — the common case — makes the split exact, not an
+      // allocation). Per-fill P&L still sums to the recorded total.
+      carrier.realized_pnl += residual;
+    } else {
+      // Surviving records contradict the draft's total — withhold.
+      return null;
+    }
+  }
+  return assembleCycleTrade(fills, draft.realizedPnl, draft.cycleIndex, {
+    tradeKey: draft.draftKey, ticker: meta.ticker, tradeDate: meta.tradeDate,
+  });
+}
+
+/**
+ * Last-resort builder: the finalized DRAFT ROW alone. Proven
+ * necessary by real data (2026-10-18): two of the user's finalized
+ * trades sit on attempts whose persisted event stream is EMPTY —
+ * the recorder's batched flush lost every event on very short
+ * sessions while the awaited draft upsert survived. No stream
+ * reconstruction can produce those rows; the events simply do not
+ * exist server-side.
+ *
+ * This is not fabrication: the draft row is itself the system's
+ * authoritative persisted record of the trade, written at the
+ * close from the live engine (buildDraftPayload throws unless the
+ * cycle is genuinely closed). Everything on the built row is a
+ * recorded value: entry price / qty / candle and close candle from
+ * the draft's anchors, realized P&L from the draft's recorded
+ * total, identity (tradeKey / cycle / attempt) from the draft,
+ * ticker + date from the attempt's dataset row. The exit price is
+ * the unique value implied by those recorded numbers for the
+ * closed position (entry + realized / qty) — exact for the
+ * single-entry/single-exit cycles this fallback exists for (the
+ * proven real-world trigger is very short sessions); for a
+ * multi-fill cycle the row reports the recorded first fill and
+ * the recorded total P&L, the only figures the draft preserves.
+ * What
+ * the draft does NOT record stays honestly absent: no candle
+ * timestamps (entryTime / exitTime null) and no per-fill detail
+ * beyond the anchor entry fill and the implied exit fill; R /
+ * evidence remain null (they derive from events, never invented).
+ *
+ * Gates: finalized status, and the anchors of a genuinely recorded
+ * close (positive first-fill price + qty, a recorded event window,
+ * close candle at or after the entry candle). An anchor-incomplete
+ * draft still returns null — withheld, and surfaced visibly by the
+ * caller.
+ */
+export function groupedTradeFromDraftAnchors(
+  draft: DrDraftRow,
+  meta: { ticker: string; tradeDate: string },
+): GroupedTrade | null {
+  if (draft.status !== "finalized") return null;
+  if (!(draft.firstFillQty > 0) || !(draft.firstFillPrice > 0)) return null;
+  if (!(draft.eventFirstSeq > 0)) return null;
+  if (draft.closeFillCandleIndex < draft.firstFillCandleIndex) return null;
+  const exitPrice = draft.firstFillPrice + draft.realizedPnl / draft.firstFillQty;
+  if (!(exitPrice > 0)) return null;
+  const fills: RawFill[] = [
+    {
+      id: `${draft.draftKey}:fa`,
+      session_id: "",
+      side: "buy",
+      qty: draft.firstFillQty,
+      price: draft.firstFillPrice,
+      candle_index: draft.firstFillCandleIndex,
+      candle_time: null,
+      realized_pnl: 0,
+      created_at: draft.createdAt,
+    },
+    {
+      id: `${draft.draftKey}:fb`,
+      session_id: "",
+      side: "sell",
+      qty: draft.firstFillQty,
+      price: exitPrice,
+      candle_index: draft.closeFillCandleIndex,
+      candle_time: null,
+      realized_pnl: draft.realizedPnl,
+      created_at: draft.createdAt,
+    },
+  ];
+  return assembleCycleTrade(fills, draft.realizedPnl, draft.cycleIndex, {
+    tradeKey: draft.draftKey, ticker: meta.ticker, tradeDate: meta.tradeDate,
+  });
+}
+
+/**
+ * The journal's pre-completion entry point, in fidelity order:
+ * (1) the cycle-based build (exact stream reconstruction,
+ * anchor-verified); (2) the draft-window fallback (cross-verified
+ * dual records inside the draft's own seq window) when the
+ * server-side stream copy lost an event; (3) the draft-anchors
+ * build when the stream is missing entirely or too damaged to
+ * cross-verify — the finalized draft row is the authoritative
+ * record. Null means the draft's own record is incomplete —
+ * withheld, and the caller surfaces it visibly (journal history
+ * note + export hint) rather than letting a finalized trade
+ * vanish silently.
+ */
+export function buildPreCompletionTradeFromEvents(
+  draft: DrDraftRow,
+  events: DrEvent[],
+  meta: { ticker: string; tradeDate: string },
+): GroupedTrade | null {
+  if (draft.status !== "finalized") return null;
+  const { cycles } = splitCyclesByGeneration(events);
+  const cycle = cycles.find(
+    (c) => c.generation === draft.resetGeneration && c.cycleIndex === draft.cycleIndex && c.closed,
+  ) ?? null;
+  if (cycle) {
+    const row = buildPreCompletionTrade(draft, cycle, meta);
+    if (row) return row;
+  }
+  return groupedTradeFromDraftWindow(draft, events, meta)
+    ?? groupedTradeFromDraftAnchors(draft, meta);
 }

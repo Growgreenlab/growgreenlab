@@ -8,11 +8,14 @@
 import {
   buildDraftPayload,
   buildPreCompletionTrade,
+  buildPreCompletionTradeFromEvents,
   computeDrExclusions,
   draftKeyFor,
   draftListCounts,
   draftsForAttempt,
   groupedTradeFromCycle,
+  groupedTradeFromDraftAnchors,
+  groupedTradeFromDraftWindow,
   latestClosedCycle,
   mapDraftRow,
   reconcileDrafts,
@@ -494,6 +497,217 @@ seq = 0;
   const openEvents = [ev("order_filled", { side: "buy", qty: 100, price: 10, candleIndex: 5 }, 5)];
   const oCycle = splitCyclesByGeneration(openEvents).cycles[0];
   eq("16 open cycle builds nothing", groupedTradeFromCycle(oCycle, { tradeKey: "k", ticker: "DEMO", tradeDate: "2026-10-16" }), null);
+}
+
+/* ===== 17. Draft-window fallback (damaged server stream copy) =====
+ * The journal reads the SERVER copy of the event stream; the draft
+ * row was written from the live engine. When the server copy loses
+ * an event from the close burst (recorder flush race / capped
+ * fetch), the cycle-based build fails even though the finalized
+ * draft is complete and self-consistent. The fallback rebuilds the
+ * row from the draft's recorded seq window, cross-verifying the
+ * recorder's dual records (order_filled vs partial_exit /
+ * position_closed) against the draft's anchors and realized total.
+ * Regression coverage for the 2026-10-18 report: "finalized a
+ * trade, journal shows only the older TSLA trade". */
+{
+  const META = { ticker: "DEMO", tradeDate: "2026-10-16" };
+  const fin = draftRow({ status: "finalized", finalizedAt: "2026-10-17T01:00:00Z" });
+
+  // Intact stream: the combined entry point uses the primary path
+  // and produces the identical row.
+  seq = 0;
+  const intact = cleanCycleEvents();
+  const viaCombined = buildPreCompletionTradeFromEvents(fin, intact, META);
+  const viaPrimary = buildPreCompletionTrade(fin, splitCyclesByGeneration(intact).cycles[0], META);
+  check("17 intact stream: combined entry builds the primary row",
+    viaCombined != null && JSON.stringify(viaCombined) === JSON.stringify(viaPrimary));
+
+  // H1: position_closed lost from the server copy. The cycle reads
+  // open (primary withholds); the window still holds both fills and
+  // the draft's recorded total — the row must appear, with the
+  // closing sell carrying the draft's realized P&L.
+  seq = 0;
+  const noClose = cleanCycleEvents().filter((e) => e.type !== "position_closed");
+  eq("17 H1 primary alone withholds (cycle open)",
+    buildPreCompletionTrade(fin, splitCyclesByGeneration(noClose).cycles[0], META), null);
+  const h1 = buildPreCompletionTradeFromEvents(fin, noClose, META);
+  check("17 H1 missing position_closed: row builds from the draft window", h1 != null);
+  eq("17 H1 row values (entry/exit/qty/recorded total)",
+    h1 && [h1.entryPrice, h1.exitPrice, h1.qty, h1.realizedPnl], [10, 11, 100, 100]);
+  eq("17 H1 closing sell carries the recorded realized P&L",
+    h1?.fills.map((f) => [f.side, f.realized_pnl]), [["buy", 0], ["sell", 100]]);
+
+  // H2: the closing order_filled lost; position_closed survives and
+  // reconstitutes the exit fill (qty/price/realized from the exit
+  // event's own record of that fill).
+  seq = 0;
+  const noCloseFill = cleanCycleEvents().filter(
+    (e) => !(e.type === "order_filled" && e.payload.side === "sell"),
+  );
+  const h2 = buildPreCompletionTradeFromEvents(fin, noCloseFill, META);
+  check("17 H2 missing closing order_filled: row builds", h2 != null);
+  eq("17 H2 reconstituted exit fill (qty/price/candle/realized)",
+    h2?.fills.map((f) => [f.side, f.qty, f.price, f.candle_index, f.realized_pnl]),
+    [["buy", 100, 10, 5, 0], ["sell", 100, 11, 9, 100]]);
+  check("17 H2 totals match the intact row",
+    h2 != null && h2.realizedPnl === 100 && h2.exitPrice === 11 && h2.qty === 100);
+
+  // A middle partial_exit lost: its fill stays unpaired and carries
+  // exactly its own realized P&L as the residual.
+  seq = 0;
+  const partialStream = [
+    ev("order_filled", { side: "buy", qty: 100, price: 10, candleIndex: 5 }, 5),
+    ev("order_filled", { side: "sell", qty: 60, price: 11, candleIndex: 7 }, 7),
+    ev("partial_exit", { qty: 60, price: 11, realizedPnl: 60, sessionRealized: 60 }, 7),
+    ev("order_filled", { side: "sell", qty: 40, price: 12, candleIndex: 9 }, 9),
+    ev("position_closed", { qty: 40, price: 12, realizedPnl: 80, sessionRealized: 140 }, 9),
+  ];
+  const pDraft = draftRow({
+    status: "finalized", realizedPnl: 140, closeFillCandleIndex: 9,
+    eventFirstSeq: 1, eventLastSeq: 5,
+  });
+  const noPartial = partialStream.filter((e) => e.type !== "partial_exit");
+  const mp = buildPreCompletionTradeFromEvents(pDraft, noPartial, META);
+  check("17 missing partial_exit: row builds", mp != null);
+  eq("17 missing partial_exit: unpaired sell carries its exact realized (60); total recorded (140)",
+    mp && [mp.fills.map((f) => f.realized_pnl), mp.realizedPnl], [[0, 60, 80], 140]);
+
+  // Entry fill lost: the window builder cannot cross-verify
+  // (its first fill is the sell) and withholds; the combined entry
+  // point then falls to the draft-anchors build (tier 3), whose
+  // figures are the draft's own recorded values.
+  seq = 0;
+  const noEntry = cleanCycleEvents().filter(
+    (e) => !(e.type === "order_filled" && e.payload.side === "buy"),
+  );
+  eq("17 entry fill lost: window builder withholds", groupedTradeFromDraftWindow(fin, noEntry, META), null);
+  const t3a = buildPreCompletionTradeFromEvents(fin, noEntry, META);
+  eq("17 entry fill lost: anchors build carries the draft's recorded values",
+    t3a && [t3a.entryPrice, t3a.exitPrice, t3a.qty, t3a.realizedPnl], [10, 11, 100, 100]);
+
+  // Surviving records contradict the draft's total (exit events sum
+  // to 100, draft says 140, every sell paired): the window builder
+  // withholds (its two records disagree); tier 3 trusts the draft
+  // row — the record written from the live engine — over the lossy
+  // stream copy.
+  seq = 0;
+  const contraDraft = draftRow({ status: "finalized", realizedPnl: 140 });
+  eq("17 contradictory realized total: window builder withholds",
+    groupedTradeFromDraftWindow(contraDraft, cleanCycleEvents(), META), null);
+  const t3b = buildPreCompletionTradeFromEvents(contraDraft, cleanCycleEvents(), META);
+  check("17 contradictory total: anchors build uses the DRAFT's recorded total (140)",
+    t3b != null && t3b.realizedPnl === 140);
+
+  // Unbalanced window (an add's buy lost -> sells exceed buys):
+  // window builder withholds; tier 3 reports the recorded first
+  // fill + recorded total.
+  seq = 0;
+  const addStream = [
+    ev("order_filled", { side: "buy", qty: 100, price: 10, candleIndex: 5 }, 5),
+    ev("order_filled", { side: "buy", qty: 50, price: 10, candleIndex: 6 }, 6),
+    ev("order_filled", { side: "sell", qty: 150, price: 11, candleIndex: 9 }, 9),
+    ev("position_closed", { qty: 150, price: 11, realizedPnl: 150, sessionRealized: 150 }, 9),
+  ];
+  const addDraft = draftRow({
+    status: "finalized", realizedPnl: 150, closeFillCandleIndex: 9, eventFirstSeq: 1, eventLastSeq: 4,
+  });
+  const noAdd = addStream.filter((e, i) => i !== 1);
+  eq("17 unbalanced window (lost add fill): window builder withholds",
+    groupedTradeFromDraftWindow(addDraft, noAdd, META), null);
+  check("17 intact add stream builds via primary", buildPreCompletionTradeFromEvents(addDraft, addStream, META) != null);
+
+  // Degenerate drafts: no recorded window / unfinalized.
+  eq("17 zero seq window: window builder withholds",
+    groupedTradeFromDraftWindow(draftRow({ status: "finalized", eventFirstSeq: 0, eventLastSeq: 0 }), cleanCycleEvents(), META), null);
+  eq("17 unfinalized draft: fallback builds nothing",
+    buildPreCompletionTradeFromEvents(draftRow({}), noClose, META), null);
+}
+
+/* ===== 18. Draft-anchors build (stream missing entirely) =====
+ * Proven real-world shape (2026-10-18 DB pull): finalized drafts
+ * on attempts with ZERO persisted events — the recorder's batched
+ * flush lost every event on very short sessions while the awaited
+ * draft upsert survived. The finalized draft row is the
+ * authoritative record; the row is built from its anchors alone. */
+{
+  const META = { ticker: "AAPL", tradeDate: "2026-10-16" };
+
+  // Mode A: no events at all. Recorded values only: entry 10,
+  // qty 100, close candle 9, realized +100 -> implied exit 11.
+  const a = groupedTradeFromDraftAnchors(draftRow({ status: "finalized" }), META);
+  check("18 zero events: anchors build produces the row", a != null);
+  eq("18 anchors row values (recorded entry/qty/total, implied exit)",
+    a && [a.entryPrice, a.exitPrice, a.qty, a.realizedPnl, a.direction], [10, 11, 100, 100, "long"]);
+  eq("18 anchors fills = recorded entry fill + implied exit fill",
+    a?.fills.map((f) => [f.side, f.qty, f.price, f.candle_index, f.realized_pnl]),
+    [["buy", 100, 10, 5, 0], ["sell", 100, 11, 9, 100]]);
+  check("18 anchors row: no invented candle times", a != null && a.entryTime === null && a.exitTime === null);
+  eq("18 combined entry point reaches tier 3 on an empty stream",
+    buildPreCompletionTradeFromEvents(draftRow({ status: "finalized" }), [], META)?.realizedPnl, 100);
+
+  // Same-candle entry+exit (the user's +22.10: candles #98 -> #98).
+  const same = groupedTradeFromDraftAnchors(
+    draftRow({ status: "finalized", firstFillCandleIndex: 98, closeFillCandleIndex: 98, firstFillPrice: 10, firstFillQty: 100, realizedPnl: 22.1 }),
+    META,
+  );
+  check("18 same-candle close builds; exit implied by the recorded total",
+    same != null && Math.abs(same.exitPrice - 10.221) < 1e-9 && same.realizedPnl === 22.1);
+
+  // Losing trade: exit implied below entry, direction stays long.
+  const loss = groupedTradeFromDraftAnchors(
+    draftRow({ status: "finalized", firstFillPrice: 12.5, firstFillQty: 200, realizedPnl: -19.78, closeFillCandleIndex: 9 }),
+    META,
+  );
+  check("18 losing anchors trade builds (exit 12.4011, long)",
+    loss != null && Math.abs(loss.exitPrice - 12.4011) < 1e-9 && loss.direction === "long" && loss.realizedPnl === -19.78);
+
+  // Incomplete anchors still withhold — nothing is invented.
+  eq("18 zero first-fill qty: withheld", groupedTradeFromDraftAnchors(draftRow({ status: "finalized", firstFillQty: 0 }), META), null);
+  eq("18 zero first-fill price: withheld", groupedTradeFromDraftAnchors(draftRow({ status: "finalized", firstFillPrice: 0 }), META), null);
+  eq("18 no recorded event window: withheld",
+    groupedTradeFromDraftAnchors(draftRow({ status: "finalized", eventFirstSeq: 0, eventLastSeq: 0 }), META), null);
+  eq("18 close candle before entry candle: withheld",
+    groupedTradeFromDraftAnchors(draftRow({ status: "finalized", closeFillCandleIndex: 2 }), META), null);
+  eq("18 unfinalized draft: anchors build nothing",
+    groupedTradeFromDraftAnchors(draftRow({}), META), null);
+
+  // Mode B mirror (the user's TSLA attempt): two finalized drafts,
+  // cycle 1 intact, cycle 2's position_closed lost from the stream.
+  seq = 0;
+  const twoCycle = [
+    ev("order_filled", { side: "buy", qty: 100, price: 10, candleIndex: 5 }, 5),
+    ev("order_filled", { side: "sell", qty: 100, price: 9.94, candleIndex: 9 }, 9),
+    ev("position_closed", { qty: 100, price: 9.94, realizedPnl: -6, sessionRealized: -6 }, 9),
+    ev("order_filled", { side: "buy", qty: 50, price: 20, candleIndex: 12 }, 12),
+    ev("order_filled", { side: "sell", qty: 50, price: 19.6, candleIndex: 15 }, 15),
+    // cycle 2's position_closed (seq 6) lost from the server copy
+  ];
+  const d1 = draftRow({ status: "finalized", realizedPnl: -6, eventFirstSeq: 1, eventLastSeq: 3 });
+  const d2 = draftRow({
+    status: "finalized", cycleIndex: 2, draftKey: draftKeyFor(ATT, 0, 2),
+    firstFillCandleIndex: 12, firstFillPrice: 20, firstFillQty: 50,
+    closeFillCandleIndex: 15, realizedPnl: -20, eventFirstSeq: 4, eventLastSeq: 6,
+  });
+  const r1 = buildPreCompletionTradeFromEvents(d1, twoCycle, { ticker: "TSLA", tradeDate: "2026-10-16" });
+  const r2 = buildPreCompletionTradeFromEvents(d2, twoCycle, { ticker: "TSLA", tradeDate: "2026-10-16" });
+  check("18 two-cycle attempt: cycle 1 row builds (-6)", r1 != null && r1.realizedPnl === -6);
+  check("18 two-cycle attempt: cycle 2 row builds despite the lost close (-20, draft's recorded total)",
+    r2 != null && r2.realizedPnl === -20 && r2.entryPrice === 20 && r2.qty === 50);
+
+  // Reversed pair inside the window (position_closed persisted
+  // ahead of its order_filled): the window builder reconstitutes
+  // the exit from the close event, then the real fill replaces the
+  // reconstituted one — no duplicate sell, exact figures.
+  seq = 0;
+  const revBuy = ev("order_filled", { side: "buy", qty: 100, price: 10, candleIndex: 5 }, 5);
+  const revClosed = ev("position_closed", { qty: 100, price: 11, realizedPnl: 100, sessionRealized: 100 }, 9);
+  const revSell = ev("order_filled", { side: "sell", qty: 100, price: 11, candleIndex: 9 }, 9);
+  const reversed = [revBuy, revSell, revClosed]; // array order scrambled; seqs: buy 1, closed 2, sell 3
+  const revDraft = draftRow({ status: "finalized", eventFirstSeq: 1, eventLastSeq: 3 });
+  const revRow = groupedTradeFromDraftWindow(revDraft, reversed, META);
+  check("18 reversed pair: window builds one row, two fills, recorded total",
+    revRow != null && revRow.fills.length === 2 && revRow.realizedPnl === 100 && revRow.exitPrice === 11);
 }
 
 console.log(`=== drDrafts RESULT: ${passed} passed, ${failed} failed ===`);
