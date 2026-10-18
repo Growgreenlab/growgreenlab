@@ -27,6 +27,9 @@
 --     added in the guarded DO block below, not inline: schema.sql's
 --     scratch baseline creates journal_trade_meta before the
 --     strategies table exists, so an inline FK would fail there.
+--   strategies_annotation_unique        partial unique index —
+--     database-level duplicate protection for annotation
+--     materialization; see the index block at the end of this file.
 --
 -- RLS is unchanged: journal_trade_meta and strategies already
 -- restrict rows to their owner, and the new columns inherit the
@@ -48,3 +51,23 @@ begin
     foreign key (strategy_id) references public.strategies(id) on delete set null;
 exception when duplicate_object then null;
 end $$;
+
+-- Duplicate protection for strategy materialization (safety-audit
+-- remediation, check 3a): the app's (family, lower(name)) guard in
+-- lib/strategyClassification.ts runs over a client-held snapshot, so
+-- two concurrent saves could both miss it and insert the same
+-- strategy twice. This partial unique index mirrors the guard
+-- EXACTLY at the database level: annotation-materialized strategies
+-- always carry a classification_family and must be unique per
+-- (user_id, classification_family, lower(name)). Rows created the
+-- Daily Replay way have classification_family NULL and stay outside
+-- the index (Postgres also treats NULLs as distinct), so they can
+-- neither collide nor block creation. At apply time every existing
+-- strategies row has classification_family NULL (the column is
+-- added by this same file), so creating this index cannot fail on
+-- existing data. 'if not exists' keeps the file re-runnable; the
+-- app resolves a unique-violation on insert by re-fetching and
+-- reusing the winning row (resolveTradedStrategyId).
+create unique index if not exists strategies_annotation_unique
+  on public.strategies (user_id, classification_family, lower(name))
+  where classification_family is not null;

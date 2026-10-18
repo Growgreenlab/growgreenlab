@@ -17,6 +17,7 @@ import {
   resolveStrategyFamily,
   switchClassification,
   findMaterializedStrategy,
+  isUniqueViolation,
   probeStrategyAnnotationSupport,
   type ClassificationFamily,
 } from "./strategyClassification";
@@ -323,6 +324,28 @@ async function main() {
   check(
     "findMaterializedStrategy unknown name -> undefined",
     findMaterializedStrategy(entries, "vwap", "Nope") === undefined,
+  );
+
+  // --- isUniqueViolation (unique-index race detection) ---------------------------------------------------------
+  check(
+    "isUniqueViolation: SQLSTATE code 23505",
+    isUniqueViolation({ code: "23505", message: "anything" }) === true,
+  );
+  check(
+    "isUniqueViolation: duplicate-key message without a code",
+    isUniqueViolation({ message: 'duplicate key value violates unique constraint "strategies_annotation_unique"' }) === true,
+  );
+  check(
+    "isUniqueViolation: index named in details only",
+    isUniqueViolation({ message: "insert failed", details: "constraint strategies_annotation_unique" }) === true,
+  );
+  check(
+    "isUniqueViolation: other SQLSTATE is not a violation",
+    isUniqueViolation({ code: "42501", message: "permission denied" }) === false,
+  );
+  check(
+    "isUniqueViolation: null / non-object errors are not violations",
+    isUniqueViolation(null) === false && isUniqueViolation("23505") === false && isUniqueViolation(undefined) === false,
   );
 
   // --- probeStrategyAnnotationSupport --------------------------------------------------------------------------------

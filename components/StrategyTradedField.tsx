@@ -29,7 +29,7 @@
  */
 import { useMemo, useState } from "react";
 import type { createClient } from "../lib/supabaseClient";
-import type { Strategy, StrategyVersion } from "../lib/strategies";
+import { mapStrategyRow, type Strategy, type StrategyVersion } from "../lib/strategies";
 import {
   CLASSIFICATION_FAMILIES,
   STRATEGY_PRESETS,
@@ -38,6 +38,7 @@ import {
   familyOfClassificationSlug,
   findMaterializedStrategy,
   isClassificationFamily,
+  isUniqueViolation,
   resolveStrategyFamily,
   switchClassification,
   type ClassificationFamily,
@@ -122,13 +123,28 @@ export function tradedValueFromMeta(
   };
 }
 
+/** Fresh copy of the user's strategy registry, mapped the same way
+ *  the hosts load it. Used only on the unique-violation recovery
+ *  path, where the client-held snapshot is known to be stale. */
+async function refetchStrategies(
+  client: ReturnType<typeof createClient>,
+): Promise<Strategy[]> {
+  const { data, error } = await client.from("strategies").select("*").limit(200);
+  if (error || !Array.isArray(data)) return [];
+  return (data as Record<string, unknown>[]).map((r) => mapStrategyRow(r));
+}
+
 /**
  * Resolve the form value to the strategies.id to persist, creating
  * the registry row for a preset/custom selection when none exists
  * yet. Idempotent: the (family, lower(name)) guard runs first, so a
- * retried save reuses the row it created last time. Returns null
- * when nothing is selected. Throws on persistence failure — callers
- * surface it as a save error and write nothing.
+ * retried save reuses the row it created last time. Race-safe: if a
+ * concurrent save wins the insert, the database's partial unique
+ * index (strategies_annotation_unique) rejects ours with a
+ * unique-violation — the row now exists, so we re-fetch and resolve
+ * to it instead of failing the save or retrying the insert blindly.
+ * Returns null when nothing is selected. Throws on persistence
+ * failure — callers surface it as a save error and write nothing.
  */
 export async function resolveTradedStrategyId(
   client: ReturnType<typeof createClient>,
@@ -159,7 +175,19 @@ export async function resolveTradedStrategyId(
     .insert({ user_id: userId, name, classification_family: family })
     .select("id")
     .single();
-  if (error) throw new Error(error.message);
+  if (error) {
+    if (isUniqueViolation(error)) {
+      // A concurrent save materialized the same (family, lower(name))
+      // row first and the unique index rejected ours. The row now
+      // exists: resolve to it from a fresh fetch and continue the
+      // save — never a spurious failure, never a blind re-insert.
+      const fresh = await refetchStrategies(client);
+      const freshEntries = fresh.map((s) => ({ ...s, family: familyOfStrategy(s, versions) }));
+      const winner = findMaterializedStrategy(freshEntries, family, name);
+      if (winner) return winner.id;
+    }
+    throw new Error(error.message);
+  }
   return (data as { id: string }).id;
 }
 

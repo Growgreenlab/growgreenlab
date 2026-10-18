@@ -308,6 +308,32 @@ export function findMaterializedStrategy<
   );
 }
 
+/** The partial unique index (migration
+ *  journal-strategy-annotation-v1.sql) that enforces the
+ *  findMaterializedStrategy guard at the database level:
+ *  (user_id, classification_family, lower(name)) unique wherever
+ *  classification_family is recorded. */
+export const STRATEGIES_ANNOTATION_UNIQUE_INDEX = "strategies_annotation_unique";
+
+/**
+ * True when a persistence error is a unique-violation (Postgres
+ * SQLSTATE 23505). PostgREST surfaces the SQLSTATE in the error's
+ * `code`; the message/details fallback covers clients that flatten
+ * it into text. Used by resolveTradedStrategyId: a violation from
+ * strategies_annotation_unique means a concurrent save won the
+ * materialization race — the row exists and the save should
+ * resolve to it, not fail.
+ */
+export function isUniqueViolation(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const e = error as { code?: unknown; message?: unknown; details?: unknown };
+  if (e.code === "23505") return true;
+  const text = [e.message, e.details]
+    .filter((v): v is string => typeof v === "string")
+    .join(" ");
+  return text.includes("duplicate key") || text.includes(STRATEGIES_ANNOTATION_UNIQUE_INDEX);
+}
+
 interface ProbeQuery {
   limit(n: number): Promise<{ error: unknown }>;
 }
