@@ -635,6 +635,9 @@ function ReplayPageInner() {
   const [drPremarketDismissedKey, setDrPremarketDismissedKey] =
     useState<string | null>(null);
   const [drConfirm, setDrConfirm] = useState(false);
+  /** "Complete session now" confirmation (early completion): shown
+   *  from the DR status banner while an attempt is active. */
+  const [drCompleteConfirm, setDrCompleteConfirm] = useState(false);
   const [drBusy, setDrBusy] = useState(false);
   const [drBuffering, setDrBuffering] = useState(false);
   const [drError, setDrError] = useState<string | null>(null);
@@ -1183,6 +1186,7 @@ function ReplayPageInner() {
     setDrInfo(null);
     setDrFinal(null);
     setDrSaveMsg(null);
+    setDrCompleteConfirm(false);
     setDrError(null);
     setDrPhase("off");
     engineRef.current = null;
@@ -2244,6 +2248,29 @@ function ReplayPageInner() {
     await flushDrEvents();
   }, []);
 
+  /* User-triggered EARLY completion: end the session at the CURRENT
+   * candle instead of waiting for the end of the feed, through the
+   * exact same completion path as the end-of-feed effect below —
+   * same drCompletedRef guard (no double completion; the RPC is
+   * itself idempotent), same fills sync, same working-order
+   * settlement, same post-completion draft reconciliation. The saved
+   * session holds only the candles revealed so far; the remaining
+   * candles stay sealed on the server and unseen. Playback stops
+   * first so no further candle is released while the completion
+   * payload is built, and a one-candle release already in flight is
+   * allowed to land so the saved set is the feed's settled prefix. */
+  const requestCompleteDrNow = useCallback(async () => {
+    if (drPhaseRef.current !== "active" || drCompletedRef.current) return;
+    drCompletedRef.current = true;
+    setDrCompleteConfirm(false);
+    stopTimer();
+    setPlaying(false);
+    for (let i = 0; i < 100 && drAdvancingRef.current; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    await completeDailyReplay();
+  }, [completeDailyReplay, stopTimer]);
+
   // Fires when the play/step flow reports the end. In Daily Replay that
   // only counts once the feed is finished (every candle released); at
   // the merely-held end it is a buffering state, not completion.
@@ -3262,9 +3289,69 @@ function ReplayPageInner() {
               {drFeedRef.current?.lastError && (
                 <span style={{ color: "#fbbf24" }}>{drFeedRef.current.lastError}</span>
               )}
-              <button className="btn" style={{ marginLeft: "auto" }} onClick={exitDailyReplay}>
+              {drPhase === "active" && (
+                <button
+                  className="btn primary"
+                  style={{ marginLeft: "auto" }}
+                  onClick={() => setDrCompleteConfirm(true)}
+                  disabled={drBuffering}
+                  title="End this session at the current candle and save its closed trades to your journal now"
+                >
+                  Complete session now
+                </button>
+              )}
+              <button
+                className="btn"
+                style={drPhase === "active" ? undefined : { marginLeft: "auto" }}
+                onClick={exitDailyReplay}
+              >
                 Exit Daily Replay
               </button>
+            </div>
+          )}
+          {isDr && drInfo && drPhase === "active" && drCompleteConfirm && (
+            <div
+              style={{
+                marginBottom: 8, padding: "12px 14px",
+                background: "rgba(16,185,129,0.06)",
+                border: "1px solid rgba(16,185,129,0.35)", borderRadius: 8,
+                fontSize: 13.5,
+              }}
+            >
+              <b>Complete this session now?</b>
+              <div style={{ margin: "8px 0", lineHeight: 1.7 }}>
+                <div>
+                  The session ends at the current candle — candle{" "}
+                  <b>
+                    {Math.min(eng.index + 1, drInfo.total)} of {drInfo.total}
+                  </b>
+                  . The remaining candles stay sealed and unseen.
+                </div>
+                <div>Closed trades are saved to your journal now.</div>
+                <div>Any working orders are cancelled.</div>
+                {eng.positionQty > 0 && (
+                  <div>
+                    You still have an open position (
+                    <b>{eng.positionQty} shares</b>) — it will be saved as
+                    an open trade, the same as reaching the end of the day.
+                  </div>
+                )}
+                <div style={{ color: "var(--muted)" }}>
+                  This cannot be undone — the attempt is finished and
+                  cannot be resumed.
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  className="btn primary"
+                  onClick={() => { void requestCompleteDrNow(); }}
+                >
+                  Complete session now
+                </button>
+                <button className="btn" onClick={() => setDrCompleteConfirm(false)}>
+                  Keep replaying
+                </button>
+              </div>
             </div>
           )}
           {isDr && drError && (
