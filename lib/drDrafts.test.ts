@@ -9,6 +9,7 @@ import {
   buildDraftPayload,
   computeDrExclusions,
   draftKeyFor,
+  draftListCounts,
   draftsForAttempt,
   latestClosedCycle,
   mapDraftRow,
@@ -386,6 +387,43 @@ seq = 0;
   eq("14 representative member round-trips through mapDraftRow", row.autoCapture, selCapture);
   eq("14 representative path readable for resolution",
     (row.autoCapture.representative as { path?: string }).path, "u-9/dr_att_g0_c1/auto-exit-c10.png");
+}
+
+/* ===== 15. Draft list counts: header/chip total must equal the list =====
+ * Regression for the reported mismatch: the drafts card lists EVERY
+ * draft row (finalized included), but the header and the source chip
+ * counted only status="draft" — one finalized draft rendered as
+ * "0 drafts" above a list of one. draftListCounts is the single
+ * aggregation the card header and chip both read: total is ALWAYS the
+ * list length; the unfinalized remainder is reported separately as
+ * toReview, never as the headline count. */
+{
+  // The exact reported scenario: one finalized draft, nothing pending.
+  const only = [draftRow({ status: "finalized", finalizedSessionId: SID, finalizedTradeKey: `${SID}:1`, finalizedAt: "2026-10-17T01:00:00Z" })];
+  const c1 = draftListCounts(only, () => false);
+  eq("15 reported scenario: total = list length (1)", c1.total, 1);
+  eq("15 reported scenario: finalized", c1.finalized, 1);
+  eq("15 reported scenario: toReview", c1.toReview, 0);
+  eq("15 reported scenario: superseded", c1.superseded, 0);
+
+  // Mixed list: 1 open draft, 1 finalized, 1 stored-superseded, and 1
+  // still-"draft" row that DISPLAYS as superseded (pre-reset, finished
+  // attempt) via the caller's predicate.
+  const preReset = draftRow({ id: "d-pre", draftKey: draftKeyFor(ATT, 0, 2), cycleIndex: 2 });
+  const mixed = [
+    draftRow({}),
+    draftRow({ id: "d-fin", status: "finalized" }),
+    draftRow({ id: "d-sup", status: "superseded" }),
+    preReset,
+  ];
+  const c2 = draftListCounts(mixed, (d) => d.status === "superseded" || d.id === "d-pre");
+  eq("15 mixed: total = list length (4)", c2.total, 4);
+  eq("15 mixed: toReview counts only display-drafts", c2.toReview, 1);
+  eq("15 mixed: finalized", c2.finalized, 1);
+  eq("15 mixed: superseded (stored + display)", c2.superseded, 2);
+  eq("15 mixed: buckets partition the total", c2.toReview + c2.finalized + c2.superseded, c2.total);
+
+  eq("15 empty list", draftListCounts([], () => false), { total: 0, toReview: 0, finalized: 0, superseded: 0 });
 }
 
 console.log(`=== drDrafts RESULT: ${passed} passed, ${failed} failed ===`);

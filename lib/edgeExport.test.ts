@@ -15,7 +15,7 @@ import type { DrEvent, DrEventType } from "./dailyReplayEvents";
 import { mapStrategyRow, mapStrategyVersionRow } from "./strategies";
 import {
   buildAnalyticsJson, buildChatGptPrompt, buildDecisionTimelineCsv, buildExportSnapshot, buildReadme,
-  buildScreenshotManifest, buildStrategyJson, buildTradesCsv, CSV_COLUMNS,
+  buildScreenshotManifest, buildStrategyJson, buildTradesCsv, computeDrExportHints, CSV_COLUMNS,
   cumulativePnlSeries, exportIdForTradeKey, resolveExportRange, summarizeScreenshotCoverage,
   tradeLevelDrawdownSeries, ROUNDING_NOTE,
   type ExportDrAttemptInput, type ExportDrEventInput, type ExportMetaInput,
@@ -887,6 +887,80 @@ const RANGE = { start: "2026-10-01", end: "2026-10-31" };
     readmeR.includes("Representative screenshots (additive within schema 2.0)") && readmeR.includes("entry_candle_final"));
   const readmeNoCtx = buildReadme(snapR, covR, manR, { pdfIncluded: false, pdfFailureNote: null, zipFileName: "x.zip" });
   check("readme: chart_context.csv absent from inventory when not included", !readmeNoCtx.split("\n").some((l) => l === "- chart_context.csv"));
+}
+
+/* ============ export hints: finalized-but-invisible DR trades ============
+ * Reproduces the reported scenario (2026-10-17): the user finalized a
+ * Daily Replay draft, then the export panel (Daily source, Daily range
+ * Oct 17) showed "Eligible trades: 0" with no explanation. Two distinct
+ * invisibility causes must be NAMED by computeDrExportHints, never
+ * silently folded into the 0:
+ *  (B) the draft is finalized but its attempt never completed — no
+ *      session exists, so no unified trade exists at all (by design);
+ *  (C) a completed DR trade exists but its tradeDate is outside the
+ *      selected range.
+ * The hints are communication only: eligibility itself never changes. */
+{
+  const H_SESSION = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+  const H_ATT_DONE = "a3333333-3333-4333-8333-333333333333";
+  const H_ATT_PENDING = "a4444444-4444-4444-8444-444444444444";
+  const hGrouped = groupFillsIntoTrades([
+    sf("h1f1", H_SESSION, "buy", 100, 20.00, 97, 0, "2026-10-18T15:37:00.000Z"),
+    sf("h1f2", H_SESSION, "sell", 100, 20.10, 97, 10, "2026-10-18T15:37:30.000Z"),
+  ], { id: H_SESSION, ticker: "HODX", trade_date: "2026-10-18", source: "daily_replay" });
+  const hDoneAttempt: ExportDrAttemptInput = {
+    id: H_ATT_DONE, sessionId: H_SESSION, strategyVersionId: null, status: "finished",
+    startIndex: 90, createdAt: "2026-10-17T20:00:00Z", finishedAt: "2026-10-17T20:30:00Z",
+    ticker: "HODX", tradeDate: "2026-10-18",
+  };
+  const hInput: ExportSnapshotInput = {
+    unified: [{ ...simUnified(hGrouped[0]), sessionSource: "daily_replay", attemptId: H_ATT_DONE }],
+    metas: {},
+    realTrades: [],
+    simTrades: [hGrouped[0]],
+    drAttempts: [hDoneAttempt],
+    // The user's finalized draft: its attempt is NOT in drAttempts and
+    // has NO unified trade — it never completed, so nothing exists to
+    // export. The journal reports it as one pending finalized draft.
+    drPendingFinalizedDrafts: [{ attemptId: H_ATT_PENDING, strategyVersionId: null }],
+  };
+  const oct17 = { start: "2026-10-17", end: "2026-10-17" };
+
+  // The reported panel state, reproduced: DR source + Oct 17 → 0.
+  const hSnap0 = buildExportSnapshot(hInput, { range: oct17, mode: "daily", source: "daily_replay" });
+  check("hints repro: reported panel state is eligible 0", hSnap0.counts.total === 0 && hSnap0.counts.dailyReplay === 0);
+  const hHints0 = computeDrExportHints(hInput, { range: oct17, mode: "daily", source: "daily_replay" });
+  check("hints repro: pending finalized draft named (case B)", hHints0.pendingFinalizedDrafts === 1);
+  check("hints repro: out-of-range completed DR trade named (case C)", hHints0.outOfRangeDrTrades === 1);
+
+  // Widening the range includes the completed trade (case C resolved)
+  // but must NOT pretend the pending draft became eligible (case B is
+  // resolved only by finishing the session).
+  const wide = { start: "2026-10-17", end: "2026-10-18" };
+  const hSnap1 = buildExportSnapshot(hInput, { range: wide, mode: "custom", source: "daily_replay" });
+  check("hints: widened range includes the completed DR trade", hSnap1.counts.dailyReplay === 1);
+  const hHints1 = computeDrExportHints(hInput, { range: wide, mode: "custom", source: "daily_replay" });
+  check("hints: widened range clears the range hint", hHints1.outOfRangeDrTrades === 0);
+  check("hints: widened range keeps the pending hint", hHints1.pendingFinalizedDrafts === 1);
+
+  // Source scoping: a Real-Market-only export never shows DR hints.
+  const hHintsReal = computeDrExportHints(hInput, { range: oct17, mode: "daily", source: "real" });
+  check("hints: real-only source suppresses both hints", hHintsReal.pendingFinalizedDrafts === 0 && hHintsReal.outOfRangeDrTrades === 0);
+  // DR trades ride the coarse simulator class + All: hints apply there.
+  const hHintsSim = computeDrExportHints(hInput, { range: oct17, mode: "daily", source: "simulator" });
+  check("hints: simulator source shows both hints", hHintsSim.pendingFinalizedDrafts === 1 && hHintsSim.outOfRangeDrTrades === 1);
+  const hHintsAll = computeDrExportHints(hInput, { range: oct17, mode: "daily", source: "all" });
+  check("hints: all source shows both hints", hHintsAll.pendingFinalizedDrafts === 1 && hHintsAll.outOfRangeDrTrades === 1);
+
+  // Attempt narrowing applies to both hints (panel-only narrowing).
+  const hHintsNarrowPending = computeDrExportHints(hInput, { range: oct17, mode: "daily", source: "daily_replay", attemptId: H_ATT_PENDING });
+  check("hints: attempt narrowing to the pending attempt keeps its hint", hHintsNarrowPending.pendingFinalizedDrafts === 1 && hHintsNarrowPending.outOfRangeDrTrades === 0);
+  const hHintsNarrowDone = computeDrExportHints(hInput, { range: oct17, mode: "daily", source: "daily_replay", attemptId: H_ATT_DONE });
+  check("hints: attempt narrowing to the completed attempt drops the pending hint", hHintsNarrowDone.pendingFinalizedDrafts === 0 && hHintsNarrowDone.outOfRangeDrTrades === 1);
+
+  // Pre-feature inputs (no pending field) and in-range trades: no hints.
+  const hHintsLegacy = computeDrExportHints({ ...hInput, drPendingFinalizedDrafts: undefined }, { range: wide, mode: "custom", source: "daily_replay" });
+  check("hints: absent pending field + in-range trade = no hints", hHintsLegacy.pendingFinalizedDrafts === 0 && hHintsLegacy.outOfRangeDrTrades === 0);
 }
 
 console.log(`edgeExport tests: ${passed} passed, ${failed} failed`);

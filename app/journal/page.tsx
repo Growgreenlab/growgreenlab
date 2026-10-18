@@ -16,7 +16,7 @@ import {
 } from "../../lib/strategies";
 import {
   fetchDraftsForUser, finalizeDraft, supersedeDraft, writeDraftMapping,
-  reconcileDrafts, computeDrExclusions, upsertDraft, type DrDraftRow,
+  reconcileDrafts, computeDrExclusions, draftListCounts, upsertDraft, type DrDraftRow,
 } from "../../lib/drDrafts";
 import { formatSigned } from "../../lib/engine";
 import { representativeSourceLabel, resolveRepresentative } from "../../lib/drRepresentative";
@@ -835,6 +835,11 @@ export default function JournalPage() {
     return { label: "Draft", superseded: false };
   };
 
+  // Drafts card header + source chip read THIS aggregation, so their
+  // total always equals the number of rows the card lists (finalized
+  // drafts included); the still-open remainder is labeled "to review".
+  const drCounts = draftListCounts(drDrafts, (d) => draftDisplayStatus(d).superseded);
+
   if (loading) return <div className="wrap" style={{ padding: 40 }}><p className="hint">Loading journal…</p></div>;
   if (error) return <div className="wrap" style={{ padding: 40 }}><div className="err">{error}</div><p style={{ marginTop: 12 }}><Link href="/replay">← Back to simulator</Link></p></div>;
 
@@ -887,7 +892,8 @@ export default function JournalPage() {
             border: drDraftsView ? "1px solid rgba(167,139,250,0.5)" : "1px solid rgba(255,255,255,0.1)",
             color: drDraftsView ? "#c4b5fd" : "var(--muted)",
           }}>
-          Daily Replay Drafts ({drDrafts.filter((d) => d.status === "draft").length})
+          Daily Replay Drafts ({drCounts.total})
+          {drCounts.toReview > 0 ? ` · ${drCounts.toReview} to review` : ""}
           {excludedCount > 0 ? ` · ${excludedCount} excluded from journal` : ""}
         </button>
       </div>
@@ -910,7 +916,8 @@ export default function JournalPage() {
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
             <h3 style={{ margin: 0 }}>Daily Replay Drafts</h3>
             <span className="hint" style={{ fontSize: 12 }}>
-              {drDrafts.filter((d) => d.status === "draft").length} draft{drDrafts.filter((d) => d.status === "draft").length === 1 ? "" : "s"}
+              {drCounts.total} draft{drCounts.total === 1 ? "" : "s"}
+              {drCounts.toReview > 0 ? ` · ${drCounts.toReview} to review` : ""}
               {excludedCount > 0 ? ` · ${excludedCount} trade${excludedCount === 1 ? "" : "s"} excluded from the journal until finalized` : ""}
             </span>
           </div>
@@ -965,6 +972,16 @@ export default function JournalPage() {
         strategies: drData.strategies,
         strategyVersions: drData.strategyVersions,
         drDraftKeys: new Map(drDrafts.filter((d) => d.finalizedTradeKey).map((d) => [d.finalizedTradeKey!, { draftKey: d.draftKey, autoCapture: d.autoCapture }])),
+        // Finalized drafts whose attempt never completed (no session):
+        // invisible in the journal + export by design — the export
+        // panel names the count + remedy instead of a silent 0.
+        drPendingFinalizedDrafts: drDrafts
+          .filter((d) => d.status === "finalized")
+          .filter((d) => !(drData.attempts.find((a) => a.id === d.attemptId)?.sessionId ?? null))
+          .map((d) => ({
+            attemptId: d.attemptId,
+            strategyVersionId: drData.attempts.find((a) => a.id === d.attemptId)?.strategyVersionId ?? null,
+          })),
       }} />}
 
       {activeDraft && (

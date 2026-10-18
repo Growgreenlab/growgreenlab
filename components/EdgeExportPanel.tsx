@@ -13,7 +13,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createClient, isSupabaseConfigured } from "../lib/supabaseClient";
 import {
-  buildExportSnapshot, formatRangeText, resolveExportRange, sourceLabel, todayLocalStr,
+  buildExportSnapshot, computeDrExportHints, formatRangeText, resolveExportRange, sourceLabel, todayLocalStr,
   type ExportPeriodMode, type ExportSnapshot, type ExportSnapshotInput, type ExportSource,
 } from "../lib/edgeExport";
 
@@ -61,6 +61,20 @@ export default function EdgeExportPanel({ input }: { input: ExportSnapshotInput 
   const snapshot: ExportSnapshot | null = useMemo(() => {
     if (!rangeResult.range) return null;
     return buildExportSnapshot(input, {
+      range: rangeResult.range, mode, source,
+      strategyId: strategySel || null,
+      strategyVersionId: versionSel || null,
+      attemptId: attemptSel || null,
+    });
+  }, [input, rangeResult.range, mode, source, strategySel, versionSel, attemptSel]);
+
+  // Daily Replay trades the user knows exist but this selection cannot
+  // include — named with their remedy instead of a silent "0 eligible":
+  // finalized drafts on uncompleted attempts, and completed trades
+  // outside the selected range. Communication only (lib/edgeExport.ts).
+  const drHints = useMemo(() => {
+    if (!rangeResult.range) return null;
+    return computeDrExportHints(input, {
       range: rangeResult.range, mode, source,
       strategyId: strategySel || null,
       strategyVersionId: versionSel || null,
@@ -261,6 +275,17 @@ export default function EdgeExportPanel({ input }: { input: ExportSnapshotInput 
             Screenshots: {!includeScreenshots ? "off" : realInRange === 0 ? "none (no eligible trades)" : shotInfo.state === "loading" ? "checking…" : shotInfo.state === "done" ? `${shotInfo.files} file${shotInfo.files === 1 ? "" : "s"} across ${shotInfo.tradesWith} trade${shotInfo.tradesWith === 1 ? "" : "s"}` : shotInfo.state === "skipped" ? `checked when you generate (selection exceeds the ${MAX_AUTO_SCREENSHOT_TRADES}-trade auto-count cap)` : "unknown — will be checked when you generate"}
           </span>
           <span className="hint">Trades missing screenshots: {includeScreenshots && shotInfo.state === "done" ? Math.max(0, realInRange - shotInfo.tradesWith) : "—"}</span>
+        </div>
+      )}
+
+      {drHints && drHints.pendingFinalizedDrafts > 0 && (
+        <div style={{ marginTop: 10, padding: "9px 12px", borderRadius: 8, background: "rgba(56,189,248,0.07)", border: "1px solid rgba(56,189,248,0.3)", fontSize: 12.5 }}>
+          {drHints.pendingFinalizedDrafts} finalized Daily Replay draft{drHints.pendingFinalizedDrafts === 1 ? " is" : "s are"} not included yet — the replay session hasn&apos;t been completed, so the trade doesn&apos;t exist in the journal yet. Finish the session in Daily Replay and it will appear here and in the export. Widening the date range does not include it.
+        </div>
+      )}
+      {drHints && drHints.outOfRangeDrTrades > 0 && (
+        <div style={{ marginTop: 10, padding: "9px 12px", borderRadius: 8, background: "rgba(56,189,248,0.07)", border: "1px solid rgba(56,189,248,0.3)", fontSize: 12.5 }}>
+          {drHints.outOfRangeDrTrades} Daily Replay trade{drHints.outOfRangeDrTrades === 1 ? "" : "s"} fall{drHints.outOfRangeDrTrades === 1 ? "s" : ""} outside the selected date range — widen the period to include {drHints.outOfRangeDrTrades === 1 ? "it" : "them"}.
         </div>
       )}
 

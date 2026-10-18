@@ -315,6 +315,43 @@ export function computeDrExclusions(input: {
   return excluded;
 }
 
+/* ================= Draft list counts ================= */
+
+/**
+ * The ONE aggregation behind the drafts card header and the journal's
+ * "Daily Replay Drafts" source chip. The card lists EVERY draft row
+ * (open, finalized, superseded), so `total` is always the list length
+ * — the two surfaces can never disagree with the list again (the
+ * reported defect: header/chip counted only status="draft", rendering
+ * one finalized draft as "0 drafts" above a list of one). The
+ * unfinalized remainder is exposed separately as `toReview` and is
+ * labeled as such in the UI, never used as the headline count.
+ * `isSupersededDisplay` is the caller's display-status derivation (a
+ * stored-"draft" row from a pre-reset generation of a finished attempt
+ * displays as superseded), keeping display truth in one place.
+ */
+export interface DraftListCounts {
+  total: number;
+  toReview: number;
+  finalized: number;
+  superseded: number;
+}
+
+export function draftListCounts(
+  drafts: DrDraftRow[],
+  isSupersededDisplay: (d: DrDraftRow) => boolean,
+): DraftListCounts {
+  let toReview = 0;
+  let finalized = 0;
+  let superseded = 0;
+  for (const d of drafts) {
+    if (isSupersededDisplay(d)) { superseded++; continue; }
+    if (d.status === "finalized") finalized++;
+    else if (d.status === "draft") toReview++;
+  }
+  return { total: drafts.length, toReview, finalized, superseded };
+}
+
 /* ================= DB helpers (thin, owner-RLS) ================= */
 
 /**

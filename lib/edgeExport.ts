@@ -164,6 +164,14 @@ export interface ExportSnapshotInput {
    *  the draft row's recorded capture outcomes, the input to
    *  representative resolution (lib/drRepresentative.ts). */
   drDraftKeys?: Map<string, { draftKey: string; autoCapture: Record<string, unknown> }>;
+  /** Finalized Daily Replay drafts whose attempt has NOT completed:
+   *  no session exists yet, so no unified trade exists for them and
+   *  they cannot appear in the journal or in any export (by design —
+   *  materialization happens at attempt completion). The journal page
+   *  computes this from its already-loaded drafts + attempts; the
+   *  export panel only COMMUNICATES the count via computeDrExportHints
+   *  (a named notice + remedy), never includes the trades. */
+  drPendingFinalizedDrafts?: { attemptId: string; strategyVersionId: string | null }[];
 }
 
 /* ================= period selection & date ranges ======================= */
@@ -724,6 +732,65 @@ export function buildExportSnapshot(
     dailyReplay,
     warnings,
   };
+}
+
+/* ================= export hints (invisible DR trades, named) ============ */
+
+export interface DrExportHints {
+  /** Finalized Daily Replay drafts whose attempt never completed —
+   *  invisible everywhere by design; the remedy is finishing the
+   *  replay session, NOT widening the export range. */
+  pendingFinalizedDrafts: number;
+  /** Completed Daily Replay trades excluded ONLY by the date range —
+   *  the remedy is widening the range. */
+  outOfRangeDrTrades: number;
+}
+
+/**
+ * Why a Daily Replay trade the user KNOWS exists (they finalized its
+ * draft, or it sits in their journal) is absent from this export
+ * selection — named as counts, so the panel can say so instead of
+ * silently reporting "Eligible trades: 0". Mirrors buildExportSnapshot's
+ * source rule and panel narrowing exactly; the range is the one filter
+ * inverted (for out-of-range) or irrelevant (for pending drafts, which
+ * have no trade at any range). Communication only: this function never
+ * feeds the snapshot, and ineligible trades stay ineligible.
+ */
+export function computeDrExportHints(
+  input: ExportSnapshotInput,
+  selection: ExportSelection,
+): DrExportHints {
+  const none: DrExportHints = { pendingFinalizedDrafts: 0, outOfRangeDrTrades: 0 };
+  // Daily Replay trades ride the "all" / "simulator" / "daily_replay"
+  // sources; a real-only selection can never include them.
+  if (selection.source === "real") return none;
+  const { range } = selection;
+  const attemptById = new Map((input.drAttempts ?? []).map((a) => [a.id, a]));
+  const versionById = new Map((input.strategyVersions ?? []).map((v) => [v.id, v]));
+  const passesNarrowing = (attemptId: string | null, versionId: string | null): boolean => {
+    if (selection.attemptId && attemptId !== selection.attemptId) return false;
+    if (selection.strategyVersionId || selection.strategyId) {
+      const version = versionId ? versionById.get(versionId) : undefined;
+      if (selection.strategyVersionId && version?.id !== selection.strategyVersionId) return false;
+      if (selection.strategyId && version?.strategyId !== selection.strategyId) return false;
+    }
+    return true;
+  };
+
+  let pendingFinalizedDrafts = 0;
+  for (const p of input.drPendingFinalizedDrafts ?? []) {
+    if (passesNarrowing(p.attemptId, p.strategyVersionId)) pendingFinalizedDrafts++;
+  }
+
+  let outOfRangeDrTrades = 0;
+  for (const t of input.unified) {
+    if (!isDrUnified(t)) continue;
+    if (t.tradeDate >= range.start && t.tradeDate <= range.end) continue; // in range — not this hint
+    const attempt = t.attemptId ? attemptById.get(t.attemptId) : undefined;
+    if (passesNarrowing(t.attemptId ?? null, attempt?.strategyVersionId ?? null)) outOfRangeDrTrades++;
+  }
+
+  return { pendingFinalizedDrafts, outOfRangeDrTrades };
 }
 
 /* ================= JSON sanitizing ====================================== */
