@@ -37,6 +37,11 @@ import {
   type DrBracketScope,
 } from "../../lib/dailyReplayEvents";
 import {
+  DrEventFlusher,
+  newDrFlushState,
+  type DrFlushState,
+} from "../../lib/drEventFlush";
+import {
   reconstructDrAttempt,
   shouldOfferDrResume,
 } from "../../lib/dailyReplayResume";
@@ -701,8 +706,12 @@ function ReplayPageInner() {
    * call sites where actions happen; fills are observed centrally. */
   const [drEvents, setDrEvents] = useState<DrEvent[]>([]);
   const drRecorderRef = useRef<DrEventRecorder | null>(null);
-  const drFlushedRef = useRef(0);
-  const drEventsMissingRef = useRef(false);
+  /* Timeline persistence state, replaced per attempt so a flush still
+   * queued for a previous attempt can never touch the new attempt's
+   * offset (see lib/drEventFlush.ts). The flusher itself is shared:
+   * it serializes every flush on one chain. */
+  const drFlushStateRef = useRef<DrFlushState>(newDrFlushState());
+  const drEventFlusherRef = useRef<DrEventFlusher>(new DrEventFlusher());
   const drSeenFillsRef = useRef(0);
   const drPlayStartedRef = useRef(false);
   /* Persistent working orders (daily_replay_orders, v2): the tracker
@@ -1052,8 +1061,7 @@ function ReplayPageInner() {
       const startCandle = feed.candles[pv.selected];
       const recorder = new DrEventRecorder();
       drRecorderRef.current = recorder;
-      drFlushedRef.current = 0;
-      drEventsMissingRef.current = false;
+      drFlushStateRef.current = newDrFlushState();
       drSeenFillsRef.current = 0;
       drPlayStartedRef.current = false;
       // Trade drafts start empty for a fresh attempt.
@@ -1070,7 +1078,7 @@ function ReplayPageInner() {
       drOrderChainsRef.current = new Map();
       recorder.setListener(() => {
         setDrEvents(recorder.all);
-        if (recorder.length - drFlushedRef.current >= 10) {
+        if (recorder.length - drFlushStateRef.current.offset >= 10) {
           void flushDrEvents();
         }
       });
@@ -1342,8 +1350,8 @@ function ReplayPageInner() {
       // Wire the attempt exactly like a fresh lock does.
       drFeedRef.current = feed;
       drRecorderRef.current = recorder;
-      drFlushedRef.current = events.length; // everything loaded is already persisted
-      drEventsMissingRef.current = false;
+      // Everything loaded is already persisted: start past the stream.
+      drFlushStateRef.current = newDrFlushState(events.length);
       drSeenFillsRef.current = eng.fills.length; // restored fills are already recorded
       drPlayStartedRef.current = true; // the next Play is a resume, not a start
       drCompletedRef.current = false;
@@ -1370,7 +1378,7 @@ function ReplayPageInner() {
       drOrderChainsRef.current = new Map();
       recorder.setListener(() => {
         setDrEvents(recorder.all);
-        if (recorder.length - drFlushedRef.current >= 10) {
+        if (recorder.length - drFlushStateRef.current.offset >= 10) {
           void flushDrEvents();
         }
       });
@@ -2340,50 +2348,58 @@ function ReplayPageInner() {
   };
 
   /**
-   * Persist recorded events in one small batch. If the events table is
-   * missing (migration not applied yet), remember that and stop trying
-   * — the timeline still works in-page and at completion, and nothing
-   * crashes. Other failures keep the events pending for the next flush.
+   * Persist recorded events through the serialized flusher
+   * (lib/drEventFlush.ts). If the events table is missing (migration
+   * not applied yet), the flusher latches that and stops trying —
+   * the timeline still works in-page and at completion, and nothing
+   * crashes. Other failures keep the events pending for the next
+   * flush. Never throws.
+   *
+   * The recorder, attempt id, and flush state are captured at call
+   * time, so a flush queued for one attempt always writes that
+   * attempt's events against that attempt's own state — even if a new
+   * attempt has started by the time the queued flush runs.
    */
   const flushDrEvents = async (): Promise<void> => {
     const rec = drRecorderRef.current;
     const info = drInfoRef.current;
-    if (!rec || !info || drEventsMissingRef.current) return;
-    const pending = rec.all.slice(drFlushedRef.current);
-    if (pending.length === 0) return;
-    try {
-      if (!isSupabaseConfigured()) return;
-      const supabase = createClient();
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (!user) return;
-      // Upsert with ignore-duplicates on the (attempt_id, seq) unique
-      // constraint: a batch retried after an uncertain failure (rows
-      // landed, response lost) used to die with 23505 and wedge every
-      // later flush at the same offset — now the already-landed rows
-      // are simply skipped and the rest still insert.
-      const { error } = await supabase.from("daily_replay_events").upsert(
-        pending.map((e) => ({
-          attempt_id: info.attemptId,
-          user_id: user.id,
-          seq: e.seq,
-          type: e.type,
-          wall_ts: new Date(e.wallTs).toISOString(),
-          market_idx: e.marketIdx,
-          market_ts: e.marketTs,
-          payload: e.payload,
-        })),
-        { onConflict: "attempt_id,seq", ignoreDuplicates: true }
-      );
-      if (error) throw error;
-      drFlushedRef.current += pending.length;
-    } catch (e) {
-      if (isDrStorageMissing(e)) {
-        drEventsMissingRef.current = true;
-      }
-      // otherwise: leave pending; a later flush retries. Never crash.
-    }
+    if (!rec || !info) return;
+    const attemptId = info.attemptId;
+    const state = drFlushStateRef.current;
+    await drEventFlusherRef.current.flush(
+      state,
+      () => rec.all,
+      async (pending) => {
+        if (!isSupabaseConfigured()) return "skip";
+        const supabase = createClient();
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        if (!user) return "skip";
+        // Upsert with ignore-duplicates on the (attempt_id, seq)
+        // unique constraint: a batch retried after an uncertain
+        // failure (rows landed, response lost) used to die with 23505
+        // and wedge every later flush at the same offset — now the
+        // already-landed rows are simply skipped and the rest still
+        // insert.
+        const { error } = await supabase.from("daily_replay_events").upsert(
+          pending.map((e) => ({
+            attempt_id: attemptId,
+            user_id: user.id,
+            seq: e.seq,
+            type: e.type,
+            wall_ts: new Date(e.wallTs).toISOString(),
+            market_idx: e.marketIdx,
+            market_ts: e.marketTs,
+            payload: e.payload,
+          })),
+          { onConflict: "attempt_id,seq", ignoreDuplicates: true }
+        );
+        if (error) throw error;
+        return "sent";
+      },
+      isDrStorageMissing
+    );
   };
 
   /* ---------------- Persistent working orders (v2) ----------------
@@ -3818,7 +3834,7 @@ function ReplayPageInner() {
               >
                 <span aria-hidden>{drTimelineOpen ? "▾" : "▸"}</span>
                 <span>Decision Timeline ({drEvents.length} events)</span>
-                {drEventsMissingRef.current && (
+                {drFlushStateRef.current.missing && (
                   <span style={{ color: "var(--muted)", fontWeight: 400, fontSize: 12 }}>
                     — on this device until Daily Replay storage is enabled
                   </span>
