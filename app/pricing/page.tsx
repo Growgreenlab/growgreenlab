@@ -7,12 +7,17 @@
  * buttons call the server route with a plan NAME only — if billing
  * is not configured on this deployment yet (503), the buttons show
  * the honest "not available yet" state instead of failing.
+ * Signed-out CTAs carry the chosen plan through sign-in via the
+ * login flow's `next` param (lib/subscribeResume.ts); landing back
+ * here signed in with ?subscribe=<plan> resumes checkout once.
  */
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
 import { loadEntitlement, type UsageStatus } from "../../lib/entitlements";
 import { startCheckout } from "../../lib/billing";
+import { buildSubscribeNext, createSubscribeIntent, type SubscribeIntent } from "../../lib/subscribeResume";
 
 const FREE_FEATURES = [
   "Trading Simulator / Replay Lab with sample data",
@@ -29,19 +34,31 @@ const PRO_FEATURES = [
   "Everything in Free, with no daily or monthly caps",
 ];
 
-export default function PricingPage() {
+function PricingInner() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [entitlement, setEntitlement] = useState<UsageStatus | null>(null);
+  const [entitlementLoaded, setEntitlementLoaded] = useState(false);
   const [signedIn, setSignedIn] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
+  // The subscribe intent carried through sign-in (?subscribe=monthly|
+  // yearly), parsed once and consumed exactly once by the resume
+  // effect below. Invalid values (incl. any price ID) yield no intent.
+  const intentRef = useRef<SubscribeIntent | null>(null);
+  if (intentRef.current === null) {
+    intentRef.current = createSubscribeIntent(searchParams.get("subscribe"));
+  }
+
   useEffect(() => {
     (async () => {
-      if (!isSupabaseConfigured()) return;
+      if (!isSupabaseConfigured()) { setEntitlementLoaded(true); return; }
       const supabase = createClient();
       const { data: { user } } = await supabase.auth.getUser();
       setSignedIn(!!user);
       if (user) setEntitlement(await loadEntitlement(supabase));
+      setEntitlementLoaded(true);
     })();
   }, []);
 
@@ -56,6 +73,23 @@ export default function PricingPage() {
       else setNotice("Checkout couldn't be started. Please try again in a moment.");
     }
   };
+
+  // Resume after sign-in: the user clicked a Pro plan while signed
+  // out, authenticated, and landed back here with ?subscribe=<plan>.
+  // Fire the SAME subscribe() a button click uses — exactly once —
+  // and strip the param as it fires so refresh/back can't re-fire it.
+  // Unconfigured billing lands in subscribe()'s existing honest
+  // notice; the user stays on /pricing. Already-Pro: no-op.
+  const subscribeRef = useRef(subscribe);
+  subscribeRef.current = subscribe;
+  useEffect(() => {
+    if (!signedIn || !entitlementLoaded) return;
+    if (entitlement?.is_pro) return;
+    const plan = intentRef.current?.take();
+    if (!plan) return;
+    router.replace("/pricing");
+    void subscribeRef.current(plan);
+  }, [signedIn, entitlementLoaded, entitlement, router]);
 
   const planCard = (
     title: string,
@@ -99,7 +133,7 @@ export default function PricingPage() {
       return <Link href="/billing" className="btn" style={{ display: "inline-block" }}>You&rsquo;re on Pro — manage billing</Link>;
     }
     if (!signedIn) {
-      return <Link href="/login" className="btn primary" style={{ display: "inline-block" }}>Sign in to subscribe</Link>;
+      return <Link href={buildSubscribeNext(plan)} className="btn primary" style={{ display: "inline-block" }}>Sign in to subscribe</Link>;
     }
     return (
       <button className="btn primary" disabled={busy !== null} onClick={() => subscribe(plan)}>
@@ -131,5 +165,13 @@ export default function PricingPage() {
         stays active until the end of the paid period. Prices in USD.
       </p>
     </div>
+  );
+}
+
+export default function PricingPage() {
+  return (
+    <Suspense fallback={<div className="hint">Loading…</div>}>
+      <PricingInner />
+    </Suspense>
   );
 }

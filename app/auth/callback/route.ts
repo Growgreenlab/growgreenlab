@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
+import { isSafeNext } from "../../../lib/subscribeResume";
 
 /**
  * Handles Supabase auth callbacks (magic-link / OTP).
@@ -10,7 +11,7 @@ export async function GET(req: NextRequest) {
   const url = new URL(req.url);
   const code = url.searchParams.get("code");
   const next = url.searchParams.get("next") ?? "/replay";
-  const dest = new URL(next.startsWith("/") ? next : "/replay", url.origin);
+  const dest = new URL(isSafeNext(next) ? next : "/replay", url.origin);
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
   const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "";

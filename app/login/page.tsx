@@ -4,6 +4,7 @@ import { useState, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
+import { isSafeNext } from "../../lib/subscribeResume";
 
 type Mode = "signin" | "signup" | "magic";
 
@@ -29,7 +30,7 @@ function LoginInner() {
   const configured = isSupabaseConfigured();
 
   const goNext = () => {
-    router.push(next.startsWith("/") ? next : "/replay");
+    router.push(isSafeNext(next) ? next : "/replay");
     router.refresh();
   };
 
