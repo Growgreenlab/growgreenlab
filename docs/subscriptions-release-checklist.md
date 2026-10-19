@@ -45,8 +45,14 @@ formality: **[ ] Tax treatment + registration reviewed (D11)**
   product `prod_VT3eG0P9zWufqV` "Grow Green Lab Pro";
   monthly `price_1US7XQCkdp8RhthV44kxldcP` (USD $9.99/mo);
   yearly `price_1US7XnCkdp8RhthVNK8eemGR` (USD $89.99/yr).
-  **No live products or prices exist. None may be created before
-  the D11 gate above is checked.**
+- Live Stripe prices (**pre-existing** — created by Karandeep
+  2026-10-17, before this checklist; D1 was amended at go-live to
+  use them as-is instead of creating new USD prices): product
+  "Grow Green Lab Membership" `prod_VSYzDNTvoLSNY8`;
+  monthly CAD $9.99 = `price_1URdrCCkdp8RhthVLEbfD5MK`;
+  yearly CAD $99.99. One active live subscription already exists
+  on the monthly price (presumably Karandeep's own).
+  **No NEW live products or prices are to be created.**
 
 ## Environment variables (names only — never commit values)
 
@@ -57,8 +63,8 @@ Set in Vercel. **Preview scope = TEST-mode values** (for branch QA);
 |---|---|
 | `STRIPE_SECRET_KEY` | Stripe Dashboard → Developers → API keys (`sk_test_…` for Preview; `sk_live_…` at launch) |
 | `STRIPE_WEBHOOK_SECRET` | The signing secret of each webhook endpoint (`whsec_…`) — test and live endpoints have DIFFERENT secrets; Preview gets the test endpoint's, Production the live endpoint's |
-| `STRIPE_PRICE_PRO_MONTHLY` | Test: `price_1US7XQCkdp8RhthV44kxldcP`. Live: the live monthly price ID created at launch |
-| `STRIPE_PRICE_PRO_YEARLY` | Test: `price_1US7XnCkdp8RhthVNK8eemGR`. Live: the live yearly price ID created at launch |
+| `STRIPE_PRICE_PRO_MONTHLY` | Test: `price_1US7XQCkdp8RhthV44kxldcP`. Live: `price_1URdrCCkdp8RhthVLEbfD5MK` (pre-existing, CAD $9.99/mo) |
+| `STRIPE_PRICE_PRO_YEARLY` | Test: `price_1US7XnCkdp8RhthVNK8eemGR`. Live: the pre-existing yearly price on "Grow Green Lab Membership" (CAD $99.99/yr) |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase Dashboard → Settings → API → service_role secret (Karandeep retrieves it; it has never been shared in this project) |
 | `NEXT_PUBLIC_SUBSCRIPTIONS_ROLLOUT_AT` | The exact instant the subscriptions migration is applied to production (ISO timestamp). Freezes D8 grandfathering: accounts created before it keep AI Edge Export. Set when applying the migration — not before |
 
@@ -87,8 +93,13 @@ Set in Vercel. **Preview scope = TEST-mode values** (for branch QA);
 
 ### Phase 2 — launch (separate approval; requires the D11 gate)
 6. [ ] D11 tax review done (gate above).
-7. [ ] Create the LIVE product/prices in Stripe (USD $9.99/mo,
-       $89.99/yr) — only now.
+7. [x] Create the LIVE product/prices in Stripe —
+       **DONE-BY-EXISTING**: no new live prices were created.
+       Karandeep's pre-existing live prices on "Grow Green Lab
+       Membership" (`prod_VSYzDNTvoLSNY8`) are used as-is:
+       monthly CAD $9.99 (`price_1URdrCCkdp8RhthVLEbfD5MK`),
+       yearly CAD $99.99. (D1 amended at go-live from USD
+       $9.99/mo, $89.99/yr to these CAD prices.)
 8. [ ] Register the LIVE webhook endpoint
        `https://www.growgreenlab.com/api/stripe/webhook` (same 6
        events); put its signing secret + live keys/prices into

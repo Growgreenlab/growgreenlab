@@ -128,7 +128,7 @@ function BillingInner() {
               </div>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
                 <span className="hint">Billing interval</span>
-                <span className="num">{sub.interval === "year" ? "Yearly — $89.99/yr" : sub.interval === "month" ? "Monthly — $9.99/mo" : "—"}</span>
+                <span className="num">{sub.interval === "year" ? "Yearly — CA$99.99/yr" : sub.interval === "month" ? "Monthly — CA$9.99/mo" : "—"}</span>
               </div>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
                 <span className="hint">{sub.cancel_at_period_end || !isPro ? "Access until" : "Renews on"}</span>

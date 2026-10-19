@@ -2,8 +2,10 @@
 
 /**
  * /pricing — Free vs Pro Monthly vs Pro Yearly.
- * Prices are the approved ones (D1: USD $9.99/mo, $89.99/yr; the
- * yearly plan saves $29.89 ≈ 25% vs 12 monthly payments). Checkout
+ * Prices are the approved ones (D1 as amended at go-live: CAD
+ * $9.99/mo, $99.99/yr — Karandeep's pre-existing live Stripe
+ * prices; the yearly plan saves $19.89 ≈ 17% vs 12 monthly
+ * payments). Checkout
  * buttons call the server route with a plan NAME only — if billing
  * is not configured on this deployment yet (503), the buttons show
  * the honest "not available yet" state instead of failing.
@@ -155,14 +157,14 @@ function PricingInner() {
           signedIn
             ? <span className="hint">{entitlement?.is_pro ? "Your previous plan" : "Your current plan"}</span>
             : <Link href="/login" className="btn" style={{ display: "inline-block" }}>Create a free account</Link>)}
-        {planCard("Grow Green Lab Pro — Monthly", "$9.99", "USD / month", PRO_FEATURES,
+        {planCard("Grow Green Lab Pro — Monthly", "$9.99", "CAD / month", PRO_FEATURES,
           proCta("monthly", "Subscribe — $9.99/mo"), false)}
-        {planCard("Grow Green Lab Pro — Yearly", "$89.99", "USD / year", PRO_FEATURES,
-          proCta("yearly", "Subscribe — $89.99/yr"), true, "Save $29.89/yr (~25%) vs monthly")}
+        {planCard("Grow Green Lab Pro — Yearly", "$99.99", "CAD / year", PRO_FEATURES,
+          proCta("yearly", "Subscribe — $99.99/yr"), true, "Save $19.89/yr (~17%) vs monthly")}
       </div>
       <p className="hint" style={{ marginTop: 18, fontSize: 12.5 }}>
         Subscriptions auto-renew until canceled. Cancel anytime in the billing portal — Pro
-        stays active until the end of the paid period. Prices in USD.
+        stays active until the end of the paid period. Prices in CAD.
       </p>
     </div>
   );

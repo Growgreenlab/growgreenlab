@@ -20,8 +20,8 @@
 -- §4 quota map, §5 enforcement design; decisions D1–D13 as finalized
 -- 2026-10-18):
 --   * Plans: Free = 3 qualifying trades / calendar day + 7 qualifying
---     journal entries / calendar month; Pro (USD $9.99/mo,
---     $89.99/yr) = unlimited. No trial (D10). Stripe-default
+--     journal entries / calendar month; Pro (CAD $9.99/mo,
+--     $99.99/yr — D1 as amended at go-live) = unlimited. No trial (D10). Stripe-default
 --     proration (D13).
 --   * Counting is by CREATION MOMENT (server time), never trade_date
 --     (D4), in America/New_York day/month buckets (D3). Deletes and
