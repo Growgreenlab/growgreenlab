@@ -18,7 +18,7 @@ import {
 } from "../lib/edgeExport";
 
 import { generateEdgePackage, listExportScreenshots, type PackageResult } from "../lib/edgeExportPackage";
-import { resolveRepresentative } from "../lib/drRepresentative";
+
 
 const MAX_AUTO_SCREENSHOT_TRADES = 60;
 
@@ -143,27 +143,17 @@ export default function EdgeExportPanel({ input, pageSource, pagePeriod }: {
         if (!user) throw new Error("not signed in");
         const listed = await listExportScreenshots(supabase, user.id, snapshot);
         if (!alive) return;
-        // Representative-aware (Representative plan §5 S1.3): a Daily
-        // Replay trade contributes exactly ONE image to the package —
-        // its resolved representative — so the count must not promise
-        // exit images the package excludes. Real trades count all.
+        // Inclusion count (audit §G 1a): since the 2026-10-18 export
+        // fixes, EVERY listed image ships — Daily Replay entry, exit
+        // and manual images alike (the representative is a flag, not
+        // an inclusion gate) — so the pre-count is simply the listed
+        // total per eligible trade, matching the package exactly.
         let files = 0, tradesWith = 0;
         for (const rec of snapshot.trades) {
+          if (rec.source !== "real" && !rec.isDailyReplay) continue;
           const paths = listed.get(rec.tradeKey) ?? [];
-          if (rec.isDailyReplay) {
-            const info = snapshot.dailyReplay?.draftInfoByTradeKey.get(rec.tradeKey);
-            const rep = resolveRepresentative({
-              autoCapture: info?.autoCapture,
-              listedPaths: paths,
-              draftKey: info?.draftKey ?? null,
-              finalizedTradeKey: rec.tradeKey,
-              userId: user.id,
-            });
-            if (rep) { files += 1; tradesWith += 1; }
-          } else if (rec.source === "real") {
-            files += paths.length;
-            if (paths.length > 0) tradesWith += 1;
-          }
+          files += paths.length;
+          if (paths.length > 0) tradesWith += 1;
         }
         setShotInfo({ state: "done", files, tradesWith });
       } catch {

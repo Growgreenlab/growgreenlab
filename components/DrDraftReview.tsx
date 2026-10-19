@@ -248,7 +248,7 @@ export default function DrDraftReview(props: {
 
   /* ---- screenshots ---- */
   const [userId, setUserId] = useState<string | null>(null);
-  const [shots, setShots] = useState<{ path: string; url: string }[]>([]);
+  const [shots, setShots] = useState<{ path: string; url: string; createdAt: string | null }[]>([]);
   const [shotErrors, setShotErrors] = useState<string[]>([]);
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -260,7 +260,7 @@ export default function DrDraftReview(props: {
       const { data: { user } } = await client.auth.getUser();
       if (!user) { setShots([]); return; }
       setUserId(user.id);
-      const byPath = new Map<string, { path: string; url: string }>();
+      const byPath = new Map<string, { path: string; url: string; createdAt: string | null }>();
       for (const s of await listScreenshots(client, user.id, draft.draftKey)) {
         byPath.set(s.path, s);
       }

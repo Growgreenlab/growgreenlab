@@ -8,7 +8,7 @@ import { breakdown, riskMetrics, edgeInsights, dailyPnl, isDailyReplayTrade, typ
 import { listScreenshots, removeScreenshots, uploadScreenshots, validateScreenshotFile } from "../../lib/journalAttachments";
 import EdgeExportPanel from "../../components/EdgeExportPanel";
 import type { ExportSnapshotInput, ExportDrAttemptInput, ExportDrEventInput } from "../../lib/edgeExport";
-import { deriveDrEvidence, splitCyclesByGeneration, type DrAttemptEvidence, type DrTradeEvidence } from "../../lib/drTradeEvidence";
+import { deriveDrEvidence, missingEventsEvidence, splitCyclesByGeneration, unreconciledEvidence, type DrAttemptEvidence, type DrTradeEvidence } from "../../lib/drTradeEvidence";
 import { describeDrEvent, type DrEvent } from "../../lib/dailyReplayEvents";
 import {
   mapStrategyRow, mapStrategyVersionRow, mapAttemptRow, resolveVersionContext,
@@ -414,6 +414,26 @@ export default function JournalPage() {
             }
           } catch { /* dataset lookup unavailable — candidates degrade to withheld */ }
         }
+        // Dataset timeframe for EVERY attempt (audit §G 2a): the
+        // export's analytics DR block + chart_context.csv carry the
+        // candle timeframe from daily_replay_datasets.timeframe.
+        // Best-effort like everything in this block — a failure just
+        // leaves timeframe null (not recorded) downstream.
+        const timeframeByDatasetId = new Map<string, number | null>();
+        try {
+          const allDsIds = [...new Set(attempts.map((a) => attemptDatasetId.get(a.id)).filter(Boolean))] as string[];
+          if (allDsIds.length > 0) {
+            const { data: tfRows, error: tfErr } = await supabase
+              .from("daily_replay_datasets")
+              .select("id,timeframe")
+              .in("id", allDsIds);
+            if (!tfErr && tfRows) {
+              for (const r of tfRows as any[]) {
+                timeframeByDatasetId.set(r.id, r.timeframe != null ? Number(r.timeframe) : null);
+              }
+            }
+          }
+        } catch { /* timeframe unavailable — exports null */ }
         const eventsByAttempt = new Map<string, ExportDrEventInput[]>();
         const eventAttempts = [...linked, ...candidates];
         if (eventAttempts.length > 0) {
@@ -524,7 +544,22 @@ export default function JournalPage() {
             const row = ds
               ? buildPreCompletionTradeFromEvents(d, events, { ticker: ds.ticker, tradeDate: ds.tradeDate })
               : null;
-            if (row) preTrades.push(row);
+            if (row) {
+              preTrades.push(row);
+              // §G 3c: a pre-completion row whose key has NO evidence
+              // entry (draft-anchors rows never pass through
+              // deriveDrEvidence — there are no cycles to pair) gets
+              // an EXPLICIT no-evidence entry, so the export can
+              // state WHY its plan/R are unavailable: an empty event
+              // stream is a recording problem (events_missing), a
+              // non-empty one that yielded no pair is unreconciled.
+              // Without this entry the two were indistinguishable.
+              if (!evidenceByKey.has(row.tradeKey)) {
+                evidenceByKey.set(row.tradeKey, events.length === 0
+                  ? missingEventsEvidence(a.id, row)
+                  : unreconciledEvidence(a.id, row));
+              }
+            }
             else {
               withheldFinalized.push({ attemptId: a.id, strategyVersionId: a.strategyVersionId });
               undisplayedFinalized.push({ draftKey: d.draftKey, reason: "unreconciled" });
@@ -554,10 +589,12 @@ export default function JournalPage() {
         const attemptsExport: ExportDrAttemptInput[] = [
           ...linked.map((a) => {
             const s: any = a.sessionId ? sessionById.get(a.sessionId) : null;
+            const dsId = attemptDatasetId.get(a.id);
             return {
               id: a.id, sessionId: a.sessionId, strategyVersionId: a.strategyVersionId,
               status: a.status, startIndex: a.startIndex, createdAt: a.createdAt, finishedAt: a.finishedAt,
               ticker: s?.ticker ?? null, tradeDate: s?.trade_date ?? null,
+              timeframe: dsId ? (timeframeByDatasetId.get(dsId) ?? null) : null,
             };
           }),
           ...candidates.map((a) => {
@@ -567,6 +604,7 @@ export default function JournalPage() {
               id: a.id, sessionId: a.sessionId, strategyVersionId: a.strategyVersionId,
               status: a.status, startIndex: a.startIndex, createdAt: a.createdAt, finishedAt: a.finishedAt,
               ticker: ds?.ticker ?? null, tradeDate: ds?.tradeDate ?? null,
+              timeframe: dsId ? (timeframeByDatasetId.get(dsId) ?? null) : null,
             };
           }),
         ];
@@ -672,7 +710,10 @@ export default function JournalPage() {
           .order("id", { ascending: true });
         const rf: RealFill[] = (fills ?? []).map((f: any) => ({
           id: f.id, side: f.side, qty: Number(f.qty), price: Number(f.price),
-          fees: Number(f.fees ?? 0), fill_time: f.fill_time,
+          // Preserve fee ABSENCE (audit §G 3a): a null fees column
+          // means no fee data was recorded — coercing it to 0 here
+          // would make "unknown" indistinguishable from "recorded 0".
+          fees: f.fees == null ? null : Number(f.fees), fill_time: f.fill_time,
         }));
         real.push({
           ...rt,
@@ -1966,7 +2007,7 @@ function ReviewScreenshots({ tradeKey, extraTradeKey, drDraftKey, drAutoCapture 
   drDraftKey?: string | null;
   drAutoCapture?: Record<string, unknown> | null;
 }) {
-  const [shots, setShots] = useState<{ path: string; url: string }[]>([]);
+  const [shots, setShots] = useState<{ path: string; url: string; createdAt: string | null }[]>([]);
   const [ownerId, setOwnerId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -1980,7 +2021,7 @@ function ReviewScreenshots({ tradeKey, extraTradeKey, drDraftKey, drAutoCapture 
       let merged = list;
       if (extraTradeKey && extraTradeKey !== tradeKey) {
         const extra = await listScreenshots(supabase, user.id, extraTradeKey);
-        const byPath = new Map<string, { path: string; url: string }>();
+        const byPath = new Map<string, { path: string; url: string; createdAt: string | null }>();
         for (const s of [...list, ...extra]) byPath.set(s.path, s);
         merged = [...byPath.values()];
       }
@@ -2270,7 +2311,7 @@ function ReviewTab({ tradeKey, simTrade, realTrade, meta, onSaved, onEditReal, o
               <div key={f.id} style={{ display: "flex", gap: 12, fontSize: 13, padding: "4px 0", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
                 <span style={{ color: f.side === "buy" ? "var(--emerald-bright)" : "#f6465d", fontWeight: 600, textTransform: "uppercase", width: 36 }}>{f.side}</span>
                 <span className="num">{f.qty} @ ${Number(f.price).toFixed(2)}</span>
-                {f.fees > 0 && <span className="hint">fees ${Number(f.fees).toFixed(2)}</span>}
+                {(f.fees ?? 0) > 0 && <span className="hint">fees ${Number(f.fees).toFixed(2)}</span>}
                 {f.fill_time && <span className="hint">{new Date(f.fill_time).toLocaleTimeString()}</span>}
               </div>
             ))}
@@ -2758,7 +2799,7 @@ function RealTradeForm({ onSaved, editing, onCancel, strategies, strategyVersion
   // marked for removal (deletion is applied on save)
   const [staged, setStaged] = useState<{ file: File; url: string }[]>([]);
   const [stageError, setStageError] = useState<string | null>(null);
-  const [existingShots, setExistingShots] = useState<{ path: string; url: string }[]>([]);
+  const [existingShots, setExistingShots] = useState<{ path: string; url: string; createdAt: string | null }[]>([]);
   const [removedPaths, setRemovedPaths] = useState<string[]>([]);
   const shotInputRef = useRef<HTMLInputElement>(null);
 

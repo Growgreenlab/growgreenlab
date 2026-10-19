@@ -25,7 +25,7 @@ import {
   buildAnalyticsJson, buildChatGptPrompt, buildDecisionTimelineCsv, buildReadme,
   buildScreenshotManifest, buildStrategyJson, buildTradesCsv,
   publicScreenshotManifestEntry, summarizeScreenshotCoverage,
-  type ExportSnapshot, type ScreenshotManifestEntry,
+  type ExportSnapshot, type ScreenshotListing, type ScreenshotManifestEntry,
 } from "./edgeExport";
 import type { PdfScreenshotImage } from "./edgeExportPdf";
 import {
@@ -42,8 +42,9 @@ export interface GeneratePackageOptions {
   includeDecisionTimeline?: boolean;
   /** Include chart_context.csv — per-trade OHLCV from the sessions'
    *  stored candles (default true when the snapshot has Daily Replay
-   *  trades). The file is produced only when at least one trade's
-   *  context validates; per-trade failures become warnings. */
+   *  or Trade Lab simulator trades — both store session candles).
+   *  The file is produced only when at least one trade's context
+   *  validates; per-trade failures become warnings. */
   includeChartContext?: boolean;
 }
 
@@ -78,21 +79,22 @@ async function mapPool<T>(items: T[], limit: number, fn: (item: T, index: number
 }
 
 /**
- * List screenshot storage paths for every screenshot-eligible trade in
- * the snapshot — real trades and Daily Replay trades (bounded
+ * List screenshot storage objects for every screenshot-eligible trade
+ * in the snapshot — real trades and Daily Replay trades (bounded
  * concurrency). Trade Lab simulator trades remain excluded. Returns
- * tradeKey → storage paths. Listing uses the caller's own session;
- * storage policies restrict it to the user's own folder, so another
- * user's screenshots can never be listed.
+ * tradeKey → listed objects (path + the storage recorded time,
+ * audit §G 1c). Listing uses the caller's own session; storage
+ * policies restrict it to the user's own folder, so another user's
+ * screenshots can never be listed.
  */
 export async function listExportScreenshots(
   client: SupabaseClient,
   userId: string,
   snapshot: ExportSnapshot,
   onProgress?: ExportProgressFn,
-): Promise<Map<string, string[]>> {
+): Promise<Map<string, ScreenshotListing[]>> {
   const eligible = snapshot.trades.filter((r) => r.source === "real" || r.isDailyReplay);
-  const out = new Map<string, string[]>();
+  const out = new Map<string, ScreenshotListing[]>();
   let done = 0;
   await mapPool(eligible, 4, async (rec) => {
     // Daily Replay trades union BOTH prefixes (plan §2.4): the
@@ -104,12 +106,16 @@ export async function listExportScreenshots(
       const draftKey = snapshot.dailyReplay?.draftInfoByTradeKey?.get(rec.tradeKey)?.draftKey;
       if (draftKey && draftKey !== rec.tradeKey) keys.push(draftKey);
     }
-    const paths: string[] = [];
+    const listings: ScreenshotListing[] = [];
     for (const k of keys) {
       const list = await listScreenshots(client, userId, k);
-      for (const s of list) if (!paths.includes(s.path)) paths.push(s.path);
+      for (const s of list) {
+        if (!listings.some((l) => l.path === s.path)) {
+          listings.push({ path: s.path, createdAt: s.createdAt });
+        }
+      }
     }
-    out.set(rec.tradeKey, paths);
+    out.set(rec.tradeKey, listings);
     done++;
     onProgress?.(`Checking screenshots (${done}/${eligible.length})`, eligible.length ? (done / eligible.length) * 100 : 100);
   });
@@ -133,9 +139,10 @@ export async function generateEdgePackage(
     onProgress?.("Checking screenshots", 0);
     const listed = await listExportScreenshots(client, userId, snapshot, onProgress);
     manifest = buildScreenshotManifest(snapshot, listed, userId);
-    // "not-included" entries (non-representative DR images) are listed
-    // in the manifest only — their bytes are never downloaded.
-    const downloadable = manifest.filter((e) => e.status !== "not-included");
+    // EVERY manifest entry is downloadable (audit §G 1a): the
+    // representative-only download limit was retired by Karandeep's
+    // 2026-10-18 ruling — entry, exit and manual images all ship.
+    const downloadable = manifest;
     if (downloadable.length > 0) {
       let done = 0;
       await mapPool(downloadable, 4, async (entry) => {
@@ -163,30 +170,36 @@ export async function generateEdgePackage(
   const includeTimeline = options.includeDecisionTimeline !== false && snapshot.dailyReplay != null;
   const timelineCsv = includeTimeline ? buildDecisionTimelineCsv(snapshot) : null;
 
-  /* ---- chart context (Representative plan §5 S1.2, DR only) ----
+  /* ---- chart context (Representative plan §5 S1.2; audit §G 2d) ----
    * Built from the sessions' STORED candles (replay_sessions.
-   * candles) for completed attempts, read through the caller's own
-   * RLS session. For a PRE-COMPLETION trade (finalized draft, attempt
-   * still active — no session row exists yet) the candle source is
-   * the attempt's REVEALED candles via the owner RPC dr_get_revealed:
-   * the revealed prefix starts at index 0 exactly like the stored
-   * session array, so the boundary rules in buildTradeChartContext
-   * (entry context strictly before the entry candle, entry candle
-   * flagged, post-entry only to the exit, nothing beyond) are
-   * identical. A fetch or validation failure never aborts the
-   * package and never invents data: the trade degrades to the
-   * standard unavailable reason. Also stamps the representative
-   * manifest entries' candleTime from the validated entry candle. */
+   * candles), read through the caller's own RLS session, for Daily
+   * Replay trades AND Trade Lab simulator trades (both store their
+   * session candles; real trades store none and stay honestly
+   * unavailable). For a PRE-COMPLETION DR trade (finalized draft,
+   * attempt still active — no session row exists yet) the candle
+   * source is the attempt's REVEALED candles via the owner RPC
+   * dr_get_revealed: the revealed prefix starts at index 0 exactly
+   * like the stored session array, so the boundary rules in
+   * buildTradeChartContext (entry context strictly before the entry
+   * candle, entry candle flagged, post-entry only to the exit,
+   * nothing beyond) are identical. A fetch or validation failure
+   * never aborts the package and never invents data: the trade
+   * degrades to the standard unavailable reason. Also stamps
+   * manifest entries' candleTime from their validated anchor candles
+   * (any entry carrying a candle index — representative, entry and
+   * exit captures alike). */
   let chartContextCsv: string | null = null;
   const representativeIncluded = manifest.some((e) => e.role === "representative" && e.status === "included");
-  if (snapshot.dailyReplay && options.includeChartContext !== false) {
+  const contextRecs = snapshot.trades.filter((r) => r.source === "simulator");
+  if (contextRecs.length > 0 && options.includeChartContext !== false) {
     onProgress?.("Building chart context", undefined);
     try {
-      const drRecs = snapshot.trades.filter((r) => r.isDailyReplay);
-      const attemptSession = new Map(snapshot.dailyReplay.attempts.map((a) => [a.id, a.sessionId]));
+      const drRecs = contextRecs.filter((r) => r.isDailyReplay);
+      const attemptSession = new Map((snapshot.dailyReplay?.attempts ?? []).map((a) => [a.id, a.sessionId]));
+      const attemptTimeframe = new Map((snapshot.dailyReplay?.attempts ?? []).map((a) => [a.id, a.timeframe ?? null]));
       const sessionIdFor = (tradeKey: string, attemptId: string | null): string =>
         (attemptId ? attemptSession.get(attemptId) : undefined) ?? tradeKey.slice(0, tradeKey.lastIndexOf(":"));
-      const sessionIds = [...new Set(drRecs.map((r) => sessionIdFor(r.tradeKey, r.attemptId)))];
+      const sessionIds = [...new Set(contextRecs.map((r) => sessionIdFor(r.tradeKey, r.attemptId)))];
       const candlesBySession = new Map<string, unknown>();
       if (typeof (client as unknown as { from?: unknown }).from === "function" && sessionIds.length > 0) {
         const { data, error } = await client.from("replay_sessions").select("id, candles").in("id", sessionIds);
@@ -210,7 +223,7 @@ export async function generateEdgePackage(
           } catch { /* degrades to the standard unavailable reason */ }
         }
       }
-      const contexts = drRecs.map((r) => buildTradeChartContext({
+      const contexts = contextRecs.map((r) => buildTradeChartContext({
         tradeId: r.exportId,
         tradeKey: r.tradeKey,
         symbol: r.symbol,
@@ -221,11 +234,20 @@ export async function generateEdgePackage(
         candles: r.attemptId && candlesByAttempt.has(r.attemptId)
           ? candlesByAttempt.get(r.attemptId)
           : candlesBySession.get(sessionIdFor(r.tradeKey, r.attemptId)),
+        // §G 2a/2e: the attempt dataset's timeframe (DR only — Trade
+        // Lab sessions record none) and the trade's recorded key
+        // levels, joined into the context.
+        timeframeMinutes: r.attemptId ? (attemptTimeframe.get(r.attemptId) ?? null) : null,
+        keyLevels: r.keyLevels.map((k) => ({ price: k.price, type: k.type, interaction: k.interaction })),
       }));
       for (const ctx of contexts) {
-        if (!ctx.available || !ctx.entryTime) continue;
-        const entry = manifest.find((e) => e.tradeId === ctx.tradeId && e.role === "representative");
-        if (entry) entry.candleTime = ctx.entryTime;
+        if (!ctx.available) continue;
+        const timeByIndex = new Map(ctx.rows.map((row) => [row.candleIndex, row.candleTime]));
+        for (const entry of manifest) {
+          if (entry.tradeId !== ctx.tradeId || entry.candleIndex == null) continue;
+          const t = timeByIndex.get(entry.candleIndex);
+          if (t) entry.candleTime = t;
+        }
       }
       chartContextCsv = buildChartContextCsv(contexts);
       const summary = summarizeChartContexts(contexts);
@@ -252,9 +274,29 @@ export async function generateEdgePackage(
     try {
       const { buildTradingReportPdf } = await import("./edgeExportPdf");
       const images: PdfScreenshotImage[] = [];
-      for (const entry of manifest) {
-        if (entry.status !== "included" || !entry.file || images.length >= 3) continue;
-        const bytes = shotBytes.get(entry.file);
+      // §G 5a selection (cap unchanged at 3): representatives first
+      // (manifest order), then round-robin — one further image per
+      // trade in manifest order, repeating rounds — so one trade with
+      // many attachments can no longer consume the whole allowance.
+      const includedEntries = manifest.filter((e) => e.status === "included" && e.file && e.fileName);
+      const orderedForPdf: ScreenshotManifestEntry[] = [];
+      const seenForPdf = new Set<ScreenshotManifestEntry>();
+      for (const e of includedEntries) {
+        if (e.role === "representative") { orderedForPdf.push(e); seenForPdf.add(e); }
+      }
+      const tradeOrder: string[] = [];
+      for (const e of includedEntries) if (!tradeOrder.includes(e.tradeId)) tradeOrder.push(e.tradeId);
+      let progressed = true;
+      while (progressed) {
+        progressed = false;
+        for (const tradeId of tradeOrder) {
+          const next = includedEntries.find((e) => e.tradeId === tradeId && !seenForPdf.has(e));
+          if (next) { orderedForPdf.push(next); seenForPdf.add(next); progressed = true; }
+        }
+      }
+      for (const entry of orderedForPdf) {
+        if (images.length >= 3) break;
+        const bytes = shotBytes.get(entry.file!);
         if (!bytes || !entry.fileName) continue;
         const ext = entry.fileName.split(".").pop()?.toLowerCase();
         if (ext === "png") images.push({ tradeId: entry.tradeId, fileName: entry.fileName, bytes, format: "png" });
@@ -303,10 +345,14 @@ export async function generateEdgePackage(
   if (strategyJson) zip.file("strategy.json", JSON.stringify(strategyJson, null, 2));
   if (chartContextCsv) zip.file("chart_context.csv", chartContextCsv);
   if (options.includeScreenshots) {
-    const folder = zip.folder("screenshots");
     if (shotBytes.size > 0) {
-      for (const [path, bytes] of shotBytes) folder!.file(path.split("/").pop()!, bytes);
+      // Bytes are written at each manifest entry's full package path
+      // (screenshots/<file> for real trades, trade_evidence/<trade
+      // ID>/<file> for Daily Replay evidence — audit §G 1e), so the
+      // ZIP layout and the manifest agree by construction.
+      for (const [path, bytes] of shotBytes) zip.file(path, bytes);
     } else {
+      const folder = zip.folder("screenshots");
       folder!.file("NO-SCREENSHOTS.txt", `No screenshots were available for the selected trades.\n\n${coverage.note}\n\nNothing was fabricated to fill this folder. See screenshots-manifest.json for the full manifest.\n`);
     }
   }

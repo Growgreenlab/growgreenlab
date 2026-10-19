@@ -91,6 +91,12 @@ export interface AnalyticsTrade {
    *  effective classification (this, else the legacy hod_class
    *  coalesce) is derived in lib/strategyClassification.ts. */
   setupClass: string | null;
+  /** Provenance of the effective classification label (audit §G 3g):
+   *  "recorded" (from setupClass) vs "legacy_hod" (display-only
+   *  coalesce from the legacy hod_class). Optional — producers that
+   *  don't compute it leave it undefined; the export sets it so a
+   *  coalesced label is never presented as recorded. */
+  setupClassOrigin?: "recorded" | "legacy_hod" | null;
   /** Execution grade annotation (meta.exec_grade); null when unset. */
   execGrade: string | null;
 }
@@ -238,11 +244,15 @@ function bucketLabels(t: AnalyticsTrade, dim: BreakdownDimension): string[] {
     case "strategy": return [t.strategyName ?? "Not recorded"];
     case "strategyVersion": return [t.strategyVersionLabel ?? "Not recorded"];
     case "strategyTraded":
-      // The annotation is the trader's own statement of what they
-      // were testing; a Daily Replay trade without an annotation
-      // falls back to its attempt's bound strategy (the plan it ran
-      // under) so bound-only history still groups meaningfully.
-      return [t.tradedStrategyName ?? t.strategyName ?? "Not recorded"];
+      // ANNOTATION-ONLY (AI Edge Export audit §G 3e): this dimension
+      // means "the strategy the trader recorded for this trade" —
+      // exactly what trades.csv's strategy_traded column carries. It
+      // must NOT silently substitute the Daily Replay attempt's BOUND
+      // strategy: the binding is a different fact, grouped under its
+      // own dimensions ("strategy" / "strategyVersion" above). A
+      // trade with no annotation is "Not recorded" here even when its
+      // attempt ran bound.
+      return [t.tradedStrategyName ?? "Not recorded"];
     case "setupClass":
       return [effectiveClassification({ setup_class: t.setupClass, hod_class: t.hodClass })?.label ?? "Not recorded"];
     case "execGrade": return [t.execGrade ?? "Not recorded"];

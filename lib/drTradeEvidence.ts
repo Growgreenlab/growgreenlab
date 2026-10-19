@@ -37,9 +37,24 @@
 import type { DrEvent } from "./dailyReplayEvents";
 import type { GroupedTrade, PlanChange } from "./journal";
 
+/** Evidence-stream status for a Daily Replay trade (AI Edge Export
+ *  audit §G 3c): "recorded" — evidence derived from the attempt's
+ *  recorded events; "events_missing" — the attempt's event stream is
+ *  EMPTY/missing (a recording problem, e.g. the pre-fix recorder
+ *  event loss — NOT evidence that nothing was recorded at entry);
+ *  "events_unreconciled" — events exist but could not be matched to
+ *  this trade. The distinction matters: only "recorded" trades may
+ *  have their R-unavailability attributed to a missing snapshot. */
+export type DrEvidenceStatus = "recorded" | "events_missing" | "events_unreconciled";
+
+export const EVENTS_MISSING_BASIS =
+  "Unavailable — this trade's Daily Replay attempt has NO recorded decision events: the event stream is missing (a recording problem — e.g. the recorder event loss fixed 2026-10-18 — not proof that no plan was recorded at entry), so the original plan and R cannot be derived. Never reconstructed.";
+
 export interface DrTradeEvidence {
   tradeKey: string;
   attemptId: string;
+  /** §G 3c evidence-stream status (see DrEvidenceStatus). */
+  evidenceStatus: DrEvidenceStatus;
   /** Levels captured by the cycle's risk_snapshot (the original plan). */
   originalStopLoss: number | null;
   originalTarget: number | null;
@@ -210,6 +225,15 @@ export function deriveDrEvidence(input: {
     for (const e of cycle.events) eventTradeKey.set(e.seq, trade.tradeKey);
     byTradeKey.set(trade.tradeKey, buildEvidence(attemptId, trade, cycle));
   }
+  // §G 3c: an EMPTY stream is a distinct, named state — a recording
+  // problem — not "nothing was recorded at entry". Every trade of a
+  // zero-event attempt gets the events_missing status + basis.
+  if (events.length === 0) {
+    for (const trade of trades) {
+      byTradeKey.set(trade.tradeKey, missingEventsEvidence(attemptId, trade));
+    }
+    return { attemptId, byTradeKey, eventTradeKey, cyclesFound: 0, resumed: false };
+  }
   // Trades beyond the pairable range (event stream shorter than the
   // fills — e.g. a partially flushed timeline) get honest nulls too.
   for (let i = pairs; i < trades.length; i++) {
@@ -241,12 +265,35 @@ export function deriveDrEvidence(input: {
 function noEvidence(attemptId: string, trade: GroupedTrade, basis: string): DrTradeEvidence {
   return {
     tradeKey: trade.tradeKey, attemptId,
+    evidenceStatus: "events_unreconciled",
     originalStopLoss: null, originalTarget: null,
     stopLoss: null, target: null,
     initialRisk: null, rMultiple: null,
     planHistory: [], riskBasis: basis,
     snapshotQty: null, addedAfterEntry: false, hasSnapshot: false,
   };
+}
+
+/**
+ * The explicit no-evidence entry for a trade whose attempt event
+ * stream is MISSING (§G 3c). Exported for the journal page: trades
+ * built from a finalized draft's anchors never pass through
+ * deriveDrEvidence (there are no cycles to pair), so the page creates
+ * this entry itself — without it the export cannot distinguish
+ * "stream lost" from "no snapshot recorded".
+ */
+export function missingEventsEvidence(attemptId: string, trade: GroupedTrade): DrTradeEvidence {
+  return { ...noEvidence(attemptId, trade, EVENTS_MISSING_BASIS), evidenceStatus: "events_missing" };
+}
+
+/**
+ * The explicit no-evidence entry for a pre-completion trade whose
+ * attempt HAS events but whose cycle could not be reconciled into an
+ * evidence pair (§G 3c companion to missingEventsEvidence).
+ */
+export function unreconciledEvidence(attemptId: string, trade: GroupedTrade): DrTradeEvidence {
+  return noEvidence(attemptId, trade,
+    "Unavailable — this trade was rebuilt from its finalized draft record, and the attempt's recorded events do not reconcile into plan evidence for it, so no plan evidence is attached. R cannot be calculated and is never reconstructed.");
 }
 
 function buildEvidence(attemptId: string, trade: GroupedTrade, cycle: DrCycleInfo): DrTradeEvidence {
@@ -271,6 +318,9 @@ function buildEvidence(attemptId: string, trade: GroupedTrade, cycle: DrCycleInf
     return {
       ...noEvidence(attemptId, trade,
         "Unavailable — no risk snapshot was recorded for this trade's position cycle, so the original stop, target and initial risk are not known. R cannot be calculated and is never reconstructed."),
+      // The stream EXISTS and this cycle paired with it — the status
+      // is "recorded" (stream present); only the snapshot is absent.
+      evidenceStatus: "recorded",
       addedAfterEntry,
     };
   }
@@ -328,6 +378,7 @@ function buildEvidence(attemptId: string, trade: GroupedTrade, cycle: DrCycleInf
 
   return {
     tradeKey: trade.tradeKey, attemptId,
+    evidenceStatus: "recorded",
     originalStopLoss, originalTarget,
     stopLoss: curStop, target: curTarget,
     initialRisk, rMultiple,

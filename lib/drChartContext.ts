@@ -29,6 +29,16 @@
  * must equal the trade's recorded entry time. Any mismatch makes
  * THIS trade's context unavailable (reason recorded); the builder
  * never index-shifts or guesses, and other trades are unaffected.
+ *
+ * Derived columns (AI Edge Export audit §G 2b/2c, 2026-10-18) are
+ * computed ONLY over the exported rows above, in candle order:
+ * session_high_so_far (running max high), vwap_typical_approx
+ * (cumulative typical-price VWAP — an approximation, labelled as
+ * such), ema_fast_9 / ema_slow_20 (seeded at the first exported
+ * close, k = 2/(n+1)). Premarket high/low are computed from exported
+ * rows before 09:30 ET when such rows exist, else left empty with a
+ * note. Nothing is derived from candles outside the exported
+ * sections — the no-hindsight boundary is unchanged.
  */
 
 export interface ChartCandle {
@@ -55,6 +65,24 @@ export interface ChartContextRow {
   low: number;
   close: number;
   volume: number;
+  /** DERIVED (audit §G 2b): running session high — the maximum high
+   *  over the exported rows from the session's first stored candle
+   *  through THIS row. Computed only within the exported sections:
+   *  at an entry_context row it is the session high BEFORE the entry
+   *  candle (HOD-so-far at decision time); it never looks beyond the
+   *  exit candle. */
+  sessionHighSoFar: number;
+  /** DERIVED (audit §G 2c): cumulative VWAP over the exported rows
+   *  through this row, typical-price approximation
+   *  ((high+low+close)/3, volume-weighted). Null while cumulative
+   *  volume is zero. Labelled an approximation — the platform does
+   *  not record a tick-level VWAP. */
+  vwap: number | null;
+  /** DERIVED (audit §G 2c): EMA(9) / EMA(20) over exported closes,
+   *  seeded at the FIRST exported candle's close, k = 2/(n+1),
+   *  iterated in candle order. Deterministic given the exported set. */
+  emaFast: number;
+  emaSlow: number;
 }
 
 export interface TradeChartContext {
@@ -69,6 +97,23 @@ export interface TradeChartContext {
   exitIndex: number | null;
   /** The entry candle's period start (ISO), when known. */
   entryTime: string | null;
+  /** Candle timeframe in minutes, when the source records one (Daily
+   *  Replay datasets record it; Trade Lab sessions do not — null,
+   *  never assumed). */
+  timeframeMinutes: number | null;
+  /** The trade's recorded key levels, rendered for the CSV join
+   *  (audit §G 2e) — empty string when none are recorded. */
+  keyLevelsText: string;
+  /** Derived session levels over the EXPORTED rows only (§G 2b). */
+  derived: {
+    /** Session high through the exit candle (never beyond). */
+    sessionHighThroughExit: number | null;
+    /** Premarket (before 09:30 ET) extremes over exported rows;
+     *  null when no premarket candles are in the exported set. */
+    premarketHigh: number | null;
+    premarketLow: number | null;
+    premarketCandlesPresent: boolean;
+  };
   counts: { entryContext: number; entryCandleFinal: number; postEntry: number };
   /** Honest edge-case notes (empty entry context, same-candle round
    *  trip, dataset gaps) — surfaced in the package, never hidden. */
@@ -103,9 +148,19 @@ export interface BuildTradeChartContextInput {
   recordedEntryTime: string | null;
   /** The session's stored candles (unknown JSON — validated here). */
   candles: unknown;
+  /** Candle timeframe in minutes when recorded (Daily Replay dataset
+   *  timeframe); null when the source does not record one. */
+  timeframeMinutes?: number | null;
+  /** The trade's recorded key levels (journal annotation), joined
+   *  into the context (§G 2e). Null/empty when none recorded. */
+  keyLevels?: { price: number; type: string; interaction: string | null }[] | null;
 }
 
 export function buildTradeChartContext(input: BuildTradeChartContextInput): TradeChartContext {
+  const keyLevelsText = (input.keyLevels ?? [])
+    .filter((k) => Number.isFinite(k.price))
+    .map((k) => `${k.price} ${k.type}${k.interaction ? ` (${k.interaction})` : ""}`)
+    .join("; ");
   const base: TradeChartContext = {
     tradeId: input.tradeId,
     tradeKey: input.tradeKey,
@@ -116,6 +171,14 @@ export function buildTradeChartContext(input: BuildTradeChartContextInput): Trad
     entryIndex: input.entryCandleIndex,
     exitIndex: input.exitCandleIndex,
     entryTime: null,
+    timeframeMinutes: input.timeframeMinutes ?? null,
+    keyLevelsText,
+    derived: {
+      sessionHighThroughExit: null,
+      premarketHigh: null,
+      premarketLow: null,
+      premarketCandlesPresent: false,
+    },
     counts: { entryContext: 0, entryCandleFinal: 0, postEntry: 0 },
     notes: [],
     rows: [],
@@ -178,9 +241,26 @@ export function buildTradeChartContext(input: BuildTradeChartContextInput): Trad
     }
   }
 
+  // Derived series (§G 2b/2c) — computed over the EXPORTED rows
+  // only, in candle order, as rows are pushed: the running session
+  // high, the cumulative typical-price VWAP, and EMA(9/20) seeded at
+  // the first exported close. Because exports always start at candle
+  // 0, the series cover session-start → exit and never look beyond.
   const rows: ChartContextRow[] = [];
+  let runHigh = -Infinity;
+  let cumTpVol = 0;
+  let cumVol = 0;
+  let emaFast: number | null = null;
+  let emaSlow: number | null = null;
+  const K_FAST = 2 / (9 + 1);
+  const K_SLOW = 2 / (20 + 1);
   const push = (section: ChartContextSection, idx: number) => {
     const c = candles[idx];
+    runHigh = Math.max(runHigh, c.h);
+    cumTpVol += ((c.h + c.l + c.c) / 3) * c.v;
+    cumVol += c.v;
+    emaFast = emaFast == null ? c.c : c.c * K_FAST + emaFast * (1 - K_FAST);
+    emaSlow = emaSlow == null ? c.c : c.c * K_SLOW + emaSlow * (1 - K_SLOW);
     rows.push({
       section,
       candleIndex: idx,
@@ -191,6 +271,10 @@ export function buildTradeChartContext(input: BuildTradeChartContextInput): Trad
       low: c.l,
       close: c.c,
       volume: c.v,
+      sessionHighSoFar: runHigh,
+      vwap: cumVol > 0 ? cumTpVol / cumVol : null,
+      emaFast,
+      emaSlow,
     });
   };
   for (let i = 0; i < E; i++) push("entry_context", i);
@@ -199,10 +283,27 @@ export function buildTradeChartContext(input: BuildTradeChartContextInput): Trad
     for (let i = E + 1; i <= X; i++) push("post_entry_development", i);
   }
 
+  // Premarket extremes (§G 2b): exported rows whose ET period start
+  // is before 09:30. Present only when the stored set actually
+  // contains premarket candles — otherwise honestly absent + noted.
+  const premarketRows = rows.filter((r) => r.candleTimeEt < "09:30");
+  const derived: TradeChartContext["derived"] = {
+    sessionHighThroughExit: rows.length > 0 ? rows[rows.length - 1].sessionHighSoFar : null,
+    premarketHigh: premarketRows.length > 0 ? Math.max(...premarketRows.map((r) => r.high)) : null,
+    premarketLow: premarketRows.length > 0 ? Math.min(...premarketRows.map((r) => r.low)) : null,
+    premarketCandlesPresent: premarketRows.length > 0,
+  };
+  // When no premarket candles are present the premarket columns are
+  // simply empty and derived.premarketCandlesPresent is false — the
+  // absence is disclosed by the empty columns + the README/chart
+  // definitions rather than a per-trade note (which would repeat in
+  // every package's warnings).
+
   return {
     ...base,
     available: true,
     entryTime: new Date(entryCandle.t).toISOString(),
+    derived,
     counts: {
       entryContext: rows.filter((r) => r.section === "entry_context").length,
       entryCandleFinal: 1,
@@ -219,6 +320,13 @@ export const CHART_CONTEXT_COLUMNS = [
   "trade_id", "symbol", "attempt_id", "section",
   "candle_index", "candle_time", "candle_time_et",
   "open", "high", "low", "close", "volume",
+  // Appended (audit §G 2a/2b/2c/2e): timeframe, derived series and
+  // levels. timeframe_min / premarket_* / key_levels are per-trade
+  // values repeated on the trade's rows (denormalized, like symbol)
+  // so every row stays self-describing.
+  "timeframe_min", "session_high_so_far", "vwap_typical_approx",
+  "ema_fast_9", "ema_slow_20", "premarket_high", "premarket_low",
+  "key_levels",
 ] as const;
 
 function ccCsvEscape(field: string): string {
@@ -250,6 +358,13 @@ export function buildChartContextCsv(contexts: TradeChartContext[]): string | nu
         r.candleTime,
         r.candleTimeEt,
         ccNum(r.open), ccNum(r.high), ccNum(r.low), ccNum(r.close), ccNum(r.volume),
+        ctx.timeframeMinutes != null ? String(ctx.timeframeMinutes) : "",
+        ccNum(r.sessionHighSoFar),
+        r.vwap != null ? ccNum(r.vwap) : "",
+        ccNum(r.emaFast), ccNum(r.emaSlow),
+        ctx.derived.premarketHigh != null ? ccNum(ctx.derived.premarketHigh) : "",
+        ctx.derived.premarketLow != null ? ccNum(ctx.derived.premarketLow) : "",
+        ccCsvEscape(ctx.keyLevelsText),
       ].join(","));
     }
   }

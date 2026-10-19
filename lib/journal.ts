@@ -37,6 +37,12 @@ export interface GroupedTrade {
   fills: RawFill[];
   /** R-multiple needs initial risk; null when stop loss unknown */
   rMultiple: number | null;
+  /** True ONLY for Daily Replay trades rebuilt from a finalized
+   *  draft's recorded anchors (lib/drDrafts groupedTradeFromDraftAnchors,
+   *  AI Edge Export audit §G 3h): their exit fill's PRICE is implied
+   *  by the draft's recorded entry/qty/realized P&L, not a recorded
+   *  fill. Absent/false for every event-derived trade. */
+  anchorsDerived?: boolean;
 }
 
 /**
@@ -460,7 +466,11 @@ export interface RealFill {
   side: "buy" | "sell";
   qty: number;
   price: number;
-  fees: number;
+  /** Recorded fees for this fill, or null when NO fee data was
+   *  recorded for it (AI Edge Export audit §G 3a). A recorded 0 is a
+   *  real value ("fees recorded as zero"); null means unknown, and
+   *  consumers must not silently coerce it into a recorded zero. */
+  fees: number | null;
   fill_time: string | null;
 }
 
@@ -477,6 +487,14 @@ export interface RealTradeCalc {
   grossRealized: number;
   /** Total fees across all fills */
   totalFees: number;
+  /** Whether at least one fill carries fee DATA (AI Edge Export audit
+   *  §G 3a): a fill whose fees value is present (a finite number,
+   *  including an explicitly recorded 0) counts; a fill with no fee
+   *  value at all (null/undefined — e.g. an import that carried no fee
+   *  column) does not. When NO fill carries fee data the trade's fees
+   *  are UNKNOWN — consumers must not present the summed 0 as
+   *  "fees recorded as zero". */
+  feesRecorded: boolean;
   /** Net realized P&L (after fees) */
   netRealized: number;
   /** Initial risk in $ (null when stop loss missing) */
@@ -518,9 +536,11 @@ export function calcRealTrade(
   let matchedExitQty = 0;
   let matchedExitProceeds = 0;
 
+  let feesRecorded = false;
   for (const f of sorted) {
     const q = Number(f.qty), p = Number(f.price);
     totalFees += Number(f.fees || 0);
+    if (f.fees != null && Number.isFinite(Number(f.fees))) feesRecorded = true;
     if (isEntry(f)) {
       lots.push({ qty: q, price: p });
       entryQty += q;
@@ -566,7 +586,7 @@ export function calcRealTrade(
 
   return {
     avgEntry, avgExit, entryQty, openQty,
-    grossRealized, totalFees, netRealized,
+    grossRealized, totalFees, feesRecorded, netRealized,
     initialRisk, rMultiple, riskReward,
     isClosed,
   };

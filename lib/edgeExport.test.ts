@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { calcRealTrade, groupFillsIntoTrades, type GroupedTrade, type RawFill, type RealFill } from "./journal";
 import { riskMetrics } from "./journalAnalytics";
 import { deriveDrEvidence, splitCyclesByGeneration } from "./drTradeEvidence";
-import { buildPreCompletionTrade, type DrDraftRow } from "./drDrafts";
+import { buildPreCompletionTrade, groupedTradeFromDraftAnchors, type DrDraftRow } from "./drDrafts";
 import type { DrEvent, DrEventType } from "./dailyReplayEvents";
 import { mapStrategyRow, mapStrategyVersionRow } from "./strategies";
 import {
@@ -307,14 +307,20 @@ const RANGE = { start: "2026-10-01", end: "2026-10-31" };
   check("no screenshots: all 3 real trades missing", none.tradesMissingScreenshots.length === 3);
   check("no screenshots: sim trades not counted missing", none.simulatorTrades === 2);
 
-  const listed = new Map<string, string[]>([
-    [`real:${R1_ID}`, [`user-x/real_${R1_ID}/uuid1-shot.png`, `user-x/real_${R1_ID}/uuid2-chart.jpg`]],
+  const listed = new Map<string, { path: string; createdAt: string | null }[]>([
+    [`real:${R1_ID}`, [
+      { path: `user-x/real_${R1_ID}/uuid1-shot.png`, createdAt: "2026-10-13T14:00:00.000Z" },
+      { path: `user-x/real_${R1_ID}/uuid2-chart.jpg`, createdAt: "2026-10-13T14:05:00.000Z" },
+    ]],
   ]);
   const manifest = buildScreenshotManifest(snap, listed);
   check("manifest entries for listed trade", manifest.length === 2);
   check("manifest file names stable", manifest[0].fileName === `TRADE-${R1_ID}-shot-1.png` && manifest[1].fileName === `TRADE-${R1_ID}-shot-2.jpg`);
   check("manifest type is trade-screenshot", manifest.every((e) => e.type === "trade-screenshot"));
-  check("manifest capturedAt null (unavailable)", manifest.every((e) => e.capturedAt === null));
+  check("manifest recordedAt plumbed from the storage listing (§G 1c)",
+    manifest[0].recordedAt === "2026-10-13T14:00:00.000Z" && manifest[1].recordedAt === "2026-10-13T14:05:00.000Z");
+  check("manifest real-trade rows are manual attachments (§G 1b)",
+    manifest.every((e) => e.role === "attachment" && e.captureKind === "manual"));
   manifest[0].status = "included";
   const cov = summarizeScreenshotCoverage(snap, manifest, true);
   check("coverage: 1 file across 1 trade, 2 real missing", cov.screenshotFiles === 1 && cov.realTradesWithScreenshots === 1 && cov.tradesMissingScreenshots.length === 2);
@@ -472,7 +478,7 @@ const RANGE = { start: "2026-10-01", end: "2026-10-31" };
 {
   const FAKE_UUID = "123e4567-e89b-12d3-a456-426614174000";
   const snap = buildExportSnapshot(input, { range: RANGE, mode: "custom", source: "all" });
-  const listed = new Map<string, string[]>([[`real:${R1_ID}`, [`${FAKE_UUID}/real_${R1_ID}/cafef00d-internal.png`]]]);
+  const listed = new Map<string, { path: string; createdAt: string | null }[]>([[`real:${R1_ID}`, [{ path: `${FAKE_UUID}/real_${R1_ID}/cafef00d-internal.png`, createdAt: "2026-10-13T14:00:00.000Z" }]]]);
   const manifest = buildScreenshotManifest(snap, listed);
   manifest[0].status = "included";
   check("privacy: internal entry retains path for app use", manifest[0].storagePath.includes(FAKE_UUID));
@@ -573,8 +579,11 @@ const RANGE = { start: "2026-10-01", end: "2026-10-31" };
   approx("2.0 DR initialRisk from snapshot", rec1.initialRisk, 50);
   approx("2.0 DR R = 100/50 = 2", rec1.rMultiple, 2);
   check("2.0 DR strategy chain resolved", rec1.strategyName === "HOD Breakout" && rec1.strategyVersion === 2 && rec1.strategyLabel === "HOD Breakout · v2" && rec1.strategyVersionId === VER2);
+  check("2.0 DR eventsStatus is recorded when evidence derived (§G 3c)", rec1.eventsStatus === "recorded");
   const rec2 = drOnly.trades.find((t) => t.tradeKey === dr2Grouped[0].tradeKey)!;
   check("2.0 DR without snapshot: plan fields null, R null", rec2.originalStopLoss === null && rec2.initialRisk === null && rec2.rMultiple === null);
+  check("2.0 DR without snapshot but WITH events: status recorded, not missing (§G 3c)",
+    rec2.eventsStatus === "recorded");
   check("2.0 DR without snapshot: basis explains", rec2.riskBasis.includes("no risk snapshot"));
   check("2.0 DR without strategy: label fields null", rec2.strategyName === null && rec2.strategyVersionId === null);
   const tlRec = allSnap.trades.find((t) => t.tradeKey === s1Grouped[0].tradeKey)!;
@@ -589,15 +598,17 @@ const RANGE = { start: "2026-10-01", end: "2026-10-31" };
   check("2.0 attempt filter: only ATT2's trade", byAttempt.counts.total === 1 && byAttempt.trades[0].attemptId === ATT2);
 
   /* --- CSV: original 46 keep order; 2.0 appends follow --- */
-  check("2.0 CSV has 54 columns", CSV_COLUMNS.length === 54);
+  check("2.0 CSV has 58 columns", CSV_COLUMNS.length === 58);
   check("2.0 CSV appended columns", CSV_COLUMNS.slice(46, 50).join("|") === "daily_replay_attempt_id|strategy_name|strategy_version|strategy_version_id");
-  check("annotation CSV appends come last", CSV_COLUMNS.slice(50).join("|") === "strategy_traded_id|strategy_traded|setup_class|setup_class_label");
+  check("annotation CSV appends follow", CSV_COLUMNS.slice(50, 54).join("|") === "strategy_traded_id|strategy_traded|setup_class|setup_class_label");
+  check("export-fixes CSV appends come last (§G 3c/3d/3g)", CSV_COLUMNS.slice(54).join("|") === "strategy_custom_label|entry_trigger|events_status|setup_class_origin");
   const manifest0 = buildScreenshotManifest(drOnly, new Map());
   const csvRows = parseCsv(buildTradesCsv(drOnly, manifest0));
-  check("2.0 CSV header arity 54", csvRows[0].length === 54);
+  check("2.0 CSV header arity 58", csvRows[0].length === 58);
   const cIdx = (n: string) => csvRows[0].indexOf(n);
   const drRow = csvRows.find((r) => r[cIdx("daily_replay_attempt_id")] === ATT1)!;
   check("2.0 CSV DR source cell", drRow[cIdx("source")] === "Daily Replay / Backtest");
+  check("2.0 CSV DR events_status cell (§G 3c)", drRow[cIdx("events_status")] === "recorded");
   check("2.0 CSV DR strategy cells", drRow[cIdx("strategy_name")] === "HOD Breakout" && drRow[cIdx("strategy_version")] === "2" && drRow[cIdx("strategy_version_id")] === VER2);
   check("2.0 CSV DR original stop exported", drRow[cIdx("original_stop_loss")] === "9.5" && drRow[cIdx("r_multiple")] === "2");
 
@@ -607,7 +618,7 @@ const RANGE = { start: "2026-10-01", end: "2026-10-31" };
   const annMeta: ExportMetaInput = {
     ...r1Meta,
     strategy_id: STRAT_SUP, setup_class: "strong_support_reaction",
-    strategy_custom_label: null, entry_trigger: "Reversal candle at support",
+    strategy_custom_label: "Desk support plan", entry_trigger: "Reversal candle at support",
   };
   const annInput: ExportSnapshotInput = {
     unified: [realUnified(r1)], metas: { [`real:${R1_ID}`]: annMeta },
@@ -639,6 +650,18 @@ const RANGE = { start: "2026-10-01", end: "2026-10-31" };
     annDoc.breakdowns.strategyTraded.every((r: any) => typeof r.avgRSampleCount === "number" && typeof r.maxDrawdownUSD === "number"));
   check("annotation: tradesIndex carries the annotation",
     annDoc.tradesIndex[0].strategyTradedId === STRAT_SUP && annDoc.tradesIndex[0].setupClassLabel === "Strong Support Reaction");
+  // §G 3d: the two recorded fields that used to be dropped are now
+  // serialized in BOTH artifacts; §G 3g: the label's origin is
+  // flagged as recorded (it came from setup_class, not the coalesce).
+  check("annotation: CSV carries strategy_custom_label + entry_trigger (§G 3d)",
+    annRow[aIdx("strategy_custom_label")] === "Desk support plan" && annRow[aIdx("entry_trigger")] === "Reversal candle at support");
+  check("annotation: tradesIndex carries custom label + trigger + origin (§G 3d/3g)",
+    annDoc.tradesIndex[0].strategyCustomLabel === "Desk support plan"
+    && annDoc.tradesIndex[0].entryTrigger === "Reversal candle at support"
+    && annDoc.tradesIndex[0].setupClassOrigin === "recorded");
+  check("annotation: setupClass breakdown row carries provenance counts (§G 3g)",
+    annDoc.breakdowns.setupClass.every((r: any) => typeof r.recordedCount === "number" && typeof r.legacyHodCount === "number")
+    && annDoc.breakdowns.setupClass.find((r: any) => r.label === "Strong Support Reaction")?.recordedCount === 1);
   // Backward compatibility: the SAME trade without annotation fields
   // exports the new cells empty — except setup_class_label, which
   // honestly reflects the legacy hod_class via the read coalesce.
@@ -652,9 +675,18 @@ const RANGE = { start: "2026-10-01", end: "2026-10-31" };
     baseCsv[1][bIdx("strategy_traded_id")] === "" && baseCsv[1][bIdx("strategy_traded")] === "" && baseCsv[1][bIdx("setup_class")] === "");
   check("annotation: legacy hod_class still labels via coalesce (no data invented)",
     baseCsv[1][bIdx("setup_class_label")] === "Clean Breakout" && baseSnap.trades[0].strategyTradedId === null);
+  check("annotation: coalesced label's origin is flagged legacy_hod (§G 3g)",
+    baseCsv[1][bIdx("setup_class_origin")] === "legacy_hod" && baseSnap.trades[0].setupClassOrigin === "legacy_hod");
+  const baseDoc = buildAnalyticsJson(baseSnap, [], summarizeScreenshotCoverage(baseSnap, [], false)) as any;
+  check("annotation: tradesIndex flags the coalesce origin (§G 3g)",
+    baseDoc.tradesIndex[0].setupClassOrigin === "legacy_hod"
+    && baseDoc.breakdowns.setupClass.find((r: any) => r.label === "Clean Breakout")?.legacyHodCount === 1);
 
   /* --- screenshots: DR eligible, Trade Lab excluded --- */
-  const listed = new Map([[drGrouped[0].tradeKey, ["u/dr/shot1.png"]], [s1Grouped[0].tradeKey, ["u/tl/shot.png"]]]);
+  const listed = new Map([
+    [drGrouped[0].tradeKey, [{ path: "u/dr/shot1.png", createdAt: "2026-10-16T16:00:00.000Z" }]],
+    [s1Grouped[0].tradeKey, [{ path: "u/tl/shot.png", createdAt: "2026-10-16T16:00:00.000Z" }]],
+  ]);
   const manAll = buildScreenshotManifest(allSnap, listed);
   check("2.0 manifest includes DR trade screenshots", manAll.some((e) => e.tradeKey === drGrouped[0].tradeKey));
   check("2.0 manifest still excludes Trade Lab sim", !manAll.some((e) => e.tradeKey === s1Grouped[0].tradeKey));
@@ -691,6 +723,11 @@ const RANGE = { start: "2026-10-01", end: "2026-10-31" };
   check("2.0 source breakdown has Daily Replay bucket",
     (doc.breakdowns.source as any[]).some((r) => r.label === "Daily Replay" && r.count === 2));
   check("2.0 strategy breakdown present", (doc.breakdowns.strategy as any[]).some((r) => r.label === "HOD Breakout" && r.count === 1));
+  check("2.0 strategyTraded is annotation-only: bound DR trade is Not recorded there (§G 3e)",
+    (doc.breakdowns.strategyTraded as any[]).every((r) => r.label === "Not recorded")
+    && (doc.breakdowns.strategyTraded as any[])[0].count === 4);
+  check("2.0 attempt block carries timeframe + event count (§G 2a/3c)",
+    att1Block.timeframeMinutes === null && att1Block.eventsRecorded === att1Events.length && att1Block.lifecycle === "completed");
   check("2.0 schema version", doc.metadata.schemaVersion === "2.0" && allSnap.schemaVersion === "2.0");
 
   /* --- prompt + README DR content --- */
@@ -836,15 +873,19 @@ const RANGE = { start: "2026-10-01", end: "2026-10-31" };
   check("phaseDE README states representative timing", readmeDE.includes("Daily Replay representative screenshots: an auto-captured representative shows the chart as staged at the entry fill; the entry candle was still forming when captured."));
   const promptDE = buildChatGptPrompt(fullDE, covDE, { pdfIncluded: false });
   check("phaseDE prompt states finalized-only", promptDE.includes("Daily Replay trades in this export are FINALIZED trades only — unfinalized drafts are excluded by design and never appear in any file in this package."));
-  check("phaseDE prompt states representative rule", promptDE.includes("Daily Replay screenshots: each Daily Replay trade contributes ONE representative screenshot"));
+  check("phaseDE prompt states all-included screenshots (§G 1a)", promptDE.includes("Daily Replay screenshots: EVERY available screenshot of each Daily Replay trade is included"));
   check("phaseDE schema version stays 2.0", fullDE.schemaVersion === "2.0");
 }
 
 /* ================= Representative screenshots + chart prompt
- * (Representative plan §6.2): manifest roles, exactly-one-image
- * propagation into trades.csv / analytics.json, coverage wording,
- * rules 1–22 byte-identity vs the pinned pre-Stage-1 hashes, and the
- * new unnumbered chart-analysis section. ================= */
+ * (Representative plan §6.2, updated by the 2026-10-18 export fixes,
+ * audit §G Group 1): ALL images are now included (the
+ * representative-only download limit is retired); the representative
+ * survives as a flagged role, both captures carry their candle
+ * indices + capture kinds, recordedAt is plumbed from the listing,
+ * and propagation into trades.csv / analytics.json covers every
+ * included file. Rules 1–22 byte-identity vs the pinned pre-Stage-1
+ * hashes is unchanged and still asserted below. ================= */
 {
   const RSESS = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
   const RATT = "b2222222-2222-4222-8222-222222222222";
@@ -888,7 +929,12 @@ const RANGE = { start: "2026-10-01", end: "2026-10-31" };
     entry: { path: R_ENTRY, candleIndex: 5, status: "captured" },
     exit: { path: R_EXIT, candleIndex: 9, status: "captured" },
   };
-  const listedAll = new Map([[rGrouped.tradeKey, [R_ENTRY, R_EXIT, R_MANUAL, R_REVIEW]]]);
+  const listedAll = new Map([[rGrouped.tradeKey, [
+    { path: R_ENTRY, createdAt: "2026-10-16T16:05:00.000Z" },
+    { path: R_EXIT, createdAt: "2026-10-16T16:09:00.000Z" },
+    { path: R_MANUAL, createdAt: "2026-10-16T16:20:00.000Z" },
+    { path: R_REVIEW, createdAt: "2026-10-16T16:25:00.000Z" },
+  ]]]);
 
   const snapR = mkSnap(bothCaptured);
   check("rep: record carries fill candle indices", snapR.trades[0].entryCandleIndex === 5 && snapR.trades[0].exitCandleIndex === 9);
@@ -899,28 +945,37 @@ const RANGE = { start: "2026-10-01", end: "2026-10-31" };
   check("rep: exactly ONE representative — the entry capture", repEntries.length === 1 && repEntries[0].storagePath === R_ENTRY);
   check("rep: representative is downloadable (listed + file set)", repEntries[0].status === "listed" && repEntries[0].file !== null);
   check("rep: representative source/candle recorded", repEntries[0].representativeSource === "auto_entry" && repEntries[0].candleIndex === 5);
-  check("rep: exit + manual + review are not-included attachments with no file",
-    manR.filter((e) => e.role === "attachment").every((e) => e.status === "not-included" && e.file === null && e.fileName === null)
-    && manR.some((e) => e.storagePath === R_EXIT && e.status === "not-included"));
+  check("rep: DR images live under trade_evidence/<trade ID>/ (§G 1e)",
+    repEntries[0].file === `trade_evidence/${snapR.trades[0].exportId}/${repEntries[0].fileName}`);
+  check("rep: representative recordedAt plumbed (§G 1c)", repEntries[0].recordedAt === "2026-10-16T16:05:00.000Z");
+  const exitEntry = manR.find((e) => e.storagePath === R_EXIT)!;
+  check("rep: exit capture is INCLUDED with role/kind/candle/recordedAt (§G 1a/1b/1c)",
+    exitEntry.role === "exit" && exitEntry.captureKind === "auto_exit" && exitEntry.candleIndex === 9
+    && exitEntry.status === "listed" && exitEntry.file !== null && exitEntry.recordedAt === "2026-10-16T16:09:00.000Z");
+  check("rep: manual + review images are included manual attachments",
+    manR.filter((e) => e.role === "attachment").length === 2
+    && manR.filter((e) => e.role === "attachment").every((e) => e.captureKind === "manual" && e.candleIndex === null && e.status === "listed" && e.file !== null));
+  check("rep: NO not-included rows remain (§G 1a)", manR.every((e) => e.status !== "not-included"));
 
-  // Exactly-one-image propagation: flip the representative to included
-  // (as the package does after download) and rebuild artifacts.
-  repEntries[0].status = "included";
+  // All-included propagation: flip every entry to included (as the
+  // package does after download) and rebuild artifacts.
+  for (const e of manR) e.status = "included";
   const csvRows = parseCsv(buildTradesCsv(snapR, manR));
   const shotCol = CSV_COLUMNS.indexOf("screenshot_files");
   const drRow = csvRows.find((r) => r[1] === "REPR");
-  check("rep: trades.csv names ONLY the representative file",
-    drRow !== undefined && drRow[shotCol] === repEntries[0].fileName);
+  check("rep: trades.csv names ALL FOUR included files",
+    drRow !== undefined && drRow[shotCol] === manR.map((e) => e.fileName).join("; "));
   const docR2 = buildAnalyticsJson(snapR, manR, summarizeScreenshotCoverage(snapR, manR, true)) as any;
-  check("rep: analytics tradesIndex lists ONLY the representative",
-    JSON.stringify(docR2.tradesIndex[0].screenshots) === JSON.stringify([repEntries[0].fileName]));
-  check("rep: analytics public manifest carries role/source/candle",
-    docR2.metadata.screenshotManifest.some((e: any) => e.role === "representative" && e.representativeSource === "auto_entry" && e.candleIndex === 5)
-    && docR2.metadata.screenshotManifest.filter((e: any) => e.status === "not-included").length === 3);
+  check("rep: analytics tradesIndex lists ALL FOUR files",
+    JSON.stringify(docR2.tradesIndex[0].screenshots) === JSON.stringify(manR.map((e) => e.fileName)));
+  check("rep: analytics public manifest carries role/kind/candle/recordedAt",
+    docR2.metadata.screenshotManifest.some((e: any) => e.role === "representative" && e.representativeSource === "auto_entry" && e.candleIndex === 5 && e.captureKind === "auto_entry" && e.recordedAt === "2026-10-16T16:05:00.000Z")
+    && docR2.metadata.screenshotManifest.some((e: any) => e.role === "exit" && e.candleIndex === 9)
+    && docR2.metadata.screenshotManifest.filter((e: any) => e.status === "not-included").length === 0);
   check("rep: public manifest never leaks storage paths",
     docR2.metadata.screenshotManifest.every((e: any) => !("storagePath" in e) && !("tradeKey" in e)));
   const covR = summarizeScreenshotCoverage(snapR, manR, true);
-  check("rep: coverage counts the representative", covR.dailyReplayTradesWithRepresentative === 1 && covR.screenshotFiles === 1);
+  check("rep: coverage counts all files + the representative", covR.dailyReplayTradesWithRepresentative === 1 && covR.screenshotFiles === 4);
 
   // User selection wins over the entry default.
   const snapSel = mkSnap({ ...bothCaptured, representative: { path: R_EXIT, selectedAt: "2026-10-17T00:00:00.000Z" } });
@@ -929,13 +984,18 @@ const RANGE = { start: "2026-10-01", end: "2026-10-31" };
     manSel.filter((e) => e.role === "representative").length === 1
     && manSel.find((e) => e.role === "representative")?.storagePath === R_EXIT
     && manSel.find((e) => e.role === "representative")?.representativeSource === "user_selected"
-    && manSel.find((e) => e.storagePath === R_ENTRY)?.status === "not-included");
+    && manSel.find((e) => e.role === "representative")?.candleIndex === 9);
+  check("rep: the entry capture stays included as role entry when not selected",
+    manSel.find((e) => e.storagePath === R_ENTRY)?.role === "entry"
+    && manSel.find((e) => e.storagePath === R_ENTRY)?.status === "listed");
 
-  // Entry failed -> no representative at all; coverage says so plainly.
+  // Entry failed -> no representative at all; images still included,
+  // coverage says so plainly.
   const snapNone = mkSnap({ entry: { status: "failed" }, exit: { path: R_EXIT, candleIndex: 9, status: "captured" } });
   const manNone = buildScreenshotManifest(snapNone, listedAll, RUSER);
-  check("rep: entry failed + exit captured -> NO representative, all not-included",
-    manNone.every((e) => e.role === "attachment" && e.status === "not-included"));
+  check("rep: entry failed + exit captured -> NO representative, all still included",
+    manNone.every((e) => e.role !== "representative" && e.status === "listed")
+    && manNone.find((e) => e.storagePath === R_EXIT)?.role === "exit");
   const covNone = summarizeScreenshotCoverage(snapNone, manNone, true);
   check("rep: coverage note says 'had no representative screenshot'", covNone.note.includes("had no representative screenshot"));
 
@@ -957,11 +1017,29 @@ const RANGE = { start: "2026-10-01", end: "2026-10-31" };
     promptR.includes("No-hindsight rule") && promptR.includes("judge the entry decision ONLY from entry_context"));
   check("prompt: section covers structure checklist + verdict",
     promptR.includes("higher highs/higher lows") && promptR.includes("consolidation") && promptR.includes("HOD")
-    && promptR.includes("SUPPORTED the stated setup") && promptR.includes("clean, weak, or failed"));
+    && promptR.includes("SUPPORTED the stated setup") && promptR.includes("clean, weak, failed, or anticipation"));
   check("prompt: section forbids invented levels + requires missing-evidence honesty",
     promptR.includes("No invented levels") && promptR.includes("Missing evidence"));
   check("prompt: files list names chart_context.csv with its sections",
     promptR.includes("chart_context.csv - per-trade historical OHLCV") && promptR.includes("post_entry_development"));
+  /* Group 4 (outside-span only): the permitted prompt completions —
+   * manifest in the file list, read-first directive, ZIP guidance,
+   * P&L basis fact, anticipation + supplied VWAP/EMA + citations in
+   * the appended chart section. The pinned spans above are untouched. */
+  check("prompt: file list names screenshots-manifest.json (Group 4)",
+    promptR.includes("screenshots-manifest.json - every screenshot in this package mapped"));
+  check("prompt: read-README-and-manifest-first directive (Group 4)",
+    promptR.includes("Read README.txt and screenshots-manifest.json FIRST"));
+  check("prompt: ZIP-cannot-be-opened guidance (Group 4)",
+    promptR.includes("cannot open the ZIP archive itself"));
+  check("prompt: P&L basis fact (§G 3b)", promptR.includes("P&L basis: Real Market P&L is net of its recorded fees") && promptR.includes("never describe it as net of fees"));
+  check("prompt: provenance fact (§G 3g)", promptR.includes("setup_class_origin") && promptR.includes("legacy_hod"));
+  check("prompt: chart section names anticipation (Group 4)",
+    promptR.includes("clean, weak, failed, or anticipation"));
+  check("prompt: chart section uses the supplied VWAP/EMA columns (Group 4)",
+    promptR.includes("vwap_typical_approx") && promptR.includes("ema_fast_9"));
+  check("prompt: chart section requires precise citations (Group 4)",
+    promptR.includes("Cite your evidence precisely"));
   const promptNoCtx = buildChatGptPrompt(snapR, covR, { pdfIncluded: false });
   check("prompt: section omitted when no chart context and no representative",
     !promptNoCtx.includes("REPRESENTATIVE SCREENSHOT & CHART ANALYSIS") && !promptNoCtx.includes("chart_context.csv - per-trade"));
@@ -1131,6 +1209,146 @@ const RANGE = { start: "2026-10-01", end: "2026-10-31" };
     pHints.withheldFinalizedDrafts === 0 && pHints.outOfRangeDrTrades === 0);
   const pHintsOut = computeDrExportHints(pInput, { range: { start: "2026-10-17", end: "2026-10-17" }, mode: "daily", source: "daily_replay" });
   check("pre-completion: out-of-range hint covers pre-completion trades too", pHintsOut.outOfRangeDrTrades === 1);
+}
+
+/* ============ §G 3a: real-trade fees honesty ============
+ * A trade whose fills carry NO fee data (null at runtime — e.g. an
+ * import with no fee column) exports fees EMPTY (unknown), exactly
+ * like the simulator treatment; a trade whose fills record fees of 0
+ * exports 0.00 — the two states must never be conflated. */
+{
+  const noFeeFills = [
+    { id: "nf1", side: "buy", qty: 100, price: 2.00, fees: null, fill_time: "2026-10-13T13:45:00.000Z" },
+    { id: "nf2", side: "sell", qty: 100, price: 2.50, fees: null, fill_time: "2026-10-13T14:15:00.000Z" },
+  ] as unknown as RealFill[];
+  const nfCalc = calcRealTrade(noFeeFills, "long", null, null);
+  check("fees: calc flags no fee data recorded", nfCalc.feesRecorded === false && nfCalc.totalFees === 0);
+  const nfTrade: ExportRealTradeInput = {
+    id: "66666666-6666-4666-8666-666666666666", ticker: "NOFEE", trade_date: "2026-10-13", direction: "long", strategy: null,
+    status: "closed", stop_loss: null, target: null, float_shares: null, relative_volume: null,
+    market_conditions: null, fills: noFeeFills, calc: nfCalc,
+  };
+  const nfSnap = buildExportSnapshot(
+    { unified: [realUnified(nfTrade)], metas: {}, realTrades: [nfTrade], simTrades: [] },
+    { range: RANGE, mode: "custom", source: "real" });
+  check("fees: unrecorded fees export as null, NOT 0 (§G 3a)", nfSnap.trades[0].fees === null);
+  const nfRows = parseCsv(buildTradesCsv(nfSnap, []));
+  check("fees: CSV fees_usd EMPTY for unrecorded (§G 3a)", nfRows[1][nfRows[0].indexOf("fees_usd")] === "");
+  const nfDoc = buildAnalyticsJson(nfSnap, [], summarizeScreenshotCoverage(nfSnap, [], false)) as any;
+  check("fees: unavailability named in metricsUnavailable (§G 3a)",
+    (nfDoc.metadata.metricsUnavailable as any[]).some((u) => u.key === "realTradeFeesUnknown"));
+  check("fees: feesComplete false when a closed trade's fees are unknown",
+    nfDoc.overall.feesComplete === false);
+
+  const zeroCalc = calcRealTrade(r2Fills, "long", null, null);
+  check("fees: recorded zeros ARE fee data", zeroCalc.feesRecorded === true && zeroCalc.totalFees === 0);
+  const zeroSnap = buildExportSnapshot(input, { range: RANGE, mode: "custom", source: "all" });
+  const zeroRec = zeroSnap.trades.find((t) => t.exportId === `TRADE-${R2_ID}`)!;
+  check("fees: recorded-zero trade still exports 0 (unchanged)", zeroRec.fees === 0);
+}
+
+/* ============ §G 3c: recording-problem marker ============
+ * A finalized DR trade on a ZERO-EVENT attempt: the export must say
+ * events_missing (a recording problem) in trades.csv + analytics,
+ * must NOT assert "no valid risk snapshot recorded at entry" for it,
+ * and the attempt block must disclose eventsRecorded 0. A trade on
+ * an attempt WITH events but no evidence entry is unreconciled. */
+{
+  const Z_ATT = "a6666666-6666-4666-8666-666666666666";
+  const Z_SESS = "66666666-6666-4666-8666-666666666666";
+  const zGrouped = groupFillsIntoTrades([
+    sf("z1", Z_SESS, "buy", 100, 10.00, 5, 0, "2026-10-15T13:35:00.000Z"),
+    sf("z2", Z_SESS, "sell", 100, 9.50, 9, -50, "2026-10-15T13:39:00.000Z"),
+  ], { id: Z_SESS, ticker: "ZLOSS", trade_date: "2026-10-15", source: "daily_replay" });
+  const zInput: ExportSnapshotInput = {
+    unified: [{ ...simUnified(zGrouped[0]), sessionSource: "daily_replay", attemptId: Z_ATT, rMultiple: null }],
+    metas: {}, realTrades: [], simTrades: zGrouped,
+    drAttempts: [{ id: Z_ATT, sessionId: Z_SESS, strategyVersionId: null, status: "finished", startIndex: 4, createdAt: "2026-10-16T16:00:00Z", finishedAt: "2026-10-16T16:30:00Z", ticker: "ZLOSS", tradeDate: "2026-10-15" }],
+    drEvidence: new Map(),
+    drEvents: [],
+    drEventTradeKeys: new Map(),
+    strategies: [], strategyVersions: [],
+  };
+  const zSnap = buildExportSnapshot(zInput, { range: RANGE, mode: "custom", source: "daily_replay" });
+  const zRec = zSnap.trades[0];
+  check("events: zero-event trade is events_missing (§G 3c)", zRec.eventsStatus === "events_missing");
+  check("events: risk basis names the recording problem, not a missing snapshot",
+    zRec.riskBasis.includes("recording problem") && !zRec.riskBasis.includes("no risk snapshot was recorded"));
+  check("events: R stays unavailable (never reconstructed)", zRec.rMultiple === null && zRec.initialRisk === null);
+  check("events: snapshot warning names events_missing",
+    zSnap.warnings.some((w) => w.includes("events_status = events_missing")));
+  const zRows = parseCsv(buildTradesCsv(zSnap, []));
+  check("events: CSV events_status cell (§G 3c)", zRows[1][zRows[0].indexOf("events_status")] === "events_missing");
+  const zDoc = buildAnalyticsJson(zSnap, [], summarizeScreenshotCoverage(zSnap, [], true)) as any;
+  check("events: tradesIndex carries eventsStatus (§G 3c)", zDoc.tradesIndex[0].eventsStatus === "events_missing");
+  check("events: metricsUnavailable splits the cause (§G 3c)",
+    (zDoc.metadata.metricsUnavailable as any[]).some((u) => u.key === "dailyReplayEventsMissing")
+    && !(zDoc.metadata.metricsUnavailable as any[]).some((u) => u.key === "dailyReplayRiskUnavailable"));
+  const zAttempt = (zDoc.dailyReplay.attempts as any[])[0];
+  check("events: attempt block discloses 0 events + events-missing lifecycle (§G 3c)",
+    zAttempt.eventsRecorded === 0 && zAttempt.lifecycle === "events-missing");
+  const zTimeline = buildDecisionTimelineCsv(zSnap);
+  check("events: timeline for a zero-event attempt is header-only (0 rows disclosed via the attempt block)",
+    parseCsv(zTimeline).length === 1);
+
+  // Same trade, but the attempt HAS events and no evidence entry.
+  const zInput2: ExportSnapshotInput = {
+    ...zInput,
+    drEvents: [{ id: "zev-1", attemptId: Z_ATT, event: { seq: 1, type: "attempt_created", wallTs: 1760600000000, marketIdx: 4, marketTs: 1760544000000, payload: { ticker: "ZLOSS" } } }],
+  };
+  const zSnap2 = buildExportSnapshot(zInput2, { range: RANGE, mode: "custom", source: "daily_replay" });
+  check("events: events present but no evidence -> events_unreconciled (§G 3c)",
+    zSnap2.trades[0].eventsStatus === "events_unreconciled");
+}
+
+/* ============ §G 3f: setup fallback alignment ============
+ * A real trade with a recorded strategy but no meta setup tag: the
+ * CSV setup cell uses the strategy fallback; the analytics setup
+ * breakdown must group it under the SAME value. */
+{
+  const onlyR2 = buildExportSnapshot(
+    { unified: [realUnified(r2)], metas: {}, realTrades: [r2], simTrades: [] },
+    { range: RANGE, mode: "custom", source: "real" });
+  const docF = buildAnalyticsJson(onlyR2, [], summarizeScreenshotCoverage(onlyR2, [], false)) as any;
+  check("setup: analytics breakdown uses the resolved setup (matches CSV) (§G 3f)",
+    (docF.breakdowns.setup as any[]).some((r) => r.label === "HOD breakout" && r.count === 1));
+}
+
+/* ============ §G 3h: implied-fill marker (draft anchors) ============ */
+{
+  const A_ATT = "a7777777-7777-4777-8777-777777777777";
+  const A_DRAFT_KEY = `dr:${A_ATT}:g0:c1`;
+  const aDraft: DrDraftRow = {
+    id: "d7777777-7777-4777-8777-777777777777", userId: "u1", draftKey: A_DRAFT_KEY, attemptId: A_ATT,
+    resetGeneration: 0, cycleIndex: 1, status: "finalized",
+    firstFillCandleIndex: 5, firstFillPrice: 10, firstFillQty: 100,
+    closeFillCandleIndex: 9, realizedPnl: 100,
+    eventFirstSeq: 3, eventLastSeq: 6, autoCapture: {}, finalizedSessionId: null,
+    finalizedTradeKey: null, finalizedAt: "2026-10-16T14:00:00Z", createdAt: "2026-10-16T13:29:00Z",
+    updatedAt: "2026-10-16T14:00:00Z",
+  };
+  const aTrade = groupedTradeFromDraftAnchors(aDraft, { ticker: "ANCH", tradeDate: "2026-10-16" });
+  check("anchors: builder flags the trade anchors-derived (§G 3h)", aTrade?.anchorsDerived === true);
+  const aInput: ExportSnapshotInput = {
+    unified: [{
+      key: A_DRAFT_KEY, source: "simulator", ticker: "ANCH", tradeDate: "2026-10-16",
+      direction: "long", entryPrice: 10, exitPrice: 11, qty: 100, realizedPnl: 100,
+      isOpen: false, rMultiple: null, sessionSource: "daily_replay", attemptId: A_ATT,
+    }],
+    metas: {}, realTrades: [], simTrades: aTrade ? [aTrade] : [],
+    drAttempts: [{ id: A_ATT, sessionId: null, strategyVersionId: null, status: "active", startIndex: 4, createdAt: "2026-10-16T13:25:00Z", finishedAt: null, ticker: "ANCH", tradeDate: "2026-10-16" }],
+    drEvents: [],
+  };
+  const aSnap = buildExportSnapshot(aInput, { range: RANGE, mode: "custom", source: "daily_replay" });
+  check("anchors: record carries the flag + implied exit fill (§G 3h)",
+    aSnap.trades[0].anchorsDerived === true && aSnap.trades[0].exits[0].implied === true);
+  const aRows = parseCsv(buildTradesCsv(aSnap, []));
+  check("anchors: CSV exit fill labelled implied (§G 3h)",
+    aRows[1][aRows[0].indexOf("exit_fills")].includes("(implied from recorded P&L)"));
+  check("anchors: snapshot warning discloses the anchors rebuild (§G 3h)",
+    aSnap.warnings.some((w) => w.includes("rebuilt from the finalized draft's recorded anchors")));
+  check("anchors: zero-event anchors trade is also events_missing (§G 3c+3h)",
+    aSnap.trades[0].eventsStatus === "events_missing");
 }
 
 console.log(`edgeExport tests: ${passed} passed, ${failed} failed`);

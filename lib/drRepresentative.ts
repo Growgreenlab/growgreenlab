@@ -67,6 +67,35 @@ function selectedPathOf(raw: unknown): string | null {
   return typeof p === "string" && p.length > 0 ? p : null;
 }
 
+export interface AutoCaptureOutcomes {
+  /** Parsed `auto_capture.entry` outcome (null when absent/malformed). */
+  entry: AutoCaptureSideLike | null;
+  /** Parsed `auto_capture.exit` outcome (null when absent/malformed). */
+  exit: AutoCaptureSideLike | null;
+  /** The user-selected representative path, if one is recorded. */
+  selectedPath: string | null;
+}
+
+/**
+ * Parse BOTH recorded capture outcomes out of a draft's auto_capture
+ * JSONB (AI Edge Export audit §G 1b): the export manifest needs the
+ * entry AND exit sides' paths/candle indices to type every included
+ * image (auto_entry / auto_exit / manual) — resolution above only
+ * ever needed the winning side. Pure parse, no validation: callers
+ * validate paths against the trade's own listing exactly as
+ * resolveRepresentative does.
+ */
+export function parseAutoCaptureOutcomes(
+  autoCapture: Record<string, unknown> | null | undefined,
+): AutoCaptureOutcomes {
+  const ac = autoCapture ?? {};
+  return {
+    entry: sideOf(ac.entry),
+    exit: sideOf(ac.exit),
+    selectedPath: selectedPathOf(ac.representative),
+  };
+}
+
 export interface ResolveRepresentativeInput {
   /** The draft row's auto_capture JSONB (undefined/null for trades
    *  that never had a draft — legacy finalized DR trades). */

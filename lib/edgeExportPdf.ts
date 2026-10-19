@@ -219,7 +219,11 @@ export async function buildTradingReportPdf(
   /* ---- breakdowns ---- */
   const bdTable = (title: string, dim: BreakdownDimension) => {
     heading(title);
-    const rows = breakdown(at, dim).filter((r) => r.label !== "Not recorded" || dim === "setup").slice(0, 12);
+    // §G 5b: "Not recorded" rows are shown consistently across ALL
+    // dimensions — the unrecorded bucket is a fact about the data,
+    // and silently dropping it (the old setup-only exception) made
+    // the PDF's tables disagree with analytics.json.
+    const rows = breakdown(at, dim).slice(0, 12);
     if (rows.length === 0) {
       para("No data recorded for this breakdown in the selected trades. Tag trades in Trade Review to populate it.", 9, GRAY);
       return;

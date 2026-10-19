@@ -212,13 +212,24 @@ export const LEGACY_HOD_CLASS_TO_SLUG: Record<string, string> = {
 export function effectiveClassification(meta: {
   setup_class?: string | null;
   hod_class?: string | null;
-}): { slug: string; label: string; family: ClassificationFamily } | null {
+}): {
+  slug: string;
+  label: string;
+  family: ClassificationFamily;
+  /** Provenance of the label (AI Edge Export audit §G 3g): "recorded"
+   *  when it comes from the trader's setup_class annotation;
+   *  "legacy_hod" when it is DISPLAY-ONLY, coalesced from the legacy
+   *  hod_class — consumers must never present a legacy_hod label as
+   *  a recorded classification. */
+  origin: "recorded" | "legacy_hod";
+} | null {
   if (meta.setup_class) {
     const slug = meta.setup_class;
     return {
       slug,
       label: classificationLabel(slug) ?? slug,
       family: familyOfClassificationSlug(slug) ?? "generic",
+      origin: "recorded",
     };
   }
   if (meta.hod_class) {
@@ -228,6 +239,7 @@ export function effectiveClassification(meta: {
       slug,
       label: classificationLabel(slug) ?? slug,
       family: "hod_breakout",
+      origin: "legacy_hod",
     };
   }
   return null;

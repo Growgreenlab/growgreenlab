@@ -92,7 +92,7 @@ check("post-exit sentinel appears NOWHERE", ctx.rows.every((r) =>
 const csv = buildChartContextCsv([ctx]);
 check("csv produced", csv !== null);
 const csvLines = (csv ?? "").split("\r\n").filter((l) => l.length > 0);
-check("csv header exact", csvLines[0] === "trade_id,symbol,attempt_id,section,candle_index,candle_time,candle_time_et,open,high,low,close,volume");
+check("csv header exact", csvLines[0] === "trade_id,symbol,attempt_id,section,candle_index,candle_time,candle_time_et,open,high,low,close,volume,timeframe_min,session_high_so_far,vwap_typical_approx,ema_fast_9,ema_slow_20,premarket_high,premarket_low,key_levels");
 check("csv row count = header + 10 rows", csvLines.length === 11);
 check("csv entry_context lines carry NO sentinel values",
   csvLines.filter((l) => l.includes(",entry_context,")).every((l) => !l.includes("777.77") && !l.includes("888.88") && !l.includes("999999")));
@@ -165,6 +165,84 @@ check("csv rows are self-describing (trade/symbol/attempt on every row)",
     summary.tradesWithContext === 1 && summary.tradesUnavailable === 1 && summary.unavailable[0].tradeId === "TRADE-other");
   const mixed = buildChartContextCsv([good, badOne]);
   check("csv includes only the available trade's rows", mixed !== null && !mixed.includes("TRADE-other"));
+}
+
+/* ---- derived columns (audit §G 2a/2b/2c/2e), hand-checked ----
+ * Fixture starts 09:28 ET (13:28 UTC): candles 0-1 are premarket,
+ * 2 is the 09:30 regular open, E=3 entry, X=4 exit, candle 5 exists
+ * in storage but is beyond the exit and must not leak into any
+ * derived value (session high through exit must ignore its 99 high).
+ *   i:  o     h     l     c     v
+ *   0:  10    11    9     10    100   (09:28, premarket)
+ *   1:  10    12    10    11    100   (09:29, premarket)
+ *   2:  11    13    10    12    300   (09:30)
+ *   3:  12    12.5  11    12    100   (09:31, ENTRY)
+ *   4:  12    14    11.5  13    200   (09:32, EXIT)
+ *   5:  13    99    12    50    100   (beyond exit — excluded)
+ * Hand-computed expectations:
+ *   premarket high/low = 12 / 9 (candles 0-1 only)
+ *   session high through exit = 14 (candle 4, NOT 99)
+ *   row0: hod 11; vwap = typical(10) = 10; ema9 = ema20 = 10 (seed)
+ *   row1: hod 12; vwap = (10*100 + 11*100)/200 = 10.5;
+ *         ema9 = 11*0.2 + 10*0.8 = 10.2;
+ *         ema20 = 11*(2/21) + 10*(19/21) = 212/21 ≈ 10.095238
+ *   row2: hod 13; vwap = (1000 + 1100 + (35/3)*300)/500 = 5600/500 = 11.2;
+ *         ema9 = 12*0.2 + 10.2*0.8 = 10.56
+ *   row3: hod 13 (12.5 < 13); vwap = (5600 + (35.5/3)*100)/600 ≈ 11.305556
+ */
+{
+  const BASE3 = Date.UTC(2026, 9, 15, 13, 28, 0); // 09:28 ET
+  const dc: ChartCandle[] = [
+    { t: BASE3 + 0 * MIN, o: 10, h: 11, l: 9, c: 10, v: 100 },
+    { t: BASE3 + 1 * MIN, o: 10, h: 12, l: 10, c: 11, v: 100 },
+    { t: BASE3 + 2 * MIN, o: 11, h: 13, l: 10, c: 12, v: 300 },
+    { t: BASE3 + 3 * MIN, o: 12, h: 12.5, l: 11, c: 12, v: 100 },
+    { t: BASE3 + 4 * MIN, o: 12, h: 14, l: 11.5, c: 13, v: 200 },
+    { t: BASE3 + 5 * MIN, o: 13, h: 99, l: 12, c: 50, v: 100 },
+  ];
+  const dctx = buildTradeChartContext({
+    tradeId: "TRADE-deriv", tradeKey: "sess:9", symbol: "DERIV", attemptId: "att-9",
+    entryCandleIndex: 3, exitCandleIndex: 4,
+    recordedEntryTime: iso(BASE3 + 3 * MIN),
+    candles: dc,
+    timeframeMinutes: 1,
+    keyLevels: [{ price: 12.5, type: "Resistance", interaction: "Resistance rejection" }],
+  });
+  check("derived: context available", dctx.available === true);
+  const approx = (name: string, actual: number | null, expected: number) =>
+    check(`${name} (got ${actual}, want ${expected})`, actual != null && Math.abs(actual - expected) < 1e-6);
+  approx("derived: premarket high = 12", dctx.derived.premarketHigh, 12);
+  approx("derived: premarket low = 9", dctx.derived.premarketLow, 9);
+  check("derived: premarket candles flagged present", dctx.derived.premarketCandlesPresent === true);
+  approx("derived: session high through exit = 14 (post-exit 99 excluded)", dctx.derived.sessionHighThroughExit, 14);
+  const r0 = dctx.rows[0], r1 = dctx.rows[1], r2 = dctx.rows[2], r3 = dctx.rows[3];
+  approx("derived: row0 hod-so-far 11", r0.sessionHighSoFar, 11);
+  approx("derived: row0 vwap 10", r0.vwap, 10);
+  approx("derived: row0 ema seed = first close", r0.emaFast, 10);
+  approx("derived: row1 hod-so-far 12", r1.sessionHighSoFar, 12);
+  approx("derived: row1 vwap 10.5", r1.vwap, 10.5);
+  approx("derived: row1 ema9 10.2", r1.emaFast, 10.2);
+  approx("derived: row1 ema20 212/21", r1.emaSlow, 212 / 21);
+  approx("derived: row2 vwap 11.2", r2.vwap, 11.2);
+  approx("derived: row2 ema9 10.56", r2.emaFast, 10.56);
+  approx("derived: row3 (entry) hod-so-far still 13", r3.sessionHighSoFar, 13);
+  approx("derived: row3 vwap ≈ 11.305556", r3.vwap, 11.305556);
+  check("derived: timeframe carried", dctx.timeframeMinutes === 1);
+  check("derived: key levels joined", dctx.keyLevelsText === "12.5 Resistance (Resistance rejection)");
+  const dCsv = buildChartContextCsv([dctx]) ?? "";
+  const dRows = dCsv.split("\r\n").filter((l) => l.length > 0).slice(1).map((l) => l.split(","));
+  check("derived: csv rows carry timeframe + premarket + key levels",
+    dRows.length === 5 && dRows.every((r) => r[12] === "1" && r[17] === "12" && r[18] === "9" && r[19] === "12.5 Resistance (Resistance rejection)"));
+  check("derived: csv session_high_so_far final row = 14", dRows[4][13] === "14");
+}
+
+{
+  // The standard fixture starts AT 09:30 ET — no premarket candles:
+  // premarket extremes are honestly absent, never derived from
+  // regular-hours rows.
+  check("derived: no premarket rows -> extremes null + flag false",
+    ctx.derived.premarketCandlesPresent === false && ctx.derived.premarketHigh === null && ctx.derived.premarketLow === null);
+  check("derived: timeframe null when the source records none", ctx.timeframeMinutes === null);
 }
 
 console.log(`drChartContext tests: ${passed} passed, ${failed} failed`);

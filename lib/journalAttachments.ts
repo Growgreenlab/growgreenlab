@@ -99,12 +99,18 @@ export async function uploadScreenshotBlob(
  * List a trade's screenshots with fresh signed URLs (1 hour TTL).
  * Returns [] on any error (missing bucket, no files, signed-url
  * failure) so callers can treat "no screenshots" uniformly.
+ *
+ * Each entry also carries `createdAt` — the storage object's
+ * created_at (its upload/record time). The AI Edge Export surfaces
+ * this as the manifest's `recordedAt`: it is near-exact for
+ * auto-captures (uploaded at the fill moment) and is the upload time
+ * for manual attachments — never a claimed shutter time.
  */
 export async function listScreenshots(
   client: SupabaseClient,
   userId: string,
   tradeKey: string,
-): Promise<{ path: string; url: string }[]> {
+): Promise<{ path: string; url: string; createdAt: string | null }[]> {
   try {
     const prefix = `${userId}/${segment(tradeKey)}`;
     const { data, error } = await client.storage.from(BUCKET).list(prefix, {
@@ -114,17 +120,21 @@ export async function listScreenshots(
     if (error || !data) return [];
     // Storage list results include folder entries and the
     // ".emptyFolderPlaceholder" object — real files have a non-null id.
-    const paths = data
-      .filter((e) => e.name && e.id != null && e.name !== ".emptyFolderPlaceholder")
-      .map((e) => `${prefix}/${e.name}`);
+    const files = data.filter((e) => e.name && e.id != null && e.name !== ".emptyFolderPlaceholder");
+    const paths = files.map((e) => `${prefix}/${e.name}`);
     if (paths.length === 0) return [];
+    const createdByPath = new Map(
+      files.map((e) => [`${prefix}/${e.name}`, typeof e.created_at === "string" ? e.created_at : null]),
+    );
     const { data: signed, error: signError } = await client.storage
       .from(BUCKET)
       .createSignedUrls(paths, SIGNED_URL_TTL_SECONDS);
     if (signError || !signed) return [];
-    const out: { path: string; url: string }[] = [];
+    const out: { path: string; url: string; createdAt: string | null }[] = [];
     for (const s of signed) {
-      if (s.signedUrl && s.path) out.push({ path: s.path, url: s.signedUrl });
+      if (s.signedUrl && s.path) {
+        out.push({ path: s.path, url: s.signedUrl, createdAt: createdByPath.get(s.path) ?? null });
+      }
     }
     return out;
   } catch {

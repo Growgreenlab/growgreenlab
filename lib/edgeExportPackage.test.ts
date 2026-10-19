@@ -341,7 +341,7 @@ async function main() {
     // Deliberate update (Representative plan §5 S1.2): the public set
     // gains role / representativeSource / candleIndex / candleTime —
     // still NO storagePath, tradeKey or account identifiers.
-    check("priv: manifest entry keys are exactly the public set", !!entry && JSON.stringify(Object.keys(entry).sort()) === JSON.stringify(["candleIndex", "candleTime", "capturedAt", "file", "fileName", "representativeSource", "role", "status", "symbol", "tradeId", "type"]));
+    check("priv: manifest entry keys are exactly the public set", !!entry && JSON.stringify(Object.keys(entry).sort()) === JSON.stringify(["candleIndex", "candleTime", "captureKind", "file", "fileName", "recordedAt", "representativeSource", "role", "status", "symbol", "tradeId", "type"]));
 
     // Analytics: gross values on the documented net basis + definitions.
     const analytics = JSON.parse(analyticsT) as any;
@@ -423,7 +423,9 @@ async function main() {
     check("2.0 pkg: timeline names the attempt + trade", tlText.includes(ATT) && tlText.includes("risk_snapshot"));
     const sjText = await zip.file("strategy.json")!.async("string");
     check("2.0 pkg: strategy.json notes unbound attempt", sjText.includes(ATT));
-    check("2.0 pkg: DR screenshot bytes included", res.summary.screenshotFiles === 1 && !!zip.file(`screenshots/${res.manifest[0]?.fileName}`));
+    check("2.0 pkg: DR screenshot bytes included under trade_evidence/ (§G 1e)",
+      res.summary.screenshotFiles === 1 && !!zip.file(res.manifest[0]?.file ?? "missing")
+      && (res.manifest[0]?.file ?? "").startsWith("trade_evidence/"));
     check("2.0 pkg: manifest marks DR screenshot included", res.manifest.length === 1 && res.manifest[0].status === "included");
     const noTl = await generateEdgePackage(drClient, USER, drSnap, { includeScreenshots: true, includePdf: false, includeDecisionTimeline: false });
     const zip2 = await JSZip.loadAsync(new Uint8Array(await noTl.blob.arrayBuffer()));
@@ -491,13 +493,17 @@ async function main() {
     check("phaseDE pkg: DR trade lists BOTH canonical and draft prefixes",
       recorded.includes(canonPrefix) && recorded.includes(draftPrefix));
     check("phaseDE pkg: DR paths include objects from both prefixes",
-      drPaths.includes(`${canonPrefix}/canon.png`) && drPaths.includes(`${draftPrefix}/auto-entry-c5.png`) && drPaths.length === 2);
-    check("phaseDE pkg: DR paths deduped by path", new Set(drPaths).size === drPaths.length);
+      drPaths.some((l) => l.path === `${canonPrefix}/canon.png`) && drPaths.some((l) => l.path === `${draftPrefix}/auto-entry-c5.png`) && drPaths.length === 2);
+    check("phaseDE pkg: DR paths deduped by path", new Set(drPaths.map((l) => l.path)).size === drPaths.length);
+    check("phaseDE pkg: listings carry the storage recorded time (§G 1c)",
+      drPaths.find((l) => l.path.endsWith("canon.png"))?.createdAt === "2026-10-16T16:05:00.000Z"
+      && drPaths.find((l) => l.path.endsWith("auto-entry-c5.png"))?.createdAt === "2026-10-16T16:06:00.000Z");
     check("phaseDE pkg: Trade Lab sim trade still lists nothing",
       !recorded.includes(tlPrefix) && !listedMap.has(tlKey));
   }
 
-  /* ---- Representative plan §6.2: one image per DR trade, end to end ---- */
+  /* ---- Representative plan §6.2 + export fixes §G Group 1: ALL of a
+   * DR trade's images ship, end to end; the representative is a flag ---- */
   {
     const PSESS = "ffffffff-ffff-4fff-8fff-ffffffffffff";
     const PATT = "c3333333-3333-4333-8333-333333333333";
@@ -577,24 +583,37 @@ async function main() {
     }) as any;
 
     const resP = await generateEdgePackage(mkPkgClient(), USER, pSnap, { includeScreenshots: true, includePdf: false });
-    check("rep pkg: exactly ONE screenshot file in the summary", resP.summary.screenshotFiles === 1);
+    check("rep pkg: ALL FOUR screenshot files in the summary (§G 1a)", resP.summary.screenshotFiles === 4);
     const zipP = await JSZip.loadAsync(new Uint8Array(await resP.blob.arrayBuffer()));
-    const shotNames = Object.keys(zipP.files).filter((n) => n.startsWith("screenshots/") && !n.endsWith("/"));
-    check("rep pkg: ZIP screenshots/ holds exactly one image", shotNames.length === 1);
+    const shotNames = Object.keys(zipP.files).filter((n) => n.startsWith("trade_evidence/") && !n.endsWith("/"));
+    check("rep pkg: ZIP trade_evidence/<trade ID>/ holds all four images (§G 1e)", shotNames.length === 4);
     const repEntry = resP.manifest.find((e) => e.role === "representative");
-    check("rep pkg: the ZIP image IS the representative", repEntry?.status === "included" && shotNames[0] === `screenshots/${repEntry.fileName}`);
-    check("rep pkg: manifest lists all 4 images; 3 are not-included",
-      resP.manifest.length === 4 && resP.manifest.filter((e) => e.status === "not-included").length === 3);
+    check("rep pkg: the representative is among them, at its manifest path",
+      repEntry?.status === "included" && shotNames.includes(repEntry.file!));
+    check("rep pkg: manifest lists all 4 images; NONE is not-included",
+      resP.manifest.length === 4 && resP.manifest.filter((e) => e.status === "not-included").length === 0);
+    const exitEntry = resP.manifest.find((e) => e.role === "exit");
+    check("rep pkg: entry AND exit images physically present at their manifest paths (§G 1a/§8)",
+      shotNames.includes(repEntry?.file ?? "missing") && shotNames.includes(exitEntry?.file ?? "missing"));
+    const exitBytes = await zipP.file(exitEntry!.file!)!.async("uint8array");
+    check("rep pkg: exit image bytes are the stored originals (no downscale)",
+      exitBytes.length === FAKE_PNG.length && exitBytes.every((b, i) => b === FAKE_PNG[i]));
     check("rep pkg: representative candleTime stamped from stored candles",
       repEntry?.candleTime === "2026-10-15T13:35:00.000Z" && repEntry?.candleIndex === 5 && repEntry?.representativeSource === "auto_entry");
+    check("rep pkg: exit entry carries kind/candle/recordedAt + stamped candleTime (§G 1b/1c)",
+      exitEntry?.captureKind === "auto_exit" && exitEntry?.candleIndex === 9
+      && exitEntry?.recordedAt === "2026-10-16T16:09:00.000Z" && exitEntry?.candleTime === "2026-10-15T13:39:00.000Z");
+    check("rep pkg: manifest references ONLY files physically in the ZIP (§8)",
+      resP.manifest.filter((e) => e.status === "included").every((e) => shotNames.includes(e.file!))
+      && resP.summary.filesIncluded.filter((f) => f.startsWith("trade_evidence/")).length === 4);
     const tradesCsvP = await zipP.file("trades.csv")!.async("string");
     const pRows = parseCsv(tradesCsvP);
     const pShotCol = pRows[0].indexOf("screenshot_files");
-    check("rep pkg: trades.csv names only the representative file",
-      pRows.length === 2 && pRows[1][pShotCol] === repEntry?.fileName);
+    check("rep pkg: trades.csv names ALL FOUR files",
+      pRows.length === 2 && pRows[1][pShotCol] === resP.manifest.map((e) => e.fileName).join("; "));
     const analyticsP = JSON.parse(await zipP.file("analytics.json")!.async("string"));
-    check("rep pkg: analytics tradesIndex lists only the representative",
-      JSON.stringify(analyticsP.tradesIndex[0].screenshots) === JSON.stringify([repEntry?.fileName]));
+    check("rep pkg: analytics tradesIndex lists ALL FOUR files",
+      JSON.stringify(analyticsP.tradesIndex[0].screenshots) === JSON.stringify(resP.manifest.map((e) => e.fileName)));
     check("rep pkg: chart_context.csv in ZIP + filesIncluded",
       !!zipP.file("chart_context.csv") && resP.summary.filesIncluded.includes("chart_context.csv"));
     const ccText = await zipP.file("chart_context.csv")!.async("string");
@@ -603,27 +622,33 @@ async function main() {
       ccRows.filter((r) => r[3] === "entry_context").length === 5
       && ccRows.filter((r) => r[3] === "entry_candle_final").length === 1
       && ccRows.filter((r) => r[3] === "post_entry_development").length === 4);
+    check("rep pkg: chart_context derived columns present (§G 2b/2c)",
+      ccText.split("\r\n")[0].includes("session_high_so_far,vwap_typical_approx,ema_fast_9,ema_slow_20")
+      && ccRows[ccRows.length - 1][13] === "11.1"
+      && ccRows.every((r) => r[17] === "" && r[18] === ""));
     check("rep pkg: prompt carries the chart-analysis section + file line",
       resP.promptText.includes("REPRESENTATIVE SCREENSHOT & CHART ANALYSIS") && resP.promptText.includes("chart_context.csv - per-trade historical OHLCV"));
     check("rep pkg: no chart-context warnings on the happy path",
       !resP.warnings.some((w) => w.includes("Chart context unavailable") || w.includes("could not be built")));
 
-    /* representative download failure: reported, NEVER substituted */
+    /* representative download failure: reported, NEVER substituted —
+     * the other images still ship (§G 1d). */
     const resFail = await generateEdgePackage(mkPkgClient({ failEntryDownload: true }), USER, pSnap, { includeScreenshots: true, includePdf: false });
     const failRep = resFail.manifest.find((e) => e.role === "representative");
-    check("rep fail: representative marked unavailable", failRep?.status === "unavailable");
-    check("rep fail: NO image substituted (0 files, others still not-included)",
-      resFail.summary.screenshotFiles === 0 && resFail.manifest.filter((e) => e.status === "not-included").length === 3);
+    check("rep fail: representative marked unavailable", failRep?.status === "unavailable" && failRep?.file === null);
+    check("rep fail: NO image substituted — the other three still included",
+      resFail.summary.screenshotFiles === 3 && resFail.manifest.filter((e) => e.status === "included").length === 3);
     check("rep fail: warning surfaced", resFail.warnings.some((w) => w.includes("could not be downloaded")));
     const zipFail = await JSZip.loadAsync(new Uint8Array(await resFail.blob.arrayBuffer()));
-    check("rep fail: ZIP has the NO-SCREENSHOTS note, no image bytes",
-      !!zipFail.file("screenshots/NO-SCREENSHOTS.txt") && !Object.keys(zipFail.files).some((n) => n.endsWith(".png")));
+    check("rep fail: ZIP holds the 3 available images, NO placeholder note",
+      !zipFail.file("screenshots/NO-SCREENSHOTS.txt")
+      && Object.keys(zipFail.files).filter((n) => n.endsWith(".png")).length === 3);
 
     /* candle fetch failure: warning, package continues, no invention */
     const resNoCc = await generateEdgePackage(mkPkgClient({ failCandles: true }), USER, pSnap, { includeScreenshots: true, includePdf: false });
     const zipNoCc = await JSZip.loadAsync(new Uint8Array(await resNoCc.blob.arrayBuffer()));
-    check("cc fail: package still produced with the representative image",
-      resNoCc.summary.screenshotFiles === 1 && !!zipNoCc.file("trades.csv"));
+    check("cc fail: package still produced with ALL images",
+      resNoCc.summary.screenshotFiles === 4 && !!zipNoCc.file("trades.csv"));
     check("cc fail: chart_context.csv honestly absent", !zipNoCc.file("chart_context.csv"));
     check("cc fail: warning explains the omission", resNoCc.warnings.some((w) => w.includes("could not be built")));
     check("cc fail: representative candleTime stays null (not invented)",
@@ -636,10 +661,12 @@ async function main() {
     check("cc off: no chart_context.csv and no cc warnings",
       !zipOff.file("chart_context.csv") && !resOff.warnings.some((w) => w.includes("Chart context")));
 
-    /* PDF: only the representative can appear (D8) */
+    /* PDF: representative-first round-robin, cap unchanged at 3 (§G 5a) */
     const resPdf = await generateEdgePackage(mkPkgClient(), USER, pSnap, { includeScreenshots: true, includePdf: true });
-    check("rep pdf: PDF built from the single included representative",
-      resPdf.summary.pdfIncluded === true && resPdf.summary.screenshotFiles === 1);
+    check("rep pdf: PDF built; all four images in the ZIP",
+      resPdf.summary.pdfIncluded === true && resPdf.summary.screenshotFiles === 4);
+    const zipPdf = await JSZip.loadAsync(new Uint8Array(await resPdf.blob.arrayBuffer()));
+    check("rep pdf: Trading_Report.pdf ships in the ZIP", !!zipPdf.file("Trading_Report.pdf"));
   }
 
   /* ---- Pre-completion finalized trades (2026-10-18): chart context
@@ -736,6 +763,76 @@ async function main() {
       resQFail.warnings.some((w) => w.includes("Chart context unavailable")));
     check("pre pkg fail: representative still included (screenshots unaffected)",
       resQFail.summary.screenshotFiles === 1);
+  }
+
+  /* ---- Export fixes §G 2a/2d: Trade Lab sim trades get chart context
+   * from their stored session candles with the SAME no-hindsight
+   * boundaries; the DR attempt's dataset timeframe lands in the CSV. ---- */
+  {
+    const TLS = "99999999-9999-4999-8999-999999999999";
+    const DRS2 = "88888888-8888-4888-8888-888888888888";
+    const DRA2 = "a8888888-8888-4888-8888-888888888888";
+    const SBASE = Date.UTC(2026, 9, 15, 13, 30, 0);
+    const sCandles = Array.from({ length: 12 }, (_, i) => ({
+      t: SBASE + i * 60000, o: 10 + i * 0.1, h: 10.2 + i * 0.1, l: 9.9 + i * 0.1, c: 10.1 + i * 0.1, v: 1000 + i * 100,
+    }));
+    const tlTrade = groupFillsIntoTrades([
+      sf("t1", "buy", 100, 10.00, 5, 0, "2026-10-15T13:35:00.000Z"),
+      sf("t2", "sell", 100, 11.00, 9, 100, "2026-10-15T13:39:00.000Z"),
+    ], { id: TLS, ticker: "TLAB", trade_date: "2026-10-15", source: "sample" })[0];
+    const drTrade2 = groupFillsIntoTrades([
+      sf("d1", "buy", 100, 10.00, 5, 0, "2026-10-15T13:35:00.000Z"),
+      sf("d2", "sell", 100, 11.00, 9, 100, "2026-10-15T13:39:00.000Z"),
+    ], { id: DRS2, ticker: "DRTF", trade_date: "2026-10-15", source: "daily_replay" })[0];
+    const dEvents2: DrEvent[] = [
+      { seq: 1, type: "order_filled", wallTs: 1760600000000, marketIdx: 5, marketTs: 1760544300000, payload: { side: "buy", qty: 100, price: 10, candleIndex: 5 } },
+      { seq: 2, type: "risk_snapshot", wallTs: 1760600001000, marketIdx: 5, marketTs: 1760544300000, payload: { entry: 10, qty: 100, stopLoss: 9.5, takeProfit: 11, plannedRisk: 50, rewardRisk: 2 } },
+      { seq: 3, type: "order_filled", wallTs: 1760600100000, marketIdx: 9, marketTs: 1760544540000, payload: { side: "sell", qty: 100, price: 11, candleIndex: 9 } },
+      { seq: 4, type: "position_closed", wallTs: 1760600100000, marketIdx: 9, marketTs: 1760544540000, payload: { qty: 100, price: 11, realizedPnl: 100, sessionRealized: 100, reason: "target", unrealizedPnl: 0 } },
+    ];
+    const dDerived2 = deriveDrEvidence({ attemptId: DRA2, trades: [drTrade2], events: dEvents2 });
+    const sInput: ExportSnapshotInput = {
+      unified: [
+        { key: tlTrade.tradeKey, source: "simulator", ticker: "TLAB", tradeDate: "2026-10-15", direction: "long", entryPrice: 10, exitPrice: 11, qty: 100, realizedPnl: 100, isOpen: false, rMultiple: null, sessionSource: "sample", attemptId: null },
+        { key: drTrade2.tradeKey, source: "simulator", ticker: "DRTF", tradeDate: "2026-10-15", direction: "long", entryPrice: 10, exitPrice: 11, qty: 100, realizedPnl: 100, isOpen: false, rMultiple: 2, sessionSource: "daily_replay", attemptId: DRA2 },
+      ],
+      metas: {}, realTrades: [], simTrades: [tlTrade, drTrade2],
+      drAttempts: [{ id: DRA2, sessionId: DRS2, strategyVersionId: null, status: "finished", startIndex: 4, createdAt: "2026-10-16T16:00:00Z", finishedAt: "2026-10-16T16:30:00Z", ticker: "DRTF", tradeDate: "2026-10-15", timeframe: 5 }],
+      drEvidence: dDerived2.byTradeKey,
+      drEvents: dEvents2.map((event, i) => ({ id: `dev2-${i + 1}`, attemptId: DRA2, event })),
+      drEventTradeKeys: new Map([[DRA2, dDerived2.eventTradeKey]]),
+      strategies: [], strategyVersions: [],
+    };
+    const sSnap = buildExportSnapshot(sInput, { range: { start: "2026-10-01", end: "2026-10-31" }, mode: "custom", source: "all" });
+    const sClient = {
+      storage: { from: (_b: string) => ({
+        list: async () => ({ data: [], error: null }),
+        createSignedUrls: async (paths: string[]) => ({ data: paths.map((p) => ({ path: p, signedUrl: "https://signed.example/s", error: null })), error: null }),
+        download: async () => ({ data: null, error: { message: "none" } }),
+      }) },
+      from: (_t: string) => ({
+        select: (_c: string) => ({ in: async (_col: string, _ids: string[]) => ({ data: [{ id: TLS, candles: sCandles }, { id: DRS2, candles: sCandles }], error: null }) }),
+      }),
+    } as any;
+    const resS = await generateEdgePackage(sClient, USER, sSnap, { includeScreenshots: true, includePdf: false });
+    const zipS = await JSZip.loadAsync(new Uint8Array(await resS.blob.arrayBuffer()));
+    check("simctx: chart_context.csv produced for a mixed snapshot (§G 2d)", !!zipS.file("chart_context.csv"));
+    const ccS = parseCsv(await zipS.file("chart_context.csv")!.async("string"));
+    const tlRows = ccS.slice(1).filter((r) => r[1] === "TLAB");
+    const drRows2 = ccS.slice(1).filter((r) => r[1] === "DRTF");
+    check("simctx: Trade Lab trade context sections 5 entry / 1 final / 4 post (§G 2d)",
+      tlRows.filter((r) => r[3] === "entry_context").length === 5
+      && tlRows.filter((r) => r[3] === "entry_candle_final").length === 1
+      && tlRows.filter((r) => r[3] === "post_entry_development").length === 4);
+    check("simctx: nothing beyond the exit candle for the sim trade",
+      tlRows.length > 0 && Math.max(...tlRows.map((r) => Number(r[4]))) === 9);
+    check("simctx: sim rows carry no timeframe (none recorded); DR rows carry the dataset timeframe (§G 2a)",
+      tlRows.every((r) => r[12] === "") && drRows2.length === 10 && drRows2.every((r) => r[12] === "5"));
+    check("simctx: no context warnings for either trade",
+      !resS.warnings.some((w) => w.includes("Chart context unavailable")));
+    const docS = JSON.parse(await zipS.file("analytics.json")!.async("string"));
+    check("simctx: analytics attempt block carries timeframeMinutes 5 (§G 2a)",
+      docS.dailyReplay.attempts[0].timeframeMinutes === 5 && docS.dailyReplay.attempts[0].eventsRecorded === 4);
   }
 
   console.log(`edgeExportPackage tests: ${passed} passed, ${failed} failed`);

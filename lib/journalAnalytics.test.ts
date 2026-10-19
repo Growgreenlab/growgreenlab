@@ -308,11 +308,14 @@ const DRnullR = breakdown([T({ source: "simulator", sessionSource: "daily_replay
 check("DR trade without R: counted, avgR null", DRnullR[0].count === 1 && DRnullR[0].avgR === null && DRnullR[0].netPnl === 10);
 
 /* ============ Strategy annotation dimensions (2026-10-18) ============
- * The annotation (tradedStrategyName) groups first; a trade with no
- * annotation falls back to its attempt-bound strategy name; a trade
- * with neither is "Not recorded". setupClass reads the EFFECTIVE
- * classification (recorded slug, else the legacy hod_class coalesce).
- * BreakdownRow exposes the R sample count + per-group drawdown. */
+ * strategyTraded is ANNOTATION-ONLY (audit §G 3e): a trade with no
+ * annotation groups under "Not recorded" even when its Daily Replay
+ * attempt was BOUND to a strategy — the binding groups under the
+ * separate strategy / strategyVersion dimensions instead, so the
+ * breakdown and trades.csv's strategy_traded column always agree.
+ * setupClass reads the EFFECTIVE classification (recorded slug, else
+ * the legacy hod_class coalesce). BreakdownRow exposes the R sample
+ * count + per-group drawdown. */
 const SA: AnalyticsTrade[] = [
   T({ tradeDate: "2026-02-02", realizedPnl: 100, rMultiple: 2, tradedStrategyId: "s-sup", tradedStrategyName: "Support Bounce", setupClass: "strong_support_reaction", execGrade: "A" }),
   T({ tradeDate: "2026-02-03", realizedPnl: -40, rMultiple: null, tradedStrategyId: "s-sup", tradedStrategyName: "Support Bounce", setupClass: "support_breakdown", execGrade: "B" }),
@@ -324,10 +327,12 @@ const supRow = stRows.find((r) => r.label === "Support Bounce")!;
 check("strategyTraded: annotation groups its 2 trades", supRow.count === 2 && supRow.netPnl === 60);
 check("strategyTraded: avgR sample count exposed (1 of 2 trades has R)", supRow.avgRSampleCount === 1 && supRow.avgR === 2);
 check("strategyTraded: per-group drawdown (cum +100 → +60, DD 40)", supRow.maxDrawdownUSD === 40);
-check("strategyTraded: unannotated DR trade falls back to bound strategy",
-  stRows.some((r) => r.label === "HOD Momentum" && r.count === 1 && r.netPnl === 30));
-check("strategyTraded: neither annotation nor binding → Not recorded",
-  stRows.some((r) => r.label === "Not recorded" && r.count === 1 && r.netPnl === -10));
+check("strategyTraded: bound-but-unannotated trade does NOT leak the binding (§G 3e)",
+  !stRows.some((r) => r.label === "HOD Momentum"));
+check("strategyTraded: unannotated trades (bound or not) → Not recorded",
+  stRows.some((r) => r.label === "Not recorded" && r.count === 2 && r.netPnl === 20));
+check("strategyTraded: the binding still groups under its own dimension",
+  breakdown(SA, "strategy").some((r) => r.label === "HOD Momentum" && r.count === 1 && r.netPnl === 30));
 check("strategyTraded rows reconcile", stRows.reduce((s, r) => s + r.netPnl, 0) === calcMetrics(SA).netPnl);
 
 const scRows = breakdown(SA, "setupClass");

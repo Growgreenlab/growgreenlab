@@ -33,8 +33,10 @@ import {
   type KeyLevel, type PlanChange, type RawFill, type RealFill, type RealTradeCalc,
 } from "./journal";
 import { describeDrEvent, type DrEvent } from "./dailyReplayEvents";
-import type { DrTradeEvidence } from "./drTradeEvidence";
-import { resolveRepresentative, type RepresentativeSource } from "./drRepresentative";
+import { EVENTS_MISSING_BASIS, type DrEvidenceStatus, type DrTradeEvidence } from "./drTradeEvidence";
+import {
+  parseAutoCaptureOutcomes, resolveRepresentative, type RepresentativeSource,
+} from "./drRepresentative";
 import {
   strategyVersionLabel, type Strategy, type StrategyVersion,
 } from "./strategies";
@@ -54,6 +56,19 @@ import { effectiveClassification } from "./strategyClassification";
  * setup_class_label after the Daily Replay columns; analytics.json
  * breakdowns gain strategyTraded / setupClass / execGrade and every
  * breakdown row gains avgRSampleCount + maxDrawdownUSD. All additive.
+ *
+ * Still 2.0 (2026-10-18, AI Edge Export fixes — audit §G): Daily
+ * Replay trades now include EVERY available screenshot (representative
+ * still flagged; images under trade_evidence/<trade ID>/), the
+ * manifest gains captureKind + recordedAt (storage created_at) and
+ * candle indices for both auto-captures; chart_context.csv gains
+ * timeframe + derived session-high / premarket / VWAP / EMA columns
+ * and covers Trade Lab simulator trades; trades.csv appends
+ * strategy_custom_label / entry_trigger / events_status /
+ * setup_class_origin; real-trade fees export EMPTY when no fill
+ * carries fee data (unknown, not a recorded zero). All additive —
+ * no column renamed, reordered or removed; prompt rules 1–22 are
+ * byte-identical (SHA-pinned in the tests).
  */
 export const EDGE_EXPORT_SCHEMA_VERSION = "2.0";
 
@@ -134,6 +149,10 @@ export interface ExportSimTradeInput {
   realizedPnl: number;
   rMultiple: number | null;
   fills: RawFill[];
+  /** §G 3h: true when this trade was rebuilt from a finalized draft's
+   *  recorded anchors (GroupedTrade.anchorsDerived) — its exit fill's
+   *  price is implied by the recorded anchors, not a recorded fill. */
+  anchorsDerived?: boolean;
 }
 
 /** A daily_replay_attempts row joined with its dataset identity. */
@@ -147,6 +166,10 @@ export interface ExportDrAttemptInput {
   finishedAt: string | null;
   ticker: string | null;
   tradeDate: string | null;
+  /** Candle timeframe in minutes from the attempt's dataset
+   *  (daily_replay_datasets.timeframe; audit §G 2a). Optional —
+   *  absent/null when the dataset row was not joined. */
+  timeframe?: number | null;
 }
 
 /** One daily_replay_events row: database id + the recorder event. */
@@ -358,6 +381,11 @@ export interface ExportFillDetail {
   /** Gross realized P&L of this exit fill (FIFO) — exits only; null when
    *  the exit matched no entry (or for entry fills). */
   grossPnl: number | null;
+  /** §G 3h: this fill was SYNTHESIZED from a finalized draft's
+   *  recorded anchors — its price is implied by the recorded entry
+   *  price, quantity and realized P&L, not a recorded fill. The CSV
+   *  fills cell labels it "(implied from recorded P&L)". */
+  implied?: boolean;
 }
 
 export interface ExportTradeRecord {
@@ -414,6 +442,11 @@ export interface ExportTradeRecord {
   /** Effective classification label: the recorded slug's label,
    *  else the legacy hod_class label via the read coalesce. */
   setupClassLabel: string | null;
+  /** §G 3g provenance of setupClassLabel: "recorded" when it comes
+   *  from the recorded setup_class; "legacy_hod" when it is a
+   *  display-only coalesce of the legacy hod_class (NEVER present it
+   *  as a recorded classification); null when no label exists. */
+  setupClassOrigin: "recorded" | "legacy_hod" | null;
   strategyCustomLabel: string | null;
   entryTrigger: string | null;
   followedPlan: boolean | null;
@@ -446,6 +479,16 @@ export interface ExportTradeRecord {
    *  candles into chart_context.csv sections — never guessed. */
   entryCandleIndex: number | null;
   exitCandleIndex: number | null;
+  /* --- Evidence-stream status (audit §G 3c; Daily Replay only) --- */
+  /** "recorded" / "events_missing" / "events_unreconciled" for Daily
+   *  Replay trades; null for real and Trade Lab trades (not
+   *  applicable — they have no event stream). events_missing means
+   *  the attempt's event stream is missing (a recording problem),
+   *  which must never be reported as "no snapshot recorded". */
+  eventsStatus: DrEvidenceStatus | null;
+  /** §G 3h: this trade was rebuilt from a finalized draft's recorded
+   *  anchors; its exit fill is implied (see ExportFillDetail.implied). */
+  anchorsDerived: boolean;
 }
 
 /** The Daily Replay subset of a snapshot: only the attempts,
@@ -506,6 +549,7 @@ function metaFields(meta: ExportMetaInput | undefined, strategyById?: Map<string
     strategyTradedName: meta?.strategy_id ? (strategyById?.get(meta.strategy_id)?.name ?? null) : null,
     setupClass: meta?.setup_class ?? null,
     setupClassLabel: effClass?.label ?? null,
+    setupClassOrigin: effClass?.origin ?? null,
     strategyCustomLabel: meta?.strategy_custom_label ?? null,
     entryTrigger: meta?.entry_trigger ?? null,
     followedPlan: meta?.followed_plan ?? null,
@@ -617,7 +661,11 @@ export function buildExportSnapshot(
         originalStopLoss: meta?.original_stop_loss ?? null,
         originalTarget: meta?.original_target ?? null,
         planHistory: Array.isArray(meta?.plan_history) ? meta!.plan_history! : [],
-        fees: rt ? rt.calc.totalFees : null,
+        // §G 3a: fees are exported only when fee DATA exists. A trade
+        // whose fills carry no fee value at all exports fees EMPTY
+        // (unknown) — exactly like the simulator treatment — instead
+        // of a summed 0.00 that would read as "recorded zero".
+        fees: rt ? (rt.calc.feesRecorded ? rt.calc.totalFees : null) : null,
         grossRealized: rt ? rt.calc.grossRealized : null,
         realizedPnl: t.realizedPnl,
         initialRisk,
@@ -640,6 +688,8 @@ export function buildExportSnapshot(
         strategyLabel: null,
         entryCandleIndex: null,
         exitCandleIndex: null,
+        eventsStatus: null,
+        anchorsDerived: false,
         ...mf,
       };
     } else {
@@ -647,12 +697,28 @@ export function buildExportSnapshot(
       const fills = g?.fills ?? [];
       const isEntry = (f: RawFill) => (t.direction === "long" ? f.side === "buy" : f.side === "sell");
       const entries: ExportFillDetail[] = fills.filter(isEntry).map((f) => ({ qty: Number(f.qty), price: Number(f.price), time: f.candle_time, grossPnl: null }));
+      // §G 3h: on an anchors-derived trade the exit fill is implied by
+      // the draft's recorded anchors — flag it so the CSV labels it.
+      const anchorsDerived = g?.anchorsDerived === true;
       const exits: ExportFillDetail[] = fills.filter((f) => !isEntry(f)).map((f) => ({
         qty: Number(f.qty), price: Number(f.price), time: f.candle_time,
         grossPnl: Number(f.realized_pnl || 0),
+        ...(anchorsDerived ? { implied: true } : {}),
       }));
       const isDr = isDrUnified(t);
       const ev = isDr ? input.drEvidence?.get(t.key) : undefined;
+      // §G 3c evidence status: from the derived evidence when present;
+      // otherwise derived from the attempt's event presence in the
+      // input — zero events for the attempt = stream missing
+      // (recording problem); events present but no evidence entry =
+      // unreconciled. Null for non-DR trades (not applicable).
+      const eventsStatus: DrEvidenceStatus | null = !isDr
+        ? null
+        : ev
+          ? ev.evidenceStatus
+          : (input.drEvents ?? []).some((e) => e.attemptId === t.attemptId)
+            ? "events_unreconciled"
+            : "events_missing";
       const chain = isDr ? chainOf(t) : { attempt: undefined, version: undefined, strategy: undefined };
       if (isDr && ev) {
         initialRisk = ev.initialRisk;
@@ -690,7 +756,9 @@ export function buildExportSnapshot(
         riskBasis: ev
           ? ev.riskBasis
           : isDr
-            ? "Unavailable - Daily Replay plan evidence could not be derived for this trade (its attempt events were unavailable or did not reconcile), so R cannot be calculated. Never reconstructed."
+            ? eventsStatus === "events_missing"
+              ? EVENTS_MISSING_BASIS
+              : "Unavailable - Daily Replay plan evidence could not be derived for this trade (its attempt events were unavailable or did not reconcile), so R cannot be calculated. Never reconstructed."
             : "Unavailable - simulator trades do not record a stop loss, so R cannot be calculated.",
         floatShares: null,
         relativeVolume: null,
@@ -707,6 +775,8 @@ export function buildExportSnapshot(
           : null,
         entryCandleIndex: fills.find(isEntry)?.candle_index ?? null,
         exitCandleIndex: fills.filter((f) => !isEntry(f)).slice(-1)[0]?.candle_index ?? null,
+        eventsStatus,
+        anchorsDerived,
         ...mf,
       };
     }
@@ -717,7 +787,11 @@ export function buildExportSnapshot(
         key: t.key, source: t.source, ticker: t.ticker, tradeDate: t.tradeDate,
         direction: t.direction, entryPrice: t.entryPrice, exitPrice: t.exitPrice,
         qty: t.qty, realizedPnl: t.realizedPnl, rMultiple: rec.rMultiple, isOpen: false,
-        setupTag: meta?.setup_tag ?? null,
+        // §G 3f: the analytics "setup" breakdown groups by the SAME
+        // resolved setup value trades.csv prints (meta tag, else the
+        // real trade's recorded strategy) — previously the join used
+        // the raw meta tag only, so the two files could disagree.
+        setupTag: rec.setup,
         hodClass: meta?.hod_class ?? null,
         followedPlan: meta?.followed_plan ?? null,
         emotionalTags: meta?.emotional_tags ?? [],
@@ -735,6 +809,7 @@ export function buildExportSnapshot(
         tradedStrategyId: rec.strategyTradedId,
         tradedStrategyName: rec.strategyTradedName,
         setupClass: rec.setupClass,
+        setupClassOrigin: rec.setupClassOrigin,
         execGrade: rec.execGrade,
       });
     }
@@ -757,6 +832,17 @@ export function buildExportSnapshot(
   }
   if (drCount > 0) {
     warnings.push(`${drCount} Daily Replay backtest trade${drCount === 1 ? "" : "s"} included: Daily Replay is a historical simulation, not live trading and not a guarantee of future performance. It has no fee or slippage model (fees export as unavailable, never invented). Original plan and R come only from risk snapshots recorded at entry - trades without one export R as unavailable.`);
+  }
+  // §G 3c: name the recording problem explicitly — a missing event
+  // stream is NOT "no snapshot recorded at entry", and the export
+  // must never let the two be confused.
+  const eventsMissingCount = records.filter((r) => r.eventsStatus === "events_missing").length;
+  if (eventsMissingCount > 0) {
+    warnings.push(`${eventsMissingCount} Daily Replay trade${eventsMissingCount === 1 ? "" : "s"} ha${eventsMissingCount === 1 ? "s" : "ve"} NO recorded decision events (events_status = events_missing in trades.csv): the attempt's event stream is missing — a recording problem (the recorder event loss fixed 2026-10-18), not evidence that no plan was recorded. The trades are shown from their finalized draft records / session fills; their plan evidence and R are unavailable and are never reconstructed.`);
+  }
+  const anchorsCount = records.filter((r) => r.anchorsDerived).length;
+  if (anchorsCount > 0) {
+    warnings.push(`${anchorsCount} Daily Replay trade${anchorsCount === 1 ? "" : "s"} w${anchorsCount === 1 ? "as" : "ere"} rebuilt from the finalized draft's recorded anchors because the event stream could not supply the trade (see trades.csv): the exit fill is labelled "(implied from recorded P&L)" — its price is implied by the recorded entry price, quantity and realized P&L, not a recorded fill.`);
   }
   const realNoOriginal = records.filter((r) => r.source === "real" && r.originalStopLoss == null).length;
   if (realNoOriginal > 0) {
@@ -977,8 +1063,9 @@ export function tradeLevelDrawdownSeries(snapshot: ExportSnapshot): TradeDrawdow
 export function publicScreenshotManifestEntry(e: ScreenshotManifestEntry): {
   tradeId: string; symbol: string; type: ScreenshotManifestEntry["type"];
   file: string | null; fileName: string | null;
-  status: ScreenshotManifestEntry["status"]; capturedAt: string | null;
+  status: ScreenshotManifestEntry["status"]; recordedAt: string | null;
   role: ScreenshotManifestEntry["role"];
+  captureKind: ScreenshotManifestEntry["captureKind"];
   representativeSource: ScreenshotManifestEntry["representativeSource"];
   candleIndex: number | null;
   candleTime: string | null;
@@ -990,12 +1077,22 @@ export function publicScreenshotManifestEntry(e: ScreenshotManifestEntry): {
     file: e.file,
     fileName: e.fileName,
     status: e.status,
-    capturedAt: e.capturedAt,
+    recordedAt: e.recordedAt,
     role: e.role,
+    captureKind: e.captureKind,
     representativeSource: e.representativeSource,
     candleIndex: e.candleIndex,
     candleTime: e.candleTime,
   };
+}
+
+/** One listed storage object for a trade (audit §G 1c): its path and
+ *  the storage object's created_at (upload/record time), carried from
+ *  lib/journalAttachments.listScreenshots — null when the listing did
+ *  not provide one. */
+export interface ScreenshotListing {
+  path: string;
+  createdAt: string | null;
 }
 
 export interface ScreenshotManifestEntry {
@@ -1008,28 +1105,42 @@ export interface ScreenshotManifestEntry {
   type: "trade-screenshot";
   /** Supabase Storage path the bytes came from ("" when none). */
   storagePath: string;
-  /** Path inside the ZIP ("screenshots/<file>") when bytes are included;
-   *  null when the file is not in the package. */
+  /** Path inside the ZIP when bytes are included — real-trade images
+   *  under "screenshots/<file>", Daily Replay evidence under
+   *  "trade_evidence/<trade ID>/<file>" (audit §G 1e); null when the
+   *  file is not in the package. */
   file: string | null;
   fileName: string | null;
   status: "listed" | "included" | "unavailable" | "not-included";
-  /** Capture timestamp — storage listings used by the app do not expose
-   *  one to the export, so this is null (unavailable, never invented). */
-  capturedAt: string | null;
+  /** When the image was RECORDED in storage (the storage object's
+   *  created_at — its upload/record time), plumbed from the listing
+   *  (audit §G 1c). Near-exact for auto-captures (uploaded at the
+   *  fill moment); the upload time for manual attachments. It is NOT
+   *  a claimed shutter time. Null when the listing provided none. */
+  recordedAt: string | null;
   /* --- Representative role (Representative plan §5 S1.2, additive) --- */
-  /** "representative" for the ONE image a Daily Replay trade
-   *  contributes to the package; "attachment" for everything else
-   *  (all real-trade images, and DR images that stay in the journal —
-   *  those are listed with status "not-included", never dropped
-   *  silently). */
-  role: "representative" | "attachment";
+  /** The image's role for its trade: "representative" for the ONE
+   *  flagged primary image of a Daily Replay trade; "entry" / "exit"
+   *  for its recorded auto-captures when they are not the
+   *  representative; "attachment" for everything else (all real-trade
+   *  images and untyped/manual Daily Replay images). Since the
+   *  2026-10-18 export fixes (audit §G 1a), EVERY listed image is
+   *  included in the package — the role flags evidence, it no longer
+   *  gates inclusion. */
+  role: "representative" | "entry" | "exit" | "attachment";
+  /** How this image was captured, from the draft record (audit §G
+   *  1b): "auto_entry" / "auto_exit" for the recorded auto-captures,
+   *  "manual" for anything else. Null only for entries built without
+   *  a listing context (defensive default). */
+  captureKind: "auto_entry" | "auto_exit" | "manual" | null;
   /** How the representative was resolved (lib/drRepresentative.ts);
-   *  null for attachments and for DR trades with no representative. */
+   *  null for non-representative rows. */
   representativeSource: RepresentativeSource | null;
-  /** Candle index the representative is anchored to, from the draft
-   *  record — null when unknown (never inferred from a file name). */
+  /** Candle index this image is anchored to, from the draft record
+   *  (recorded entry AND exit captures both carry theirs) — null
+   *  when unknown (never inferred from a file name). */
   candleIndex: number | null;
-  /** The representative candle's period start (ISO), derived by the
+  /** The anchored candle's period start (ISO), derived by the
    *  package layer from the session's stored candles by index;
    *  null when the candles were unavailable. */
   candleTime: string | null;
@@ -1062,24 +1173,29 @@ function screenshotFileName(exportId: string, storagePath: string, n: number): s
 }
 
 /**
- * Build the manifest from a storage listing (tradeKey → storage paths).
- * Pure: the package layer performs the listing/download and calls this.
- * Entries start as "listed"; the package layer flips them to "included"
- * (bytes fetched) or "unavailable" (fetch failed) before artifacts are
+ * Build the manifest from a storage listing (tradeKey → listed
+ * objects with their recorded times). Pure: the package layer
+ * performs the listing/download and calls this. Entries start as
+ * "listed"; the package layer flips them to "included" (bytes
+ * fetched) or "unavailable" (fetch failed) before artifacts are
  * generated, so CSV/JSON/README always describe the final package.
  *
- * Daily Replay trades (Representative plan §5 S1.2): exactly ONE image
- * per trade is downloadable — the resolved representative
- * (lib/drRepresentative.ts). Every other listed DR image stays a
- * manifest row with status "not-included" and file null: listed and
- * explained, never silently dropped, and never substituted for a failed
- * representative (a failed download becomes "unavailable" + a warning).
- * Real trades are unchanged: every listed image is a downloadable
- * attachment.
+ * Inclusion (audit §G 1a — Karandeep's 2026-10-18 ruling supersedes
+ * the Work 21 representative-only download limit): EVERY listed
+ * image of an eligible trade is downloadable — Daily Replay entry
+ * capture, exit capture and manual attachments alike. The
+ * representative (lib/drRepresentative.ts) survives as a FLAG: the
+ * representative row keeps role "representative" + its resolution
+ * source; the recorded entry/exit captures carry role + captureKind
+ * + their draft-record candle indices (§G 1b); everything else is an
+ * untyped "attachment" / "manual" row. A failed download becomes
+ * "unavailable" + a warning — never substituted, never dropped.
+ * Daily Replay images live under trade_evidence/<trade ID>/ in the
+ * ZIP (§G 1e); real-trade images keep screenshots/.
  */
 export function buildScreenshotManifest(
   snapshot: ExportSnapshot,
-  listed: Map<string, string[]>,
+  listed: Map<string, ScreenshotListing[]>,
   userId?: string,
 ): ScreenshotManifestEntry[] {
   const entries: ScreenshotManifestEntry[] = [];
@@ -1087,7 +1203,11 @@ export function buildScreenshotManifest(
     // Real trades and Daily Replay trades can carry journal-attached
     // screenshots; Trade Lab simulator trades remain excluded.
     if (rec.source !== "real" && !rec.isDailyReplay) continue;
-    const paths = [...new Set(listed.get(rec.tradeKey) ?? [])].sort();
+    const listings = [...(listed.get(rec.tradeKey) ?? [])]
+      .filter((l, i, arr) => arr.findIndex((x) => x.path === l.path) === i)
+      .sort((a, b) => a.path.localeCompare(b.path));
+    const paths = listings.map((l) => l.path);
+    const recordedAtByPath = new Map(listings.map((l) => [l.path, l.createdAt]));
     if (rec.isDailyReplay) {
       const info = snapshot.dailyReplay?.draftInfoByTradeKey.get(rec.tradeKey);
       // Owner id: explicit when the caller has it (the package layer),
@@ -1104,41 +1224,40 @@ export function buildScreenshotManifest(
             userId: owner,
           })
         : null;
+      const outcomes = parseAutoCaptureOutcomes(info?.autoCapture);
       paths.forEach((storagePath, i) => {
-        if (resolution && storagePath === resolution.path) {
-          const fileName = screenshotFileName(rec.exportId, storagePath, i + 1);
-          entries.push({
-            tradeId: rec.exportId,
-            tradeKey: rec.tradeKey,
-            symbol: rec.symbol,
-            type: "trade-screenshot",
-            storagePath,
-            file: `screenshots/${fileName}`,
-            fileName,
-            status: "listed",
-            capturedAt: null,
-            role: "representative",
-            representativeSource: resolution.source,
-            candleIndex: resolution.candleIndex,
-            candleTime: null,
-          });
-        } else {
-          entries.push({
-            tradeId: rec.exportId,
-            tradeKey: rec.tradeKey,
-            symbol: rec.symbol,
-            type: "trade-screenshot",
-            storagePath,
-            file: null,
-            fileName: null,
-            status: "not-included",
-            capturedAt: null,
-            role: "attachment",
-            representativeSource: null,
-            candleIndex: null,
-            candleTime: null,
-          });
-        }
+        const fileName = screenshotFileName(rec.exportId, storagePath, i + 1);
+        // Type the image from the DRAFT RECORD (§G 1b) — never from
+        // its file name. A recorded path that is not one of the two
+        // capture outcomes is a manual attachment.
+        const captureKind: ScreenshotManifestEntry["captureKind"] =
+          outcomes.entry?.path === storagePath ? "auto_entry"
+          : outcomes.exit?.path === storagePath ? "auto_exit"
+          : "manual";
+        const recordedCandleIndex =
+          captureKind === "auto_entry" ? (outcomes.entry?.candleIndex ?? null)
+          : captureKind === "auto_exit" ? (outcomes.exit?.candleIndex ?? null)
+          : null;
+        const isRep = resolution != null && storagePath === resolution.path;
+        entries.push({
+          tradeId: rec.exportId,
+          tradeKey: rec.tradeKey,
+          symbol: rec.symbol,
+          type: "trade-screenshot",
+          storagePath,
+          file: `trade_evidence/${rec.exportId}/${fileName}`,
+          fileName,
+          status: "listed",
+          recordedAt: recordedAtByPath.get(storagePath) ?? null,
+          role: isRep ? "representative"
+            : captureKind === "auto_entry" ? "entry"
+            : captureKind === "auto_exit" ? "exit"
+            : "attachment",
+          captureKind,
+          representativeSource: isRep ? resolution.source : null,
+          candleIndex: isRep ? resolution.candleIndex : recordedCandleIndex,
+          candleTime: null,
+        });
       });
       continue;
     }
@@ -1153,8 +1272,9 @@ export function buildScreenshotManifest(
         file: `screenshots/${fileName}`,
         fileName,
         status: "listed",
-        capturedAt: null,
+        recordedAt: recordedAtByPath.get(storagePath) ?? null,
         role: "attachment",
+        captureKind: "manual",
         representativeSource: null,
         candleIndex: null,
         candleTime: null,
@@ -1176,9 +1296,13 @@ export function summarizeScreenshotCoverage(
   const withShots = new Set(manifest.filter((e) => e.status === "included" || e.status === "listed").map((e) => e.tradeId));
   const missing = eligible.filter((r) => !withShots.has(r.exportId)).map((r) => r.exportId);
   const files = manifest.filter((e) => e.status === "included").length;
-  // Representative plan §5 S1.2: a DR trade that HAS images but no
-  // resolvable representative is a different fact from "no screenshot"
-  // — it had no representative screenshot.
+  // §G 1d: downloads that failed are stated as a count, never folded
+  // silently into "included" or "missing".
+  const unavailableFiles = manifest.filter((e) => e.status === "unavailable").length;
+  // A DR trade that HAS images but no resolvable representative is a
+  // different fact from "no screenshot" — since the 2026-10-18 fixes
+  // its images are all still included; only the representative FLAG
+  // is absent, and the note says exactly that.
   const drIds = new Set(drTrades.map((r) => r.exportId));
   const drWithRep = new Set(manifest.filter((e) => e.role === "representative" && (e.status === "included" || e.status === "listed")).map((e) => e.tradeId));
   const drNoRep = drTrades.filter((r) => manifest.some((e) => e.tradeId === r.exportId) && !drWithRep.has(r.exportId)).length;
@@ -1191,8 +1315,11 @@ export function summarizeScreenshotCoverage(
     note = "No screenshots were available for the selected trades. Nothing was fabricated to fill the gap.";
   } else {
     note = `${files} screenshot file${files === 1 ? "" : "s"} included across ${withShots.size} trade${withShots.size === 1 ? "" : "s"}; ${missing.length} trade${missing.length === 1 ? "" : "s"} had no screenshot.`;
+    if (unavailableFiles > 0) {
+      note += ` ${unavailableFiles} listed screenshot${unavailableFiles === 1 ? "" : "s"} could not be downloaded and ${unavailableFiles === 1 ? "is" : "are"} marked unavailable in the manifest — not substituted, not silently dropped.`;
+    }
     if (drNoRep > 0) {
-      note += ` ${drNoRep} Daily Replay trade${drNoRep === 1 ? "" : "s"} had no representative screenshot — its other images are listed in the manifest as not-included and were not exported.`;
+      note += ` ${drNoRep} Daily Replay trade${drNoRep === 1 ? "" : "s"} had no representative screenshot — all of its images are still included, but none is flagged as the representative (no entry-time evidence could be resolved for it).`;
     }
   }
   return {
@@ -1232,6 +1359,11 @@ export const CSV_COLUMNS = [
   // stable ID, registry name, recorded classification slug and its
   // effective label. Appended only; nothing above moved.
   "strategy_traded_id", "strategy_traded", "setup_class", "setup_class_label",
+  // AI Edge Export fixes appends (2026-10-18, audit §G, still schema
+  // 2.0): the two recorded annotation fields that were previously
+  // never serialized (3d), the Daily Replay evidence-stream status
+  // (3c), and the setup-label provenance (3g). Appended only.
+  "strategy_custom_label", "entry_trigger", "events_status", "setup_class_origin",
 ] as const;
 
 /** CSV number: fixed decimals, trailing zeros trimmed; null → "". */
@@ -1249,6 +1381,9 @@ function fillsCell(fills: ExportFillDetail[], withPnl: boolean): string {
     let s = `${csvNum(f.qty, 4)}@${csvNum(f.price, 4)}`;
     if (withPnl && f.grossPnl != null) s += ` pnl=${f.grossPnl >= 0 ? "+" : ""}${csvNum(f.grossPnl, 2)}`;
     if (f.time) s += ` (${f.time})`;
+    // §G 3h: an anchors-derived exit fill is labelled as implied —
+    // its price comes from the draft's recorded anchors, not a fill.
+    if (f.implied) s += " (implied from recorded P&L)";
     return s;
   }).join("; ");
 }
@@ -1337,6 +1472,10 @@ export function buildTradesCsv(snapshot: ExportSnapshot, manifest: ScreenshotMan
       rec.strategyTradedName ?? "",
       rec.setupClass ?? "",
       rec.setupClassLabel ?? "",
+      rec.strategyCustomLabel ?? "",
+      rec.entryTrigger ?? "",
+      rec.eventsStatus ?? "",
+      rec.setupClassOrigin ?? "",
     ];
     rows.push(cells.map(csvEscape).join(","));
   }
@@ -1486,6 +1625,14 @@ export function metricsUnavailableList(snapshot: ExportSnapshot): MetricsUnavail
   const hasTradeLabSim = snapshot.trades.some((r) => r.source === "simulator" && !r.isDailyReplay);
   const drTrades = snapshot.trades.filter((r) => r.isDailyReplay);
   const drWithoutR = drTrades.filter((r) => r.rMultiple == null);
+  // §G 3c: the R-unavailability reason must match each trade's
+  // evidence status — a missing event stream (recording problem) is
+  // a DIFFERENT cause from a recorded stream with no snapshot, and
+  // the export must never assert the second for the first.
+  const drMissingStream = drWithoutR.filter((r) => r.eventsStatus === "events_missing");
+  const drUnreconciled = drWithoutR.filter((r) => r.eventsStatus === "events_unreconciled");
+  const drRecordedNoR = drWithoutR.filter((r) => r.eventsStatus !== "events_missing" && r.eventsStatus !== "events_unreconciled");
+  const realFeesUnknown = snapshot.trades.filter((r) => r.source === "real" && r.status === "closed" && r.fees == null);
   const list: MetricsUnavailableEntry[] = [
     { key: "maeMfe", label: "MAE / MFE (max adverse / favorable excursion)", reason: "Not computed anywhere in the platform - it would require per-trade candle history, which real-market trades do not have." },
     { key: "slippage", label: "Slippage", reason: "The platform has no execution-slippage model; no value is recorded per fill." },
@@ -1493,11 +1640,18 @@ export function metricsUnavailableList(snapshot: ExportSnapshot): MetricsUnavail
     // carry an original plan (from the recorded risk snapshot), so
     // this entry appears only when Trade Lab trades are selected.
     ...(hasTradeLabSim ? [{ key: "simulatorOriginalPlan", label: "Original planned stop/target for Trade Lab simulator trades", reason: "Trade Lab simulator trades do not persist a planned stop/target, so their R and plan-adherence cannot be calculated. Exported as unavailable, never reconstructed. (Daily Replay trades are different: their original plan comes from the risk snapshot recorded at entry.)" }] : []),
-    ...(drWithoutR.length > 0 ? [{ key: "dailyReplayRiskUnavailable", label: `R for ${drWithoutR.length} Daily Replay trade${drWithoutR.length === 1 ? "" : "s"}`, reason: "These Daily Replay trades have no valid risk snapshot recorded at entry (see risk_basis per trade in trades.csv), so their initial risk and R are unavailable. Never reconstructed." }] : []),
+    ...(drRecordedNoR.length > 0 ? [{ key: "dailyReplayRiskUnavailable", label: `R for ${drRecordedNoR.length} Daily Replay trade${drRecordedNoR.length === 1 ? "" : "s"}`, reason: "These Daily Replay trades' event streams are recorded, but no valid risk snapshot was recorded at entry for them (see risk_basis per trade in trades.csv), so their initial risk and R are unavailable. Never reconstructed." }] : []),
+    ...(drMissingStream.length > 0 ? [{ key: "dailyReplayEventsMissing", label: `Plan evidence for ${drMissingStream.length} Daily Replay trade${drMissingStream.length === 1 ? "" : "s"} (recording problem)`, reason: "These trades' Daily Replay attempts have NO recorded decision events — the event stream is missing (events_status = events_missing in trades.csv), a recording problem (the recorder event loss fixed 2026-10-18), NOT proof that no snapshot was recorded at entry. Their plan evidence and R are unavailable because the stream that would prove them is gone. Never reconstructed." }] : []),
+    ...(drUnreconciled.length > 0 ? [{ key: "dailyReplayEventsUnreconciled", label: `Plan evidence for ${drUnreconciled.length} Daily Replay trade${drUnreconciled.length === 1 ? "" : "s"} (events unreconciled)`, reason: "These trades' attempts have recorded events, but the events do not reconcile with the trades' fills (events_status = events_unreconciled in trades.csv), so no plan evidence is attached and R is unavailable. Never reconstructed." }] : []),
     { key: "simulatorFees", label: "Simulator fees", reason: "The simulator engine has no fee model. Simulator fees are unknown (empty in trades.csv), not zero." },
+    ...(realFeesUnknown.length > 0 ? [{ key: "realTradeFeesUnknown", label: `Fees for ${realFeesUnknown.length} real trade${realFeesUnknown.length === 1 ? "" : "s"}`, reason: "No fee data was recorded on any fill of these trades, so fees_usd is EMPTY (unknown) in trades.csv — distinct from 0.00, which means fees were recorded as zero. Their net P&L equals their gross P&L only in the sense that no fees were recorded against them." }] : []),
     { key: "entryOrderType", label: "Entry order type (market/limit) for real trades", reason: "Not recorded for real-market trades." },
     { key: "psychologyGuardEvents", label: "Psychology Guard events per trade", reason: "Guard lockouts are not stored as trade-linked records. Recorded emotional tags, mistakes and plan adherence ARE exported." },
-    { key: "screenshotCaptureTimestamps", label: "Screenshot capture timestamps", reason: "The storage listing used by the app does not expose a capture time to the export; manifest capturedAt is null rather than invented." },
+    // §G 1c: screenshot RECORDED times are now exported (manifest
+    // recordedAt — the storage object's created_at), so the old
+    // "capture timestamps unavailable" entry is retired. recordedAt
+    // is an upload/record time, documented as such in the README —
+    // it is not a shutter time and is never presented as one.
   ];
   const anyFloat = snapshot.trades.some((r) => r.floatShares != null);
   const anyRvol = snapshot.trades.some((r) => r.relativeVolume != null);
@@ -1542,6 +1696,13 @@ function breakdownForJson(trades: AnalyticsTrade[], dim: BreakdownDimension) {
     profitFactor: r.profitFactor,
     avgHoldMinutes: r.avgHoldMinutes,
     tradeIds: r.trades.map((t) => exportIdForTradeKey(t.key)),
+    // §G 3g (setupClass rows only): how the row's labels were
+    // sourced — recorded classifications vs display-only legacy-HOD
+    // coalesces — so a coalesced label is never read as recorded.
+    ...(dim === "setupClass" ? {
+      recordedCount: r.trades.filter((t) => t.setupClassOrigin === "recorded").length,
+      legacyHodCount: r.trades.filter((t) => t.setupClassOrigin === "legacy_hod").length,
+    } : {}),
   }));
 }
 
@@ -1648,13 +1809,26 @@ function dailyReplayBlock(snapshot: ExportSnapshot): Record<string, unknown> {
     const version = a.strategyVersionId ? versionById.get(a.strategyVersionId) : undefined;
     const strategy = version ? strategyById.get(version.strategyId) : undefined;
     const rs = trades.map((t) => t.rMultiple).filter((r): r is number => r != null && isFinite(r));
-    const lifecycle = dr.events.some((e) => e.attemptId === a.id && e.event.type === "session_resumed")
-      ? "completed-after-resume" : "completed";
+    // §G 3c: the per-attempt event count is disclosed, and an attempt
+    // with ZERO recorded events is labelled events-missing — the old
+    // code called every attempt "completed" even when its stream was
+    // lost to the recording problem. An attempt whose session is
+    // still open (pre-completion finalized trades) is "in-progress".
+    const eventsRecorded = dr.events.filter((e) => e.attemptId === a.id).length;
+    const lifecycle = eventsRecorded === 0
+      ? "events-missing"
+      : dr.events.some((e) => e.attemptId === a.id && e.event.type === "session_resumed")
+        ? "completed-after-resume"
+        : a.status === "finished" ? "completed" : "in-progress";
     return {
       attemptId: a.id,
       sessionLinked: a.sessionId != null,
       ticker: a.ticker,
       tradeDate: a.tradeDate,
+      // §G 2a: the dataset's candle timeframe (minutes), when the
+      // journal joined it — null when not recorded/joined.
+      timeframeMinutes: a.timeframe ?? null,
+      eventsRecorded,
       status: a.status,
       lifecycle,
       strategy: strategy && version
@@ -1675,7 +1849,7 @@ function dailyReplayBlock(snapshot: ExportSnapshot): Record<string, unknown> {
   });
   return {
     available: true,
-    note: "Daily Replay is a historical simulation (backtest): results describe what would have happened on the recorded historical days, are not live trading results, and are not a guarantee of future performance. Only completed attempts with closed trades appear here - abandoned attempts and positions left open are not performance evidence.",
+    note: "Daily Replay is a historical simulation (backtest): results describe what would have happened on the recorded historical days, are not live trading results, and are not a guarantee of future performance. Only attempts with included closed trades appear here - an attempt may still be in progress (lifecycle in-progress) when its finalized trades are exported, and an attempt whose event stream was lost to a recording problem is labelled events-missing with eventsRecorded 0. Abandoned attempts and positions left open are not performance evidence.",
     attemptsInSelection: attempts.length,
     strategiesReferenced: [...new Set(attempts.map((a) => a.strategy?.strategyId).filter(Boolean))].length,
     tradesWithRiskSnapshot: recs.filter((r) => r.initialRisk != null).length,
@@ -1802,6 +1976,14 @@ export function buildAnalyticsJson(
       strategyTraded: r.strategyTradedName,
       setupClass: r.setupClass,
       setupClassLabel: r.setupClassLabel,
+      // Additive (2026-10-18, audit §G): the remaining recorded
+      // annotation fields (3d), the label's provenance (3g), and the
+      // Daily Replay evidence-stream status (3c; null = not
+      // applicable for real / Trade Lab trades).
+      strategyCustomLabel: r.strategyCustomLabel,
+      entryTrigger: r.entryTrigger,
+      setupClassOrigin: r.setupClassOrigin,
+      eventsStatus: r.eventsStatus,
       screenshots: manifest.filter((e) => e.tradeId === r.exportId && e.status === "included").map((e) => e.fileName),
     })),
   };
@@ -1848,18 +2030,21 @@ export function buildChatGptPrompt(
     "analytics.json - Grow Green Lab's calculated metrics, breakdowns and Edge Finder output",
     ...(ctx.pdfIncluded ? ["Trading_Report.pdf - the visual summary report"] : []),
     "README.txt - package guide, column definitions and methodology",
+    "screenshots-manifest.json - every screenshot in this package mapped to its stable trade ID, with its role (representative / entry / exit / attachment), capture kind, candle index and recorded time - read it before reviewing any image",
     ...(hasDr ? [
       ...(ctx.timelineIncluded === false ? [] : ["decision_timeline.csv - the Daily Replay Decision Timeline: every recorded decision event for the included attempts, with both market time (historical, Eastern) and wall-clock time (when the trader acted)"]),
       "strategy.json - the immutable strategy versions the included attempts were bound to, exactly as recorded before they ran",
-      ...(ctx.chartContextIncluded ? ["chart_context.csv - per-trade historical OHLCV for the included Daily Replay trades, sectioned at the entry candle: entry_context holds ONLY the candles completed before the entry candle, entry_candle_final is the entry candle's final OHLCV (it was still forming at the fill), and post_entry_development holds the candles while the position was open. Entry judgments may use entry_context only - see the chart-analysis section below."] : []),
     ] : []),
-    ...(coverage.screenshotFiles > 0 ? [`screenshots/ - ${coverage.screenshotFiles} trade screenshot(s), named by stable trade ID`] : []),
+    ...(ctx.chartContextIncluded ? ["chart_context.csv - per-trade historical OHLCV for the included Daily Replay and Trade Lab simulator trades, sectioned at the entry candle: entry_context holds ONLY the candles completed before the entry candle, entry_candle_final is the entry candle's final OHLCV (it was still forming at the fill), and post_entry_development holds the candles while the position was open. It also carries derived columns (session_high_so_far, vwap_typical_approx, ema_fast_9, ema_slow_20, premarket_high/low, timeframe_min, key_levels) - see README.txt for their exact definitions. Entry judgments may use entry_context only - see the chart-analysis section below."] : []),
+    ...(coverage.screenshotFiles > 0 ? [`screenshots/ and trade_evidence/ - ${coverage.screenshotFiles} trade screenshot(s), named by stable trade ID (real-trade images in screenshots/; Daily Replay evidence in trade_evidence/<trade ID>/)`] : []),
   ];
   return `You are analyzing my trading performance using a Grow Green Lab AI Edge Analysis package.
 
 Use the included trades.csv, analytics.json${ctx.pdfIncluded ? ", Trading_Report.pdf" : ""} and screenshots to analyze my actual trading behavior and identify evidence-supported opportunities to improve my edge.
 
 Do not assume that every supplied metric is correct without checking definitions and consistency. Where possible, reconcile raw trade records with aggregated analytics.
+
+Read README.txt and screenshots-manifest.json FIRST: the README defines every field, formula and availability rule in this package, and the manifest maps every screenshot to its trade, its role and its candle. If you cannot open the ZIP archive itself, say so immediately and work only from the individual files you were actually given - never guess at the contents of a file you could not open.
 
 PACKAGE FACTS (generated by Grow Green Lab - treat these as the evidence boundary)
 - Date range: ${formatRangeText(snapshot.range, snapshot.periodMode)}
@@ -1871,7 +2056,9 @@ PACKAGE FACTS (generated by Grow Green Lab - treat these as the evidence boundar
 ${files.map((f) => `  * ${f}`).join("\n")}
 - Data that is NOT available in this package (do not invent it): ${unavailable.map((u) => u.label).join("; ")}. Full reasons are in analytics.json under metadata.metricsUnavailable, and missing-data counts under metadata.missingDataSummary.
 - Daily Replay trades in this export are FINALIZED trades only — unfinalized drafts are excluded by design and never appear in any file in this package.
-- Daily Replay screenshots: each Daily Replay trade contributes ONE representative screenshot (see screenshots-manifest.json for its recorded source and candle). An auto-captured representative shows the chart as staged at the entry fill; the entry candle was still forming when it was captured. The trade's other screenshots stay in the journal and are listed in the manifest as not-included.
+- P&L basis: Real Market P&L is net of its recorded fees. Simulator and Daily Replay P&L is the engine-reported figure — neither has a fee model, so that P&L is fee-free; never describe it as net of fees. fees_usd is EMPTY when no fee data was recorded for a trade (unknown), and reads 0.00 only when fees were recorded as zero.
+- Setup classification provenance: trades.csv setup_class_origin (and analytics.json tradesIndex) states whether a trade's setup label was RECORDED by the trader (recorded) or is a display-only coalesce of an older HOD classification (legacy_hod). Never present a legacy_hod label as a classification recorded under the current system.
+- Daily Replay screenshots: EVERY available screenshot of each Daily Replay trade is included under trade_evidence/<trade ID>/ — the recorded entry capture, the exit capture and any manual attachments (see screenshots-manifest.json for each image's role, capture kind, candle index and recorded time). The image flagged role "representative" is the trade's primary entry-time evidence: an auto-captured representative shows the chart as staged at the entry fill; the entry candle was still forming when it was captured. A failed download is marked unavailable in the manifest — it is never substituted with another image.
 ${snapshot.source === "all" ? "- This package mixes Real Market and Simulator trades. Keep them separate in your analysis; the combined figures are labeled mixed-source and must not be presented as real-money performance.\n" : ""}${snapshot.warnings.length > 0 ? `- Package warnings from Grow Green Lab:\n${snapshot.warnings.map((w) => `  * ${w}`).join("\n")}\n` : ""}
 Follow these rules:
 
@@ -1901,13 +2088,14 @@ DAILY REPLAY & STRATEGY EVIDENCE (this package includes Daily Replay backtest tr
 21. NEVER modify, rewrite or "improve" a strategy version: versions are immutable records. Propose changes only as a NEW version the trader can create and test - your output must not present an edited version as if it were the recorded one.
 22. Daily Replay results are historical simulations (backtests), not live trading results and not a guarantee of future performance. In decision_timeline.csv, market_time is the historical candle time (Eastern) and wall_time is when the trader actually acted - never mix the two clocks.
 ` : ""}${(ctx.chartContextIncluded || ctx.representativeIncluded) ? `
-REPRESENTATIVE SCREENSHOT & CHART ANALYSIS (a supplement to the rules above, not a continuation of them — it applies only to Daily Replay trades with a representative screenshot and/or rows in chart_context.csv):
+REPRESENTATIVE SCREENSHOT & CHART ANALYSIS (a supplement to the rules above, not a continuation of them — it applies only to trades (Daily Replay or Trade Lab simulator) with a representative screenshot and/or rows in chart_context.csv):
 
 - Observations first: state only what is directly visible in the representative screenshot or directly readable from chart_context.csv — price location versus the prior candles, candle sizes, the volume pattern.
 - Interpretations second, separately labelled, each tied to the observation it rests on. Never present an interpretation as a recorded fact.
-- For each such trade, use chart_context.csv's entry_context (the candles completed BEFORE the entry candle) together with the representative screenshot to assess: the trend structure before the entry (higher highs/higher lows versus lower highs/lower lows) and any consolidation; whether the entry was at, near, or away from the session high (HOD) and prior resistance; whether a breakout had formed on completed candles or was only anticipated on a still-forming candle; whether volume expanded into the entry relative to the prior completed candles; and whether the entry supported the trader's stated setup (trades.csv setup + entry_reasoning) or contradicted it. Classify any HOD breakout as clean, weak, or failed ONLY from completed pre-entry candles and the screenshot. End with one verdict per trade: the pre-entry structure SUPPORTED the stated setup, CONTRADICTED it, or the evidence is INSUFFICIENT — citing the candle times you relied on.
+- For each such trade, use chart_context.csv's entry_context (the candles completed BEFORE the entry candle) together with the representative screenshot to assess: the trend structure before the entry (higher highs/higher lows versus lower highs/lower lows) and any consolidation; whether the entry was at, near, or away from the session high (HOD) and prior resistance; whether a breakout had formed on completed candles or was only anticipated on a still-forming candle; whether volume expanded into the entry relative to the prior completed candles; and whether the entry supported the trader's stated setup (trades.csv setup + entry_reasoning) or contradicted it. Classify any HOD breakout as clean, weak, failed, or anticipation ONLY from completed pre-entry candles and the screenshot. End with one verdict per trade: the pre-entry structure SUPPORTED the stated setup, CONTRADICTED it, or the evidence is INSUFFICIENT — citing the candle times you relied on.
 - No-hindsight rule: judge the entry decision ONLY from entry_context and the representative image. entry_candle_final is the entry candle's FINAL OHLCV — the candle was still forming at the fill, so its final values were not known at entry. post_entry_development may be discussed only as post-entry development (what happened while the position was open), never as evidence for or against the entry decision itself.
-- No invented levels: do not state support, resistance, VWAP, EMA or any other level unless it is visible in the screenshot or derivable from the supplied OHLCV. If a level cannot be verified from the supplied evidence, say so instead of estimating one.
+- No invented levels: do not state support, resistance, VWAP, EMA or any other level unless it is visible in the screenshot or supplied in the data. chart_context.csv supplies computed columns for exactly this purpose — session_high_so_far, vwap_typical_approx (a typical-price approximation, labelled as such in the README), ema_fast_9, ema_slow_20, premarket_high / premarket_low and the trade's recorded key_levels: use those supplied values and cite them; do not re-estimate a level the package already computes, and if a level is absent from the supplied evidence, say so instead of estimating one. When a trade's recorded setup is a VWAP or EMA pullback/reclaim, evaluate the entry against those supplied VWAP/EMA columns explicitly.
+- Cite your evidence precisely: for every chart-based claim, name the trade ID and the screenshot file name or chart_context.csv candle time it rests on; when you discuss a decision, cite the decision_timeline.csv event (type and seq) that records it, and for any figure, the trades.csv / analytics.json field it came from.
 - Missing evidence: if a trade has no representative screenshot or no chart_context.csv rows, say the chart analysis is unavailable for that trade instead of reconstructing the chart from price summaries.
 ` : ""}
 Organize your response as:
@@ -1962,7 +2150,7 @@ const CSV_COLUMN_DOCS: [string, string][] = [
   ["entry_type", "UNAVAILABLE - order type (market/limit) is not recorded for real trades; always empty. Never inferred."],
   ["avg_exit_price", "FIFO-matched weighted average exit price (real trades); weighted average of exit fills (simulator). Empty when nothing has exited."],
   ["total_shares_exited", "Total exited quantity (FIFO-matched for real trades)."],
-  ["exit_fills", "Individual exit fills as qty@price pnl=+X.XX (ISO time) - pnl is that exit's gross FIFO realized P&L (before fees) for real trades, and the simulator engine's recorded per-fill realized P&L for simulator trades."],
+  ["exit_fills", "Individual exit fills as qty@price pnl=+X.XX (ISO time) - pnl is that exit's gross FIFO realized P&L (before fees) for real trades, and the simulator engine's recorded per-fill realized P&L for simulator trades. An exit fill suffixed '(implied from recorded P&L)' was synthesized from a finalized Daily Replay draft's recorded anchors: its price is implied by the recorded entry price, quantity and realized P&L - it is not a recorded fill."],
   ["exit_reason", "Recorded exit reasoning from Trade Review (same value as exit_reasoning). Empty when not recorded."],
   ["stop_loss_current / target_current", "The trade's stop loss / target in force at close (real trades; for Daily Replay trades, the levels in force when the position closed, from the attempt's recorded bracket events). Empty for Trade Lab simulator trades and when never set."],
   ["original_stop_loss / original_target", "The ORIGINAL planned stop/target: for real trades, preserved set-once by the journal (plan changes never overwrite these); for Daily Replay trades, the levels captured by the risk snapshot recorded at the first entry fill. Empty when no plan was ever recorded - never reconstructed."],
@@ -1970,7 +2158,7 @@ const CSV_COLUMN_DOCS: [string, string][] = [
   ["initial_risk_usd", "Initial risk in dollars. Real trades: |average entry - original planned stop (or recorded stop when no original exists)| x entry quantity. Daily Replay trades: the planned risk recorded by the risk snapshot at the first entry fill (first-fill quantity basis - see risk_basis). Empty when no valid risk figure was recorded."],
   ["r_multiple", "Net realized P&L / initial risk. Empty when initial risk is unavailable - a missing R is never exported as 0."],
   ["risk_basis", "Plain-language statement of exactly how this trade's R was (or could not be) calculated."],
-  ["fees_usd", "Total recorded fees (real trades, summed from fills). EMPTY for simulator and Daily Replay trades: neither has a fee model, so fees are unknown - not zero."],
+  ["fees_usd", "Total recorded fees (real trades, summed from fills). EMPTY for simulator and Daily Replay trades: neither has a fee model, so fees are unknown - not zero. Also EMPTY for a real trade when NO fill carries fee data (fees were never recorded for it - unknown, not zero); 0.00 means fees were recorded as zero."],
   ["gross_realized_pnl_usd", "Gross realized P&L before fees (real trades). Empty for simulator trades (no fee split exists)."],
   ["net_realized_pnl_usd", "Net realized P&L - the figure all analytics use. For simulator trades this is the engine-reported P&L."],
   ["key_levels", "Recorded key levels as price Type [interaction] \"notes\", semicolon-separated."],
@@ -1980,7 +2168,7 @@ const CSV_COLUMN_DOCS: [string, string][] = [
   ["emotional_tags / mistakes", "Recorded Trade DNA tags, semicolon-separated. Empty means none recorded - no emotion or mistake is ever inferred from P&L."],
   ["entry_reasoning / exit_reasoning / notes / lessons", "The trader's own recorded words from Trade Review."],
   ["would_take_again", "Recorded yes/no from Trade Review. Empty when not recorded."],
-  ["screenshot_files", "Screenshot file names included in this package for this trade (see screenshots/ and screenshots-manifest.json). Empty when the trade has no included screenshot."],
+  ["screenshot_files", "Screenshot file names included in this package for this trade (real-trade images in screenshots/, Daily Replay evidence in trade_evidence/<trade_id>/; both mapped in screenshots-manifest.json). Empty when the trade has no included screenshot."],
   ["daily_replay_attempt_id", "Schema 2.0: the Daily Replay attempt that produced this trade. Empty for real and Trade Lab simulator trades. Joins to decision_timeline.csv (attempt_id) and strategy.json."],
   ["strategy_name", "Schema 2.0: name of the strategy the trade's attempt was bound to at lock time. For real trades this is the trade's recorded strategy text. Empty when no strategy was recorded."],
   ["strategy_version", "Schema 2.0: the immutable strategy VERSION number the attempt was bound to (e.g. 2 means version 2). Empty when the attempt recorded no strategy version."],
@@ -1989,6 +2177,10 @@ const CSV_COLUMN_DOCS: [string, string][] = [
   ["strategy_traded", "Name of that recorded strategy, resolved from the journal's strategy registry. Empty when not recorded."],
   ["setup_class", "The recorded setup classification slug for the strategy traded (strategy-family vocabulary, e.g. clean_breakout, strong_support_reaction). Empty when no classification was recorded."],
   ["setup_class_label", "Display label of the trade's effective setup classification: the recorded setup_class label, or - for trades classified before setup_class existed - the legacy HOD classification label. Empty when neither was recorded."],
+  ["strategy_custom_label", "The trader's own free-text strategy label recorded in Trade Review (used with the Other / Experimental strategy). Empty when not recorded."],
+  ["entry_trigger", "The entry trigger the trader recorded in Trade Review, in their own words. Empty when not recorded - never generated."],
+  ["events_status", "Daily Replay trades only: the state of the attempt's recorded decision-event stream for this trade - recorded (evidence derived from the stream), events_missing (the stream is missing entirely: a recording problem, NOT proof nothing was recorded at entry), or events_unreconciled (events exist but do not reconcile with the trade). Empty for real and Trade Lab trades (not applicable)."],
+  ["setup_class_origin", "Provenance of setup_class_label: recorded (the trader recorded setup_class) or legacy_hod (the label is a display-only coalesce of the legacy hod_class - it must not be presented as a classification recorded under the current system). Empty when there is no label."],
 ];
 
 export function buildReadme(
@@ -1999,6 +2191,9 @@ export function buildReadme(
 ): string {
   const unavailable = metricsUnavailableList(snapshot);
   const hasDr = snapshot.dailyReplay != null;
+  const includedShotDirs = [...new Set(
+    manifest.filter((e) => e.status === "included" && e.file).map((e) => e.file!.split("/")[0]),
+  )].sort();
   const includedFiles = [
     "trades.csv",
     "analytics.json",
@@ -2006,8 +2201,9 @@ export function buildReadme(
     "ChatGPT_Prompt.txt",
     "README.txt (this file)",
     "screenshots-manifest.json",
-    ...(hasDr ? [...(ctx.timelineIncluded === false ? [] : ["decision_timeline.csv"]), "strategy.json", ...(ctx.chartContextIncluded ? ["chart_context.csv"] : [])] : []),
-    ...(coverage.screenshotFiles > 0 ? [`screenshots/ (${coverage.screenshotFiles} image file${coverage.screenshotFiles === 1 ? "" : "s"})`] : []),
+    ...(hasDr ? [...(ctx.timelineIncluded === false ? [] : ["decision_timeline.csv"]), "strategy.json"] : []),
+    ...(ctx.chartContextIncluded ? ["chart_context.csv"] : []),
+    ...(includedShotDirs.length > 0 ? [`${includedShotDirs.map((d) => `${d}/`).join(" + ")} (${coverage.screenshotFiles} image file${coverage.screenshotFiles === 1 ? "" : "s"})`] : []),
   ];
   const lines: string[] = [
     "GROW GREEN LAB - AI EDGE ANALYSIS PACKAGE",
@@ -2025,6 +2221,7 @@ export function buildReadme(
     "- Timezone: trade dates are the journal's stored date strings; session/time-of-day analytics use America/New_York.",
     `- Trade source: ${sourceLabel(snapshot.source)}`,
     `- Trades: ${snapshot.counts.total} total (${snapshot.counts.closed} closed, ${snapshot.counts.open} open) - ${snapshot.counts.real} Real Market, ${snapshot.counts.simulator - snapshot.counts.dailyReplay} Simulator, ${snapshot.counts.dailyReplay} Daily Replay / Backtest`,
+    "- P&L basis: Real Market P&L is net of its recorded fees. Simulator and Daily Replay P&L is the engine-reported figure — neither has a fee model, so that P&L is fee-free and must not be described as net of fees. fees_usd is EMPTY when no fee data was recorded for a trade (unknown); it reads 0.00 only when fees were recorded as zero.",
     `- Screenshots: ${coverage.note}`,
     ...(ctx.pdfFailureNote ? [`- PDF: ${ctx.pdfFailureNote}`] : []),
     ...(snapshot.source === "all" ? ["- MIXED SOURCE: this package contains both Real Market and Simulator trades. Per-source results are kept separate in analytics.json (perSource); combined figures are labeled mixed-source."] : []),
@@ -2038,14 +2235,17 @@ export function buildReadme(
     "- analytics.json gains a dailyReplay block (per-attempt results and bound strategies) and two new breakdown dimensions (strategy, strategyVersion). counts gains a dailyReplay field (a subset of simulator, its coarse class).",
     "- decision_timeline.csv and strategy.json are new files, present only when Daily Replay trades are in the selection.",
     "- Daily Replay trades can now carry screenshots (journal-attached, like real trades) and recorded original plans (from the risk snapshot at entry). Trade Lab simulator trades are unchanged: no screenshots, no original plan, R unavailable.",
-    "- Representative screenshots (additive within schema 2.0): each Daily Replay trade contributes ONE representative screenshot — its recorded entry-time capture, or one the trader explicitly selected — identified in screenshots-manifest.json by role, representativeSource, candleIndex and candleTime. The trade's other screenshots stay in the journal and are listed in the manifest as not-included. chart_context.csv (when present) carries the trade's stored OHLCV sectioned at the entry candle: entry_context (candles completed before the entry), entry_candle_final (the entry candle's final OHLCV, finalized after the fill) and post_entry_development (candles while the position was open).",
+    "- Representative screenshots (additive within schema 2.0): each Daily Replay trade has ONE representative screenshot — its recorded entry-time capture, or one the trader explicitly selected — identified in screenshots-manifest.json by role, representativeSource, candleIndex and candleTime. chart_context.csv (when present) carries the trade's stored OHLCV sectioned at the entry candle: entry_context (candles completed before the entry), entry_candle_final (the entry candle's final OHLCV, finalized after the fill) and post_entry_development (candles while the position was open).",
     "- Strategy annotation (additive within schema 2.0): trades.csv appends strategy_traded_id, strategy_traded, setup_class and setup_class_label — the strategy and setup classification the trader recorded per trade in Trade Review, distinct from the attempt-bound strategy above. analytics.json breakdowns gain three dimensions (strategyTraded, setupClass, execGrade) and every breakdown row gains avgRSampleCount and maxDrawdownUSD. Trades recorded before the feature existed honestly export these empty — no strategy is ever backfilled.",
+    "- AI Edge Export fixes (additive within schema 2.0): Daily Replay trades now include EVERY available screenshot in the package (entry capture, exit capture and manual attachments), organized under trade_evidence/<trade ID>/; the representative remains flagged by role, and the manifest types each image (captureKind auto_entry / auto_exit / manual), carries the candle index of BOTH recorded captures, and records recordedAt — the storage object's upload/record time (near-exact for auto-captures, upload time for manual attachments; not a shutter time). trades.csv appends strategy_custom_label, entry_trigger, events_status and setup_class_origin. events_status states each Daily Replay trade's evidence-stream state (recorded / events_missing / events_unreconciled); events_missing marks a recording problem and is never worded as 'no snapshot recorded'. A draft-anchors trade's exit fill is labelled '(implied from recorded P&L)'. Real-trade fees_usd is now EMPTY when no fill carries fee data (unknown), distinct from a recorded 0.00. chart_context.csv also covers Trade Lab simulator trades and gains timeframe_min plus derived columns (session_high_so_far, vwap_typical_approx, ema_fast_9, ema_slow_20, premarket_high, premarket_low, key_levels) — see CHART CONTEXT below. analytics.json setupClass breakdown rows carry recordedCount / legacyHodCount provenance counts, and the strategyTraded breakdown is annotation-only (the attempt binding groups under strategy / strategyVersion).",
     ...(hasDr ? [
       "",
       "DAILY REPLAY IN THIS PACKAGE",
       "Daily Replay trades are BACKTESTS: historical simulations over recorded market days. They are not live trading results and not a guarantee of future performance.",
       "- Identity: every Daily Replay trade carries its attempt ID (trades.csv daily_replay_attempt_id) and, when one was bound at lock time, its strategy name + immutable version. Attempts locked without a strategy honestly show none.",
       "- Original plan + R: derived ONLY from the risk snapshot recorded at the first entry fill of each position (plus the bracket adjustments recorded while it was open). Trades whose cycle has no valid snapshot export R as unavailable - it is never reconstructed after the fact.",
+      "- Evidence status (events_status in trades.csv, lifecycle + eventsRecorded per attempt in analytics.json): recorded = the attempt's event stream exists and this trade's evidence derives from it; events_unreconciled = events exist but do not reconcile with the trade; events_missing = the attempt has NO recorded events at all — a recording problem (the recorder event loss fixed 2026-10-18), which is NOT evidence that no plan was recorded at entry. An attempt with eventsRecorded 0 contributes no decision_timeline.csv rows, and the timeline's absence for it is disclosed here and in analytics.json rather than left silent.",
+      "- Timeframe: each attempt's candle timeframe (minutes) is in analytics.json (dailyReplay.attempts[].timeframeMinutes, from the dataset record) and in chart_context.csv (timeframe_min).",
       "- Fees: Daily Replay has no fee or slippage model. fees_usd is empty (unknown), never zero.",
       "- decision_timeline.csv: one row per recorded event for the included attempts. trade_id attributes an event to the trade whose position cycle contains it (empty for attempt-level events and for a position still open at completion). market_time is the historical candle time (Eastern); wall_time is the real time the action happened. The two clocks are never mixed. payload_json is the recorded payload verbatim.",
       "- strategy.json: only the strategies/versions the included attempts reference, with the attempt IDs bound to each version. Versions are immutable - a suggested rule change is a hypothesis for a NEW version, never an edit.",
@@ -2065,12 +2265,20 @@ export function buildReadme(
     ROUNDING_NOTE,
     "",
     "SCREENSHOT MANIFEST",
-    "screenshots-manifest.json lists every screenshot considered for this package: owning stable trade ID, symbol, package-relative file name, and status (included / unavailable / not-included). The same manifest is embedded in analytics.json (metadata.screenshotManifest).",
+    "screenshots-manifest.json lists every screenshot considered for this package: owning stable trade ID, symbol, package-relative file name, and status (included / unavailable). Every entry in the manifest with status included corresponds to a file physically present in this ZIP, and every image file in the ZIP has a manifest entry — the manifest never references a file that is not here. A listed image whose download failed is marked unavailable (file null) and counted in the coverage note — never substituted with another image, never silently dropped. The same manifest is embedded in analytics.json (metadata.screenshotManifest).",
+    "Layout: real-trade images sit in screenshots/; Daily Replay evidence sits in trade_evidence/<trade ID>/, one folder per trade, so a trade's complete visual evidence stays together.",
     "PRIVACY: raw storage paths are intentionally NOT included anywhere in this package. Storage paths contain the account's internal identifiers (account UUID and internal object names), so they stay inside the application; screenshots are identified only by stable trade ID and package-relative file name.",
-    "Screenshots are typed \"trade-screenshot\": the platform does not record whether a screenshot was taken at entry, exit, or review, and the export does not guess from file names. Exception (schema 2.0 representative data): for Daily Replay trades the manifest records the representative image's role, source and candle index from the draft record; non-representative attachments remain untyped.",
+    "Roles and capture kinds (from the trade's records, never guessed from file names): role is representative (the trade's one flagged primary image), entry or exit (a Daily Replay trade's recorded auto-captures when they are not the representative), or attachment (everything else). captureKind is auto_entry / auto_exit for the recorded Daily Replay auto-captures and manual for all other images — manual attachments carry no recorded entry/exit typing, because the platform does not record when a manual screenshot was taken. For Daily Replay trades the manifest records BOTH captures' candle indices from the draft record, and candleTime (the anchored candle's period start) when the session's stored candles validated it.",
+    "recordedAt is the storage object's created_at — the time the image was recorded into storage (its upload time). For auto-captures that is near-exact (they upload at the fill moment); for manual attachments it is the upload time, which may be later than the moment shown. It is documented as a record time, never presented as a shutter time.",
     coverage.note,
     ...(manifest.length === 0 ? ["No screenshot entries were recorded for this package."] : []),
     "",
+    ...(ctx.chartContextIncluded ? [
+      "CHART CONTEXT (chart_context.csv)",
+      "Per-trade historical OHLCV for the included Daily Replay and Trade Lab simulator trades, built ONLY from each session's stored candles and sectioned at the entry candle (see the file's section column): entry_context = candles completed BEFORE the entry candle (the only section that may judge the entry), entry_candle_final = the entry candle's final OHLCV (still forming at the fill), post_entry_development = candles while the position was open, through the exit candle. There is deliberately NO post-exit tail. A trade whose stored candles cannot be validated against its recorded entry time contributes no rows, and the omission is named in the package warnings — never guessed or shifted. Real-market trades have no stored candles, so chart context is unavailable for them (documented, never fabricated).",
+      "Derived columns, computed ONLY over the exported rows in candle order: session_high_so_far = the running session high (maximum high from the session's first exported candle through that row — at an entry_context row it is the session high before the entry candle); vwap_typical_approx = cumulative volume-weighted average price using the typical price (high+low+close)/3 — an APPROXIMATION, because the platform does not record tick-level VWAP; ema_fast_9 / ema_slow_20 = exponential moving averages of closes, seeded at the first exported candle's close with k = 2/(period+1); premarket_high / premarket_low = the extremes of exported candles before 09:30 ET, present only when the stored set contains premarket candles (empty otherwise — the absence is also noted per trade); timeframe_min = the candle timeframe in minutes when the source records one (Daily Replay datasets do; Trade Lab sessions do not, so it is empty for them); key_levels = the trade's recorded key levels, joined from its journal annotation.",
+      "",
+    ] : []),
     "MISSING DATA AND KNOWN LIMITATIONS",
     "- Daily Replay trades in this export are FINALIZED trades only — unfinalized drafts are excluded by design and never appear in any file in this package.",
     "- Daily Replay representative screenshots: an auto-captured representative shows the chart as staged at the entry fill; the entry candle was still forming when captured. A user-selected representative is labelled user_selected in the manifest and may have been captured at review time — the prompt separates entry-time evidence from later images.",

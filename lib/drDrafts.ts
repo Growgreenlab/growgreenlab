@@ -866,9 +866,16 @@ export function groupedTradeFromDraftAnchors(
       created_at: draft.createdAt,
     },
   ];
-  return assembleCycleTrade(fills, draft.realizedPnl, draft.cycleIndex, {
+  const trade = assembleCycleTrade(fills, draft.realizedPnl, draft.cycleIndex, {
     tradeKey: draft.draftKey, ticker: meta.ticker, tradeDate: meta.tradeDate,
   });
+  // §G 3h provenance: the exit fill above is IMPLIED by the recorded
+  // anchors (entry price + realized P&L / qty), not a recorded fill.
+  // The flag travels with the trade so downstream surfaces (the AI
+  // Edge Export) can label the derivation instead of presenting the
+  // implied price as a recorded fill.
+  if (trade) trade.anchorsDerived = true;
+  return trade;
 }
 
 /**
