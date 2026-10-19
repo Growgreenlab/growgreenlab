@@ -377,7 +377,7 @@ export default function Home() {
               </div>
               <div className="ggl-ledger-row">
                 <span className="ggl-ledger-rule">Free account</span>
-                <span className="ggl-ledger-detail">Save sessions, keep your Trade Journal, and export your edge analysis.</span>
+                <span className="ggl-ledger-detail">Save sessions and keep your Trade Journal. Grow Green Lab Pro adds unlimited trades and entries, the AI Edge Analysis Export, and advanced analytics.</span>
               </div>
             </div>
             <p className="ggl-ledger-note">

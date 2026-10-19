@@ -10,6 +10,7 @@ const NAV_LINKS: { label: string; href: string; external?: boolean }[] = [
   { label: "Breakout Drills", href: "/drills" },
   { label: "Edge Analyzer", href: "/journal?tab=analytics" },
   { label: "Community", href: "/community" },
+  { label: "Pricing", href: "/pricing" },
 ];
 
 function NavLink({

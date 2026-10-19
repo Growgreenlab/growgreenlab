@@ -24,6 +24,11 @@ import { representativeSourceLabel, resolveRepresentative } from "../../lib/drRe
 import DrDraftReview from "../../components/DrDraftReview";
 import DrFinalizeConfirm from "../../components/DrFinalizeConfirm";
 import { probeStrategyAnnotationSupport } from "../../lib/strategyClassification";
+import {
+  advancedAnalyticsLocked, exportLocked, loadEntitlement, parseQuotaError, quotaMessage,
+  subscriptionsRolloutAt, type UsageStatus,
+} from "../../lib/entitlements";
+import UsageIndicators from "../../components/UsageIndicators";
 import StrategyTradedField, {
   resolveTradedStrategyId,
   tradedValueFromMeta,
@@ -210,6 +215,13 @@ export default function JournalPage() {
    * every annotation surface stays dark — the journal behaves
    * exactly as it did before the feature. */
   const [annotationAvailable, setAnnotationAvailable] = useState(false);
+  /* Subscriptions (migration subscriptions-v1, prepared only):
+   * entitlement is null until the usage_status RPC exists on this
+   * database — every billing surface (usage counters, export /
+   * analytics gates) stays dark and the journal behaves exactly as
+   * before. userCreatedAt feeds the D8 grandfathering check. */
+  const [entitlement, setEntitlement] = useState<UsageStatus | null>(null);
+  const [userCreatedAt, setUserCreatedAt] = useState<string | null>(null);
   // Daily Replay per-cycle trade drafts (Phase D): the durable draft
   // rows for ALL of the user's attempts (linked and unlinked), plus the
   // per-attempt session_reset counts derived from the loaded events.
@@ -304,6 +316,12 @@ export default function JournalPage() {
       const supabase = createClient();
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) { setError("Please sign in to view your trade journal."); setLoading(false); return; }
+      setUserCreatedAt(user.created_at ?? null);
+      // Billing read model — dark (null) until the subscriptions
+      // migration exists; never allowed to fail the journal load.
+      loadEntitlement(supabase as unknown as Parameters<typeof loadEntitlement>[0])
+        .then(setEntitlement)
+        .catch(() => setEntitlement(null));
 
       // Fetch sessions with their fills
       const { data: sessions, error: sErr } = await supabase
@@ -1331,6 +1349,12 @@ export default function JournalPage() {
   if (loading) return <div className="wrap" style={{ padding: 40 }}><p className="hint">Loading journal…</p></div>;
   if (error) return <div className="wrap" style={{ padding: 40 }}><div className="err">{error}</div><p style={{ marginTop: 12 }}><Link href="/replay">← Back to simulator</Link></p></div>;
 
+  // Subscription gates (dark unless the rollout timestamp is set AND
+  // billing is live on this database — lib/entitlements).
+  const rolloutAt = subscriptionsRolloutAt();
+  const isExportLocked = exportLocked({ entitlement, userCreatedAt, rolloutAt });
+  const isAnalyticsLocked = advancedAnalyticsLocked({ entitlement, rolloutAt });
+
   return (
     <div className="wrap" style={{ paddingTop: 20, paddingBottom: 40 }}>
       <div className="jr-head">
@@ -1353,6 +1377,12 @@ export default function JournalPage() {
             <span className="hint" style={{ fontSize: 11 }}> of {drCounts.total} total</span>
           </button>
         </div>
+      </div>
+
+      {/* Subscription usage counters — renders nothing while billing
+          is dark (pre-migration), so the header is unchanged then. */}
+      <div style={{ marginBottom: 12 }}>
+        <UsageIndicators entitlement={entitlement} />
       </div>
 
       <div className="tabs" style={{ marginBottom: 12 }}>
@@ -1498,7 +1528,7 @@ export default function JournalPage() {
       {tab === "trades" && <TradesTab trades={filtered} metas={metas} onSelect={(k) => openDrawer(k)} onSelectShots={(k) => openDrawer(k, true)} onRealTradeSaved={handleRealTradeSaved} showRealForm={showRealForm} setShowRealForm={setShowRealForm} showImport={showImport} setShowImport={setShowImport} editingReal={editingReal} onEditReal={startEditReal} onDeleteReal={startDeleteReal} onCancelEdit={cancelEdit} strategies={drData.strategies} strategyVersions={drData.strategyVersions} annotationAvailable={annotationAvailable} />}
       {tab === "review" && <ReviewTab tradeKey={selectedKey} simTrade={!isRealSelected ? (selected as GroupedTrade | null) : null} realTrade={isRealSelected ? (selected as RealTrade | null) : null} meta={selectedMeta} onSaved={load} onEditReal={startEditReal} onDeleteReal={startDeleteReal} drInfo={selectedDrInfo} drDraftKey={selectedKey ? (draftForTrade(selectedKey, unified.find((t) => t.key === selectedKey)?.attemptId ?? null)?.draftKey ?? null) : null} drAutoCapture={selectedKey ? (draftForTrade(selectedKey, unified.find((t) => t.key === selectedKey)?.attemptId ?? null)?.autoCapture ?? null) : null} strategies={drData.strategies} strategyVersions={drData.strategyVersions} annotationAvailable={annotationAvailable} boundStrategyId={selectedKey ? (unified.find((t) => t.key === selectedKey)?.strategyId ?? null) : null} />}
       {tab === "calendar" && <CalendarTab trades={closedFiltered} metas={metas} selectedDay={selectedCalDay} onSelectDay={setSelectedCalDay} onSelectTrade={(k) => openDrawer(k)} />}
-      {tab === "analytics" && <AnalyticsTab trades={analyticsTrades} onSelect={(k) => openDrawer(k)} pageSource={sourceFilter} pagePeriod={period} annotationAvailable={annotationAvailable} exportInput={{
+      {tab === "analytics" && <AnalyticsTab trades={analyticsTrades} onSelect={(k) => openDrawer(k)} pageSource={sourceFilter} pagePeriod={period} annotationAvailable={annotationAvailable} exportLocked={isExportLocked} analyticsLocked={isAnalyticsLocked} exportInput={{
         unified, metas, realTrades, simTrades: [...trades, ...drData.preTrades],
         drAttempts: drData.attemptsExport,
         drEvidence: drData.evidenceByKey,
@@ -2532,6 +2562,43 @@ function BrokerImportForm({ onSaved }: { onSaved: () => void }) {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Not signed in.");
 
+      /* Subscriptions path (migration subscriptions-v1): the whole
+       * batch runs inside ONE security-definer RPC — import_hash
+       * dedupe, the one-time historical import allowance, then
+       * quota — and any cap refusal aborts the ENTIRE import instead
+       * of half-importing a broker history. Falls back to the legacy
+       * per-group loop below when the RPC does not exist yet
+       * (pre-migration database: behavior is byte-identical to
+       * before subscriptions). */
+      const groups = previewTrades.map((t) => ({
+        ticker: t.ticker,
+        broker: parseResult.broker,
+        trade_date: t.tradeDate,
+        direction: t.direction,
+        fills: t.fills.map((f) => ({
+          side: f.side, qty: f.qty, price: f.price, fees: f.fees,
+          fill_time: f.fillTime, hash: f.hash,
+        })),
+      }));
+      const { data: rpcData, error: rpcError } = await supabase.rpc("import_real_trades", { p_groups: groups });
+      if (!rpcError && rpcData) {
+        const r = rpcData as { imported: number; skipped: number };
+        setMsg(`Imported ${r.imported} trades. ${r.skipped} skipped as duplicates.`);
+        onSaved();
+        return;
+      }
+      if (rpcError) {
+        const q = parseQuotaError(rpcError);
+        if (q) {
+          setMsg(`Import stopped — nothing was imported. ${quotaMessage(q)}`);
+          return;
+        }
+        const missing = rpcError.code === "PGRST202" || rpcError.code === "42883"
+          || /import_real_trades/.test(rpcError.message ?? "");
+        if (!missing) throw new Error(rpcError.message);
+        // else: pre-migration database — legacy loop below.
+      }
+
       let imported = 0, skipped = 0;
       for (const t of previewTrades) {
         // Filter out already-imported fills using the pre-fetched hash set.
@@ -2919,7 +2986,12 @@ function RealTradeForm({ onSaved, editing, onCancel, strategies, strategyVersion
           user_id: user.id,
           ...tradeFields,
         }).select("id").single();
-        if (tErr) throw new Error(tErr.message);
+        if (tErr) {
+          // Subscription quota rejection (subscriptions-v1 trigger):
+          // show the structured limit + upgrade message.
+          const q = parseQuotaError(tErr);
+          throw new Error(q ? quotaMessage(q) : tErr.message);
+        }
         tradeId = trade.id;
       }
 
@@ -3386,7 +3458,7 @@ function InsightCard({ title, insight }: { title: string; insight: Insight }) {
   );
 }
 
-function AnalyticsTab({ trades, onSelect, exportInput, pageSource, pagePeriod, annotationAvailable }: { trades: AnalyticsTrade[]; onSelect: (k: string) => void; exportInput?: ExportSnapshotInput; pageSource?: string; pagePeriod?: string; annotationAvailable?: boolean }) {
+function AnalyticsTab({ trades, onSelect, exportInput, pageSource, pagePeriod, annotationAvailable, exportLocked, analyticsLocked }: { trades: AnalyticsTrade[]; onSelect: (k: string) => void; exportInput?: ExportSnapshotInput; pageSource?: string; pagePeriod?: string; annotationAvailable?: boolean; exportLocked?: boolean; analyticsLocked?: boolean }) {
   const [dim, setDim] = useState<BreakdownDimension>("setup");
   const [expanded, setExpanded] = useState<string | null>(null);
   // Breakdown-table scroll affordance: show a right-edge fade while more
@@ -3413,7 +3485,7 @@ function AnalyticsTab({ trades, onSelect, exportInput, pageSource, pagePeriod, a
   if (trades.length === 0) {
     return (
       <div style={{ display: "grid", gap: 20 }}>
-        {exportInput && <EdgeExportPanel input={exportInput} pageSource={pageSource} pagePeriod={pagePeriod} />}
+        {exportInput && <EdgeExportPanel input={exportInput} pageSource={pageSource} pagePeriod={pagePeriod} locked={exportLocked} />}
         <div className="card" style={{ padding: 32, textAlign: "center" }}>
           <p className="hint" style={{ margin: 0 }}>No data — analytics need closed trades in the current filter selection. Adjust the source/period filters above, or log and close some trades first.</p>
         </div>
@@ -3438,7 +3510,7 @@ function AnalyticsTab({ trades, onSelect, exportInput, pageSource, pagePeriod, a
 
   return (
     <div style={{ display: "grid", gap: 20 }}>
-      {exportInput && <EdgeExportPanel input={exportInput} pageSource={pageSource} pagePeriod={pagePeriod} />}
+      {exportInput && <EdgeExportPanel input={exportInput} pageSource={pageSource} pagePeriod={pagePeriod} locked={exportLocked} />}
       {/* ---- Risk & Consistency ---- */}
       <section style={{ minWidth: 0 }}>
         <h3 style={{ margin: "0 0 10px" }}>Risk &amp; Consistency</h3>
@@ -3566,6 +3638,15 @@ function AnalyticsTab({ trades, onSelect, exportInput, pageSource, pagePeriod, a
           <h3 style={{ margin: 0 }}>Strategy Performance</h3>
           <span className="hint" style={{ fontSize: 11.5 }}>By the strategy recorded on each trade in Trade Review (“Strategy traded”); a Daily Replay trade without one groups under the strategy its attempt ran. Same eligible trades as every other number on this tab.</span>
         </div>
+        {analyticsLocked ? (
+          <div className="card" style={{ padding: 16 }}>
+            <p className="hint" style={{ margin: "0 0 12px" }}>
+              Strategy Performance is part of Grow Green Lab Pro&rsquo;s advanced analytics.
+              Your trades and their strategy annotations are unchanged — upgrading shows this breakdown again.
+            </p>
+            <Link href="/pricing" className="btn primary" style={{ display: "inline-block" }}>Upgrade to Pro</Link>
+          </div>
+        ) : (<>
         <div className="card tablescroll" style={{ padding: 0, overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
             <thead>
@@ -3598,6 +3679,7 @@ function AnalyticsTab({ trades, onSelect, exportInput, pageSource, pagePeriod, a
           </table>
         </div>
         <p className="hint" style={{ margin: "8px 0 0" }}>Rows under 5 trades are marked “small sample”: a high win rate — or a few winners — on a handful of trades does not make a strategy profitable or validated. Judge a strategy on expectancy, profit factor, drawdown and sample size together.</p>
+        </>)}
       </section>
       )}
 

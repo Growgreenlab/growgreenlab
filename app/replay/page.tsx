@@ -41,6 +41,7 @@ import {
   newDrFlushState,
   type DrFlushState,
 } from "../../lib/drEventFlush";
+import { parseQuotaError, quotaMessage } from "../../lib/entitlements";
 import {
   reconstructDrAttempt,
   shouldOfferDrResume,
@@ -2038,7 +2039,46 @@ function ReplayPageInner() {
         final_cash: eng.cash,
         realized_pnl: eng.realizedPnl,
       };
-      let sessionId: string;
+      let sessionId: string | null = null;
+      /* Subscriptions path (migration subscriptions-v1): the save runs
+       * through the security-definer save_replay_session RPC — ONE
+       * transaction that upserts the session, replaces the fills,
+       * regroups closed trades server-side (groupFillsIntoTrades
+       * parity, pinned by the SQL harness) and consumes quota for NEW
+       * trade keys only; the balance is the same delta-guarded value
+       * the legacy path computes (passed in, stored verbatim). Falls
+       * back to the legacy client writes below ONLY when the RPC does
+       * not exist yet (pre-migration database). A quota rejection
+       * never falls back — that would bypass the cap. */
+      {
+        const deltaNow = eng.realizedPnl - lastSavedPnlRef.current;
+        const balanceArg = isFinite(deltaNow) && deltaNow !== 0 ? balanceRef.current + deltaNow : null;
+        const { data: rpcId, error: rpcErr } = await supabase.rpc("save_replay_session", {
+          p_session_id: savedSessionIdRef.current,
+          p_session: {
+            ticker: meta.ticker, trade_date: meta.tradeDate, source: meta.source,
+            candles, start_index: meta.startIndex,
+            final_cash: eng.cash, realized_pnl: eng.realizedPnl,
+          },
+          p_fills: eng.fills.map((f) => ({
+            side: f.side, qty: f.qty, price: f.price, candleIndex: f.candleIndex,
+            time: f.time, realizedPnl: f.realizedPnl, note: f.note ?? null,
+          })),
+          p_account_balance: balanceArg,
+        });
+        if (!rpcErr && rpcId) {
+          sessionId = rpcId as string;
+          savedSessionIdRef.current = sessionId;
+        } else if (rpcErr) {
+          const q = parseQuotaError(rpcErr);
+          if (q) throw new Error(quotaMessage(q));
+          const missing = rpcErr.code === "PGRST202" || rpcErr.code === "42883"
+            || /save_replay_session/.test(rpcErr.message ?? "");
+          if (!missing) throw new Error(rpcErr.message);
+          // else: pre-migration database — legacy path below.
+        }
+      }
+      if (!sessionId) {
       // Upsert: update existing auto-saved session, or insert new one
       if (savedSessionIdRef.current) {
         const { error } = await supabase
@@ -2076,8 +2116,12 @@ function ReplayPageInner() {
         );
         if (tErr) throw new Error(tErr.message);
       }
+      }
       // Update persistent account balance with this session's realized P&L.
       // For auto-save, only apply the DELTA since last save to avoid double-counting.
+      // (On the RPC path the same value was already stored inside the
+      // save transaction; persistBalance below rewrites it identically
+      // and keeps the local balance state on the one existing path.)
       const pnl = eng.realizedPnl;
       const lastPnl = lastSavedPnlRef.current;
       const delta = pnl - lastPnl;
@@ -2632,7 +2676,16 @@ function ReplayPageInner() {
         }
         drFailedPayloadsRef.current.set(draftKey, payload);
         setDrDraftSaveStates((s) => ({ ...s, [draftKey]: "failed" }));
-        showDrDraftNotice({ tone: "warn", text: "Trade closed — draft NOT saved yet." });
+        // Subscription quota rejection gets the structured limit
+        // message (the draft stays recoverable from the timeline;
+        // upgrading lifts the cap — the trade itself already closed).
+        const quota = parseQuotaError(res.error);
+        showDrDraftNotice({
+          tone: "warn",
+          text: quota
+            ? `Trade closed — draft NOT saved. ${quotaMessage(quota)}`
+            : "Trade closed — draft NOT saved yet.",
+        });
         return;
       }
       let row = res.data;

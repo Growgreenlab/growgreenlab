@@ -22,7 +22,7 @@ import { generateEdgePackage, listExportScreenshots, type PackageResult } from "
 
 const MAX_AUTO_SCREENSHOT_TRADES = 60;
 
-export default function EdgeExportPanel({ input, pageSource, pagePeriod }: {
+export default function EdgeExportPanel({ input, pageSource, pagePeriod, locked }: {
   input: ExportSnapshotInput;
   /** The journal page's current source filter + period preset. The
    *  panel's selection INITIALIZES from them and RE-SYNCS whenever
@@ -32,6 +32,12 @@ export default function EdgeExportPanel({ input, pageSource, pagePeriod }: {
    *  re-scope the panel freely afterwards. */
   pageSource?: string;
   pagePeriod?: string;
+  /** Subscriptions gate (D8): true only when Pro gating is live for
+   *  this account (rollout configured, not Pro, not grandfathered —
+   *  computed by lib/entitlements.exportLocked). The panel renders an
+   *  upgrade notice instead of the export controls; every export
+   *  code path below stays exactly as it was for unlocked users. */
+  locked?: boolean;
 }) {
   const today = useMemo(() => todayLocalStr(), []);
   const journalScope = useMemo(
@@ -214,6 +220,22 @@ export default function EdgeExportPanel({ input, pageSource, pagePeriod }: {
     if (snapshot.counts.dailyReplay > 0) warnings.push("Daily Replay trades are historical backtests. Their original plan and R come only from the risk snapshot recorded at entry; trades without one export R as unavailable.");
     if (realInRange > 0 && shotInfo.state === "done" && shotInfo.files === 0) warnings.push("No screenshots are attached to the eligible trades in this selection — the package will state that plainly instead of fabricating images.");
     if (snapshot.counts.total === 0) warnings.push("No trades match this period and source. You can still generate the package — it will document an empty selection rather than silently widening the range.");
+  }
+
+  if (locked) {
+    return (
+      <section className="card" style={{ padding: 16 }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+          <h3 style={{ margin: 0 }}>AI Edge Analysis Export</h3>
+          <span style={{ fontSize: 11.5, fontWeight: 700, color: "#06281c", background: "var(--emerald-bright)", borderRadius: 999, padding: "3px 9px" }}>PRO</span>
+        </div>
+        <p className="hint" style={{ margin: "10px 0 12px" }}>
+          The AI Edge Analysis Export is part of Grow Green Lab Pro. Your journal, trades, and
+          screenshots are all still here — upgrading unlocks generating the export package again.
+        </p>
+        <a href="/pricing" className="btn primary" style={{ display: "inline-block" }}>Upgrade to Pro</a>
+      </section>
+    );
   }
 
   return (

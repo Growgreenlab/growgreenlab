@@ -50,6 +50,7 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { DrEvent } from "./dailyReplayEvents";
+import { parseQuotaError, quotaMessage } from "./entitlements";
 import type { GroupedTrade, RawFill } from "./journal";
 import {
   splitCyclesByGeneration,
@@ -430,7 +431,11 @@ export async function fetchDraftsForUser(client: SupabaseClient): Promise<DrDraf
 }
 
 /** Finalize one draft. Guarded on status='draft', so a repeat call
- *  affects 0 rows — returns the affected-row count. */
+ *  affects 0 rows — returns the affected-row count. Other errors
+ *  keep the historical swallow-to-0 behavior, EXCEPT a subscription
+ *  quota rejection (subscriptions-v1 finalize trigger): that one
+ *  THROWS a user-readable Error so every finalize surface can show
+ *  the limit + upgrade message instead of a false "did not land". */
 export async function finalizeDraft(client: SupabaseClient, draftId: string): Promise<number> {
   const now = new Date().toISOString();
   const { data, error } = await client
@@ -439,7 +444,12 @@ export async function finalizeDraft(client: SupabaseClient, draftId: string): Pr
     .eq("id", draftId)
     .eq("status", "draft")
     .select();
-  if (error || !data) return 0;
+  if (error) {
+    const q = parseQuotaError(error);
+    if (q) throw new Error(quotaMessage(q));
+    return 0;
+  }
+  if (!data) return 0;
   return (data as unknown[]).length;
 }
 

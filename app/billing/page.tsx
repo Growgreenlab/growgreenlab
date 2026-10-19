@@ -1,0 +1,168 @@
+"use client";
+
+/**
+ * /billing — current plan, subscription status, interval, renewal /
+ * expiration date, and Manage Subscription (Stripe Customer Portal).
+ * All state comes from the same rows the entitlement function reads,
+ * so this page can never disagree with enforcement. Checkout result
+ * states arrive as ?checkout=success|canceled — a success landing
+ * does NOT grant anything by itself; it polls usage_status until the
+ * webhook lands (usually seconds), and says so honestly meanwhile.
+ */
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
+import { loadEntitlement, type UsageStatus } from "../../lib/entitlements";
+import { openBillingPortal } from "../../lib/billing";
+import UsageIndicators from "../../components/UsageIndicators";
+
+function fmtDate(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "—" : d.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+}
+
+function BillingInner() {
+  const params = useSearchParams();
+  const checkout = params.get("checkout");
+  const [entitlement, setEntitlement] = useState<UsageStatus | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [signedIn, setSignedIn] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const pollRef = useRef(0);
+
+  const refresh = useCallback(async () => {
+    if (!isSupabaseConfigured()) { setLoaded(true); return; }
+    const supabase = createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    setSignedIn(!!user);
+    if (user) setEntitlement(await loadEntitlement(supabase));
+    setLoaded(true);
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  // After a successful checkout, entitlement arrives via webhook —
+  // poll a few times so the page can confirm Pro without a manual
+  // refresh, and never claim Pro before the server state says so.
+  useEffect(() => {
+    if (checkout !== "success" || !loaded || entitlement?.is_pro) return;
+    if (pollRef.current >= 6) return;
+    const t = setTimeout(() => { pollRef.current += 1; refresh(); }, 2500);
+    return () => clearTimeout(t);
+  }, [checkout, loaded, entitlement, refresh]);
+
+  const manage = async () => {
+    setBusy(true);
+    setNotice(null);
+    const r = await openBillingPortal();
+    if (!r.ok) {
+      setBusy(false);
+      if (r.reason === "not_configured") setNotice("Billing isn't configured on this deployment yet.");
+      else if (r.reason === "no_customer") setNotice("No subscription found for your account yet — subscribe from the pricing page first.");
+      else setNotice("The billing portal couldn't be opened. Please try again in a moment.");
+    }
+  };
+
+  if (!loaded) return <div className="wrap" style={{ padding: 40 }}><p className="hint">Loading billing…</p></div>;
+  if (!signedIn) {
+    return (
+      <div className="wrap" style={{ paddingTop: 28, maxWidth: 760 }}>
+        <h2 style={{ margin: "0 0 8px" }}>Billing</h2>
+        <p className="hint">Please <Link href="/login">sign in</Link> to see your plan and subscription.</p>
+      </div>
+    );
+  }
+
+  const sub = entitlement?.subscription ?? null;
+  const isPro = !!entitlement?.is_pro;
+  const pastDueInGrace = !!sub && sub.status === "past_due" && isPro;
+  const expired = !!sub && !isPro && (sub.status === "canceled" || sub.status === "past_due" || sub.status === "unpaid");
+
+  return (
+    <div className="wrap" style={{ paddingTop: 28, paddingBottom: 48, maxWidth: 760 }}>
+      <h2 style={{ margin: "0 0 6px" }}>Billing</h2>
+      <p className="hint" style={{ margin: "0 0 20px" }}>Your plan, subscription status, and payment management.</p>
+
+      {checkout === "success" && (
+        <div className="card" style={{ padding: "12px 16px", marginBottom: 14 }}>
+          {isPro
+            ? "Payment confirmed — your Pro subscription is active. Welcome to Pro."
+            : "Payment received — your subscription is being confirmed (this usually takes a few seconds). This page refreshes automatically; Pro activates as soon as Stripe confirms."}
+        </div>
+      )}
+      {checkout === "canceled" && (
+        <div className="card" style={{ padding: "12px 16px", marginBottom: 14 }}>
+          Checkout was canceled — no charge was made. You can subscribe anytime from the <Link href="/pricing">pricing page</Link>.
+        </div>
+      )}
+      {pastDueInGrace && (
+        <div className="card" style={{ padding: "12px 16px", marginBottom: 14, borderColor: "#f5c542" }}>
+          <strong>Payment issue:</strong> your last renewal payment failed. Pro stays active during the
+          grace period until <strong>{fmtDate(sub.current_period_end ? new Date(new Date(sub.current_period_end).getTime() + 7 * 86400000).toISOString() : null)}</strong> —
+          update your payment method in the billing portal to keep Pro without interruption.
+        </div>
+      )}
+      {expired && (
+        <div className="card" style={{ padding: "12px 16px", marginBottom: 14 }}>
+          Your Pro subscription has ended, so your account is on the Free plan. Your complete trade
+          history, journal, and screenshots remain fully available — resubscribe anytime to restore Pro.
+        </div>
+      )}
+      {notice && <div className="card" style={{ padding: "12px 16px", marginBottom: 14 }}>{notice}</div>}
+
+      <div style={{ display: "grid", gap: 16 }}>
+        <UsageIndicators entitlement={entitlement} />
+        <div className="card" style={{ padding: 18, display: "grid", gap: 10 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+            <span className="hint">Current plan</span>
+            <strong>{isPro ? "Grow Green Lab Pro" : "Free"}</strong>
+          </div>
+          {sub ? (
+            <>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+                <span className="hint">Subscription status</span>
+                <span className="num">{sub.status}{sub.cancel_at_period_end ? " (cancels at period end)" : ""}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+                <span className="hint">Billing interval</span>
+                <span className="num">{sub.interval === "year" ? "Yearly — $89.99/yr" : sub.interval === "month" ? "Monthly — $9.99/mo" : "—"}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+                <span className="hint">{sub.cancel_at_period_end || !isPro ? "Access until" : "Renews on"}</span>
+                <span className="num">{fmtDate(sub.current_period_end)}</span>
+              </div>
+            </>
+          ) : (
+            <p className="hint" style={{ margin: 0 }}>
+              {entitlement
+                ? "No subscription on this account. Upgrade from the pricing page whenever you're ready."
+                : "Billing isn't configured on this deployment yet — plans and usage counters will appear here once subscriptions launch."}
+            </p>
+          )}
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 4 }}>
+            {sub
+              ? <button className="btn primary" disabled={busy} onClick={manage}>{busy ? "Opening portal…" : "Manage Subscription"}</button>
+              : <Link href="/pricing" className="btn primary" style={{ display: "inline-block" }}>See Pro plans</Link>}
+            <Link href="/pricing" className="btn" style={{ display: "inline-block" }}>Compare plans</Link>
+          </div>
+          <p className="hint" style={{ margin: 0, fontSize: 12 }}>
+            The billing portal (Stripe) handles payment methods, invoices, plan switches, and
+            cancellation. Canceling keeps Pro until the end of the paid period, and your trade
+            history always stays available.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function BillingPage() {
+  return (
+    <Suspense fallback={<div className="wrap" style={{ padding: 40 }}><p className="hint">Loading billing…</p></div>}>
+      <BillingInner />
+    </Suspense>
+  );
+}
