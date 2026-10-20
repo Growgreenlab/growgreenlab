@@ -30,6 +30,8 @@ function BillingInner() {
   const [entitlement, setEntitlement] = useState<UsageStatus | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [signedIn, setSignedIn] = useState(false);
+  const [userId, setUserId] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [promoCode, setPromoCode] = useState("");
@@ -42,6 +44,7 @@ function BillingInner() {
     const supabase = createClient();
     const { data: { user } } = await supabase.auth.getUser();
     setSignedIn(!!user);
+    setUserId(user?.id ?? null);
     if (user) setEntitlement(await loadEntitlement(supabase));
     setLoaded(true);
   }, []);
@@ -80,6 +83,33 @@ function BillingInner() {
     } else {
       setPromoMsg("That code couldn't be applied. Check the code and try again.");
     }
+  };
+
+  // The account ID shown below is always the signed-in user's OWN
+  // id, taken from their own session — it exists so the owner can
+  // grant complimentary access by ID from /admin/access. Display
+  // only; nothing here accepts an ID from anywhere else.
+  const copyId = async () => {
+    if (!userId) return;
+    try {
+      await navigator.clipboard.writeText(userId);
+      setCopied(true);
+    } catch {
+      // Clipboard API unavailable (permissions / insecure context):
+      // fall back to selecting a scratch field and execCommand.
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = userId;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        setCopied(true);
+      } catch { /* user can still long-press / select the field manually */ }
+    }
+    setTimeout(() => setCopied(false), 2000);
   };
 
   const manage = async () => {
@@ -143,6 +173,26 @@ function BillingInner() {
 
       <div style={{ display: "grid", gap: 16 }}>
         <UsageIndicators entitlement={entitlement} />
+        {userId && (
+          <div className="card" style={{ padding: 18, display: "grid", gap: 10 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+              <span className="hint">Your account ID</span>
+            </div>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              <input
+                value={userId}
+                readOnly
+                aria-label="Your account ID"
+                onFocus={(e) => e.target.select()}
+                style={{ flex: "1 1 260px", padding: "8px 10px" }}
+              />
+              <button className="btn" onClick={copyId}>{copied ? "Copied ✓" : "Copy"}</button>
+            </div>
+            <p className="hint" style={{ margin: 0, fontSize: 12 }}>
+              Share this ID if you've been offered complimentary access.
+            </p>
+          </div>
+        )}
         <div className="card" style={{ padding: 18, display: "grid", gap: 10 }}>
           <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
             <span className="hint">Current plan</span>
