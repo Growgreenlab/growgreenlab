@@ -10,11 +10,13 @@
  */
 import {
   advancedAnalyticsLocked,
+  entitlementSourceLabel,
   etDay,
   etMonth,
   exportLocked,
   isGrandfathered,
   isProStatus,
+  loadEntitlement,
   parseQuotaError,
   quotaMessage,
   type UsageStatus,
@@ -101,5 +103,73 @@ eq("random error -> null", parseQuotaError(new Error("boom")), null);
 const byMsg = parseQuotaError({ message: "quota_limit_reached" });
 check("message-only quota error still parses with defaults", byMsg !== null && byMsg.limit === 3);
 
-console.log(`=== ENTITLEMENTS RESULT: ${passed} passed, ${failed} failed ===`);
-if (failed > 0) process.exit(1);
+/* ---------- access source labels (access-grants-v1, additive) --- */
+{
+  const base: UsageStatus = {
+    configured: true, is_pro: false, plan: "free",
+    trades_used: 0, trades_limit: 3, trades_remaining: 3,
+    entries_used: 0, entries_limit: 7, entries_remaining: 7,
+    import_allowance_remaining: 100,
+    day_reset_at: inDays(1), month_reset_at: inDays(12), subscription: null,
+  };
+  const pro = (patch: Partial<UsageStatus>): UsageStatus => ({
+    ...base, is_pro: true, plan: "pro",
+    trades_remaining: null, entries_remaining: null, ...patch,
+  });
+  eq("label: null entitlement -> null", entitlementSourceLabel(null), null);
+  eq("label: free", entitlementSourceLabel(base), "Free");
+  eq("label: pro without source fields (pre-grants DB) -> plain Pro",
+    entitlementSourceLabel(pro({})), "Pro");
+  eq("label: paid monthly",
+    entitlementSourceLabel(pro({ access_source: "paid", subscription: { status: "active", interval: "month", current_period_end: inDays(30), cancel_at_period_end: false } })),
+    "Pro — Monthly");
+  eq("label: paid yearly",
+    entitlementSourceLabel(pro({ access_source: "paid", subscription: { status: "active", interval: "year", current_period_end: inDays(300), cancel_at_period_end: false } })),
+    "Pro — Yearly");
+  eq("label: paid without subscription snapshot",
+    entitlementSourceLabel(pro({ access_source: "paid" })), "Pro — Subscription");
+  eq("label: owner", entitlementSourceLabel(pro({ access_source: "owner", access_expires_at: null })), "Pro — Owner access");
+  eq("label: owner ignores expiry field",
+    entitlementSourceLabel(pro({ access_source: "owner", access_expires_at: inDays(5) })), "Pro — Owner access");
+  const promoLabel = entitlementSourceLabel(pro({ access_source: "promo", access_expires_at: "2026-11-18T12:00:00Z" })) ?? "";
+  check("label: promo carries until-date", promoLabel.startsWith("Pro — Promo until ") && promoLabel.includes("Nov") && promoLabel.includes("2026"));
+  eq("label: promo without expiry", entitlementSourceLabel(pro({ access_source: "promo", access_expires_at: null })), "Pro — Promo");
+  const adminLabel = entitlementSourceLabel(pro({ access_source: "admin", access_expires_at: "2026-11-02T12:00:00Z" })) ?? "";
+  check("label: admin grant is complimentary + dated", adminLabel.startsWith("Pro — Complimentary access until "));
+  eq("label: permanent admin grant", entitlementSourceLabel(pro({ access_source: "admin", access_expires_at: null })), "Pro — Complimentary access");
+  const trialLabel = entitlementSourceLabel(pro({ access_source: "trial", access_expires_at: "2026-10-29T12:00:00Z" })) ?? "";
+  check("label: trial carries until-date", trialLabel.startsWith("Pro — Trial until "));
+  eq("label: garbage expiry falls back to base label",
+    entitlementSourceLabel(pro({ access_source: "promo", access_expires_at: "not-a-date" })), "Pro — Promo");
+  // A source field must never OVERRIDE is_pro: a free payload that
+  // somehow carries a grant source still labels Free.
+  eq("label: source never overrides is_pro=false",
+    entitlementSourceLabel({ ...base, access_source: "promo", access_expires_at: inDays(9) }), "Free");
+}
+
+/* ---------- loadEntitlement: new keys pass through, absence ok ---
+ * (async tail: this suite predates top-level await support in the
+ * tsx CJS runner, so the totals print from inside the IIFE.) */
+void (async () => {
+  const payload = {
+    configured: true, is_pro: true, plan: "pro",
+    trades_used: 0, trades_limit: 3, trades_remaining: null,
+    entries_used: 0, entries_limit: 7, entries_remaining: null,
+    import_allowance_remaining: 100,
+    day_reset_at: inDays(1), month_reset_at: inDays(12), subscription: null,
+    access_source: "promo", access_expires_at: "2026-11-18T00:00:00Z",
+  };
+  const client = { async rpc() { return { data: payload, error: null }; } };
+  const ent = await loadEntitlement(client);
+  eq("loadEntitlement: access_source passes through", ent?.access_source, "promo");
+  eq("loadEntitlement: access_expires_at passes through", ent?.access_expires_at, "2026-11-18T00:00:00Z");
+  const legacy = { ...payload } as Record<string, unknown>;
+  delete legacy.access_source; delete legacy.access_expires_at;
+  const legacyClient = { async rpc() { return { data: legacy, error: null }; } };
+  const ent2 = await loadEntitlement(legacyClient);
+  check("loadEntitlement: pre-grants payload still loads", ent2 !== null && ent2.is_pro === true);
+  eq("loadEntitlement: missing source stays undefined", ent2?.access_source, undefined);
+
+  console.log(`=== ENTITLEMENTS RESULT: ${passed} passed, ${failed} failed ===`);
+  if (failed > 0) process.exit(1);
+})();

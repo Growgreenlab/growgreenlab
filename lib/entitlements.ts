@@ -44,6 +44,47 @@ export interface UsageStatus {
     current_period_end: string | null;
     cancel_at_period_end: boolean;
   } | null;
+  /* Added by access-grants-v1.sql (additive — absent entirely on a
+   * pre-grants database, where loadEntitlement still succeeds and
+   * every surface below treats the source as unknown). */
+  access_source?: AccessSource;
+  /** When grant-based access fully ends; null for paid, permanent
+   *  grants, and Free. */
+  access_expires_at?: string | null;
+}
+
+/** Where the caller's Pro comes from (public.access_source()).
+ *  Display provenance only — enforcement never reads this. */
+export type AccessSource = "paid" | "owner" | "admin" | "promo" | "trial" | "free";
+
+/**
+ * Human label for the entitlement source, e.g. "Pro — Monthly",
+ * "Pro — Owner access", "Pro — Promo until Nov 18, 2026".
+ * Display only. Falls back to plain "Pro" / "Free" whenever the
+ * source is unknown (pre-grants database) — is_pro stays the truth.
+ */
+export function entitlementSourceLabel(ent: UsageStatus | null): string | null {
+  if (!ent) return null;
+  if (!ent.is_pro) return "Free";
+  const until = (base: string, iso: string | null | undefined): string => {
+    if (!iso) return base;
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return base;
+    return `${base} until ${d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`;
+  };
+  switch (ent.access_source) {
+    case "owner": return "Pro — Owner access";
+    case "admin": return until("Pro — Complimentary access", ent.access_expires_at);
+    case "promo": return until("Pro — Promo", ent.access_expires_at);
+    case "trial": return until("Pro — Trial", ent.access_expires_at);
+    case "paid":
+      return ent.subscription?.interval === "year"
+        ? "Pro — Yearly"
+        : ent.subscription?.interval === "month"
+          ? "Pro — Monthly"
+          : "Pro — Subscription";
+    default: return "Pro";
+  }
 }
 
 /** Minimal structural client (the Supabase browser client fits —

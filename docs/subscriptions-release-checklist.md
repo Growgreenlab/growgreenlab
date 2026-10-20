@@ -151,3 +151,90 @@ the Stripe subscription and correct the row via SQL with Stripe's
 values. (3) Users fix payment/cancellation state themselves in the
 Customer Portal; those changes flow back via webhook. No in-app
 admin panel exists in v1 (none exists anywhere in this product).
+
+## Access grants (access-grants-v1) — apply, seed, verify
+
+Owner / complimentary access (audit:
+~/workspace/growgreenlab-owner-access-audit-2026-10-19.md §7;
+approved 2026-10-19). Grants NEVER touch Stripe: no subscription
+rows are created for comped users, and promo grants stack on top of
+paid subscriptions without modifying them.
+
+### Apply (after subscriptions-v1, which is live)
+
+- [ ] Paste `supabase/migrations/access-grants-v1.sql` into the
+      Supabase SQL editor and run it. It is additive and idempotent
+      (safe to re-run). Rollback, if ever needed:
+      `supabase/migrations/access-grants-v1.rollback.sql` (restores
+      the original `sub_is_pro` / `usage_status` bodies and drops
+      the grants objects; export `access_audit_log` first if the
+      trail must be kept). Softer rollback: revoke all non-owner
+      grants + deactivate all promo codes (SQL in the rollback
+      file's header).
+
+### Seed the owner/admin identity (one-time, SQL editor ONLY)
+
+There is deliberately NO app, API, RPC or UI path that can create
+the first admin or an owner grant — that is what makes
+self-promotion impossible. This repo is public: **never commit a
+real user id or email into any file.** Do the seeding live, in the
+SQL editor, with the owner's real auth user id (Supabase Dashboard
+→ Authentication → Users — copy the id from there, never from a
+committed file):
+
+```sql
+-- 1) Make the owner an app admin (enables grant/revoke/promo RPCs):
+insert into public.app_admins (user_id) values ('<OWNER_AUTH_USER_ID>');
+
+-- 2) Give the owner permanent, non-revocable Pro:
+insert into public.access_grants (user_id, source, starts_at, expires_at, note)
+values ('<OWNER_AUTH_USER_ID>', 'owner', now(), null, 'Designated owner');
+
+-- 3) (Optional) record the seeding in the audit trail:
+insert into public.access_audit_log (actor_user_id, action, target_user_id, detail)
+values ('<OWNER_AUTH_USER_ID>', 'admin_add', '<OWNER_AUTH_USER_ID>',
+        '{"via":"sql-editor-seed"}'::jsonb);
+```
+
+Why a user ID and not an email: entitlement keys off `auth.users.id`
+everywhere; emails can change and are personal data that must not
+be committed. Why it cannot be self-served: `app_admins` and
+`access_grants` have no client write policies at all, the admin
+RPCs require an existing admin, and there is no function that
+creates admins or `source='owner'` rows — the SQL editor (database
+owner access) is the only door, by construction.
+
+### Create a promo code
+
+Either call the `admin_create_promo` RPC from an authenticated
+admin session (it re-checks admin status server-side; there is no
+promo-creation UI in v1), or insert the code directly in the SQL
+editor, storing only the sha-256 of the normalized (uppercased,
+trimmed) code:
+
+```sql
+insert into public.promo_codes
+  (code_hash, label, duration_days, expires_at, max_redemptions, per_user_limit)
+values
+  (encode(sha256('<CODE-IN-UPPERCASE>'::bytea), 'hex'),
+   '<label>', 30, null, 100, 1);
+```
+
+Use generated codes of 12+ characters from an unambiguous alphabet.
+The plaintext code is never stored anywhere.
+
+### Verify after seeding
+
+- [ ] Sign in as the owner: /billing shows "Pro — Owner access";
+      the AI Edge Export is unlocked; replay/journal counters show
+      Pro. `select public.access_source('<OWNER_AUTH_USER_ID>', now())`
+      in the SQL editor returns `owner`.
+- [ ] On a disposable free account: redeem a 1-day test promo on
+      /billing → Pro immediately, source shows "Promo until <date>";
+      redeeming a wrong code shows the same generic failure.
+- [ ] As admin, open /admin/access: the test grant is listed;
+      revoke it → the disposable account is Free again at the next
+      page load; the owner's `owner` grant shows "Protected" and a
+      revoke attempt is refused.
+- [ ] `select action, count(*) from public.access_audit_log
+      group by 1;` shows the grant / redeem / revoke rows.

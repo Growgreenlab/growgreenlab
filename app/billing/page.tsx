@@ -13,7 +13,8 @@ import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
-import { loadEntitlement, type UsageStatus } from "../../lib/entitlements";
+import { entitlementSourceLabel, loadEntitlement, type UsageStatus } from "../../lib/entitlements";
+import { redeemPromoCode } from "../../lib/accessAdmin";
 import { openBillingPortal } from "../../lib/billing";
 import UsageIndicators from "../../components/UsageIndicators";
 
@@ -31,6 +32,9 @@ function BillingInner() {
   const [signedIn, setSignedIn] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [promoCode, setPromoCode] = useState("");
+  const [promoBusy, setPromoBusy] = useState(false);
+  const [promoMsg, setPromoMsg] = useState<string | null>(null);
   const pollRef = useRef(0);
 
   const refresh = useCallback(async () => {
@@ -53,6 +57,30 @@ function BillingInner() {
     const t = setTimeout(() => { pollRef.current += 1; refresh(); }, 2500);
     return () => clearTimeout(t);
   }, [checkout, loaded, entitlement, refresh]);
+
+  // Promo redemption: the server binds the grant to this account
+  // and answers every failure identically — so the failure copy
+  // here is deliberately generic too (no "wrong code" vs "expired"
+  // distinction may leak into the UI).
+  const redeem = async () => {
+    const code = promoCode.trim();
+    if (!code || promoBusy) return;
+    setPromoBusy(true);
+    setPromoMsg(null);
+    const r = await redeemPromoCode(createClient(), code);
+    setPromoBusy(false);
+    if (r.ok) {
+      setPromoCode("");
+      setPromoMsg(
+        r.expiresAt
+          ? `Promo applied — Pro is active until ${fmtDate(r.expiresAt)}.`
+          : "Promo applied — Pro is active on your account.",
+      );
+      refresh();
+    } else {
+      setPromoMsg("That code couldn't be applied. Check the code and try again.");
+    }
+  };
 
   const manage = async () => {
     setBusy(true);
@@ -120,6 +148,12 @@ function BillingInner() {
             <span className="hint">Current plan</span>
             <strong>{isPro ? "Grow Green Lab Pro" : "Free"}</strong>
           </div>
+          {isPro && entitlement?.access_source && (
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+              <span className="hint">Access source</span>
+              <span className="num">{entitlementSourceLabel(entitlement)}</span>
+            </div>
+          )}
           {sub ? (
             <>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
@@ -138,14 +172,18 @@ function BillingInner() {
           ) : (
             <p className="hint" style={{ margin: 0 }}>
               {entitlement
-                ? "No subscription on this account. Upgrade from the pricing page whenever you're ready."
+                ? isPro
+                  ? "Your Pro comes from complimentary access, so there is no Stripe subscription on this account — nothing is billed, and there is nothing to manage in the billing portal."
+                  : "No subscription on this account. Upgrade from the pricing page whenever you're ready."
                 : "Billing isn't configured on this deployment yet — plans and usage counters will appear here once subscriptions launch."}
             </p>
           )}
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 4 }}>
             {sub
               ? <button className="btn primary" disabled={busy} onClick={manage}>{busy ? "Opening portal…" : "Manage Subscription"}</button>
-              : <Link href="/pricing" className="btn primary" style={{ display: "inline-block" }}>See Pro plans</Link>}
+              : isPro
+                ? null
+                : <Link href="/pricing" className="btn primary" style={{ display: "inline-block" }}>See Pro plans</Link>}
             <Link href="/pricing" className="btn" style={{ display: "inline-block" }}>Compare plans</Link>
           </div>
           <p className="hint" style={{ margin: 0, fontSize: 12 }}>
@@ -154,6 +192,32 @@ function BillingInner() {
             history always stays available.
           </p>
         </div>
+        {entitlement && (
+          <div className="card" style={{ padding: 18, display: "grid", gap: 10 }}>
+            <strong>Have a promo code?</strong>
+            <p className="hint" style={{ margin: 0 }}>
+              Redeem it here — Pro activates on this account right away. A promo
+              never changes a paid subscription or its renewal dates; the two
+              simply stack.
+            </p>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              <input
+                value={promoCode}
+                onChange={(e) => setPromoCode(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") redeem(); }}
+                placeholder="Enter promo code"
+                autoComplete="off"
+                autoCapitalize="characters"
+                spellCheck={false}
+                style={{ flex: "1 1 220px", padding: "8px 10px" }}
+              />
+              <button className="btn primary" disabled={promoBusy || !promoCode.trim()} onClick={redeem}>
+                {promoBusy ? "Redeeming…" : "Redeem"}
+              </button>
+            </div>
+            {promoMsg && <p className="hint" style={{ margin: 0 }}>{promoMsg}</p>}
+          </div>
+        )}
       </div>
     </div>
   );

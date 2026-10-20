@@ -9,7 +9,7 @@
  * simple "Pro — unlimited" line instead of counters.
  */
 import Link from "next/link";
-import type { UsageStatus } from "../lib/entitlements";
+import { entitlementSourceLabel, type UsageStatus } from "../lib/entitlements";
 
 function fmtReset(iso: string): string {
   const d = new Date(iso);
@@ -23,9 +23,12 @@ function fmtReset(iso: string): string {
 export default function UsageIndicators({ entitlement }: { entitlement: UsageStatus | null }) {
   if (!entitlement) return null;
   if (entitlement.is_pro) {
+    const label = entitlementSourceLabel(entitlement);
     return (
       <div className="card" style={{ padding: "10px 14px", display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-        <span style={{ fontWeight: 700, color: "var(--emerald-bright)" }}>Grow Green Lab Pro</span>
+        <span style={{ fontWeight: 700, color: "var(--emerald-bright)" }}>
+          {label && label !== "Pro" ? label : "Grow Green Lab Pro"}
+        </span>
         <span className="hint" style={{ margin: 0 }}>Unlimited trades and journal entries.</span>
         <Link href="/billing" style={{ marginLeft: "auto", fontSize: 13 }}>Billing</Link>
       </div>
