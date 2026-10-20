@@ -42,10 +42,10 @@ import {
   type DrFlushState,
 } from "../../lib/drEventFlush";
 import {
-  FREE_TRADES_PER_DAY, loadEntitlement, parseQuotaError, quotaMessage,
+  FREE_TRADES_PER_DAY, etDay, loadEntitlement, parseQuotaError, quotaMessage,
   type UsageStatus,
 } from "../../lib/entitlements";
-import { canOpenPosition, quotaCombinedUsed } from "../../lib/quotaGate";
+import { canOpenPosition, countClosedCycles, quotaCombinedUsed } from "../../lib/quotaGate";
 import {
   reconstructDrAttempt,
   shouldOfferDrResume,
@@ -763,26 +763,108 @@ function ReplayPageInner() {
    * the 4th buy never executes and the upgrade modal shows instead.
    * Signed-in users only; guests keep their separate guest limit,
    * and the DB triggers remain the authoritative backstop. */
+  /** Last SUCCESSFUL usage_status() load. Never overwritten by a
+   * failed load: a transient RPC error must not dark the gate. */
   const entitlementRef = useRef<UsageStatus | null>(null);
-  /** New positions opened since the last usage_status() refresh. */
+  /** New positions opened that are not yet known to be recorded
+   * server-side (folded down at each witnessed recording: a draft
+   * save, a session save, never by a bare re-read). */
   const quotaOpenedRef = useRef(0);
   const quotaUserIdRef = useRef<string | null>(null);
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
+  /* Page-witnessed consumption floor (2026-10-19 follow-up): the
+   * buy gate previously depended ENTIRELY on usage_status() loads.
+   * In Karandeep's live session the draft inserts succeeded (the
+   * drafts strip showed the server's own limit refusals) while the
+   * gate never fired — the entitlement read path delivered nothing
+   * usable to the page, so every sync left the gate dark. But this
+   * page WITNESSES consumption directly: each successful Daily
+   * Replay draft save consumed exactly one daily_trade server-side
+   * (trg_sub_quota_draft_insert), each successful session save
+   * records its newly closed cycles (save_replay_session), and each
+   * GGL01 quota rejection states the server's count outright. The
+   * floor folds those witnesses into a lower bound of today's
+   * server count that no failed read can erase; usage_status(),
+   * when it loads, remains authoritative and raises the floor to
+   * the true count. Scoped to (user, ET day) and reset on either
+   * change. */
+  const quotaFloorUsedRef = useRef(0);
+  const quotaFloorKeyRef = useRef<string | null>(null);
+  /** Draft keys already folded into the floor (exactly-once). */
+  const quotaCountedDraftsRef = useRef(new Set<string>());
+  /** Closed cycles of the CURRENT engine already folded into the
+   * floor via session saves (baseline resets with the engine). */
+  const quotaSavedCyclesRef = useRef(0);
+  /** Visible counter mirror for signed-in Free users. */
+  const [quotaUi, setQuotaUi] = useState<{ used: number; limit: number } | null>(null);
+  const quotaUiKeyRef = useRef("");
 
-  /** Re-sync the server's daily count (usage_status RPC). Opens not
-   * yet recorded fold back to just the still-open position (0 or 1):
-   * every other trade opened since the last sync is inside
-   * trades_used by now, or was never going to be recorded. Call
-   * ONLY at sync points — session/attempt start (incl. restore and
-   * resume) and after each successful save / draft save. A null
-   * entitlement (billing not live on this database) disables the
-   * gate entirely, matching the dark-by-default read model. */
+  /** Scope the floor to the current (user, ET day); a new scope
+   * starts a fresh floor (the next usage_status load re-raises it). */
+  const quotaFloorTouch = (): void => {
+    const uid = quotaUserIdRef.current;
+    if (!uid) return;
+    const key = `${uid}|${etDay(new Date())}`;
+    if (quotaFloorKeyRef.current !== key) {
+      quotaFloorKeyRef.current = key;
+      quotaFloorUsedRef.current = 0;
+      quotaCountedDraftsRef.current = new Set();
+    }
+  };
+
+  /** Best-known recorded count: the server's own number when a
+   * load has landed, never below what this page witnessed. */
+  const quotaKnownUsed = (): number =>
+    Math.max(entitlementRef.current?.trades_used ?? 0, quotaFloorUsedRef.current);
+
+  /** Recorded + opened-but-unrecorded, capped for display. */
+  const quotaCombinedNow = (): number =>
+    quotaCombinedUsed({
+      signedIn: true,
+      isPro: false,
+      dailyUsed: quotaKnownUsed(),
+      sessionOpened: quotaOpenedRef.current,
+    });
+
+  /** Recompute the visible counter from the refs (deduped). Hidden
+   * for guests, for Pro, and while nothing is known yet (billing
+   * dark and no witnessed activity this page session). */
+  const bumpQuotaUi = (): void => {
+    const ent = entitlementRef.current;
+    let next: { used: number; limit: number } | null = null;
+    if (quotaUserIdRef.current && !ent?.is_pro) {
+      const limit = ent?.trades_limit ?? FREE_TRADES_PER_DAY;
+      const known =
+        ent != null || quotaFloorUsedRef.current > 0 || quotaOpenedRef.current > 0;
+      if (known) next = { used: Math.min(quotaCombinedNow(), limit), limit };
+    }
+    const key = next ? `${next.used}/${next.limit}` : "";
+    if (quotaUiKeyRef.current !== key) {
+      quotaUiKeyRef.current = key;
+      setQuotaUi(next);
+    }
+  };
+
+  /** Re-sync the server's daily count (usage_status RPC). A failed
+   * or malformed load changes NOTHING (last-good entitlement and
+   * the witnessed floor stand); a successful load raises the floor
+   * to the server's true count. Call at sync points — session /
+   * attempt start (incl. restore and resume) and after each
+   * successful save / draft save. */
   const syncQuotaFromServer = async (): Promise<void> => {
-    if (!isSupabaseConfigured() || !quotaUserIdRef.current) return;
+    if (!isSupabaseConfigured() || !quotaUserIdRef.current) {
+      bumpQuotaUi();
+      return;
+    }
     const ent = await loadEntitlement(createClient());
-    entitlementRef.current = ent;
-    quotaOpenedRef.current =
-      engineRef.current && engineRef.current.positionQty > 0 ? 1 : 0;
+    if (ent) {
+      entitlementRef.current = ent;
+      quotaFloorTouch();
+      if (ent.trades_used > quotaFloorUsedRef.current) {
+        quotaFloorUsedRef.current = ent.trades_used;
+      }
+    }
+    bumpQuotaUi();
   };
 
   /** Just-in-time entitlement refresh for the buy gate, bounded so
@@ -802,16 +884,22 @@ function ReplayPageInner() {
     } catch { /* cached state stands */ }
   };
 
-  /** True when a signed-in Free user has no daily slot for a new open. */
+  /** True when a signed-in Free user has no daily slot for a new
+   * open. Evaluated on the best-known count (last-good entitlement
+   * raised by the witnessed floor, plus unrecorded opens) so the
+   * gate still fires when the entitlement read path is down but
+   * the page has watched the limit being consumed. Pro (per the
+   * last-good entitlement) is never gated; guests never reach
+   * here (quotaUserIdRef is null for them). */
   const quotaBuyBlocked = (): boolean => {
+    if (!quotaUserIdRef.current) return false;
     const ent = entitlementRef.current;
-    if (!quotaUserIdRef.current || !ent) return false;
     return !canOpenPosition({
       signedIn: true,
-      isPro: ent.is_pro,
-      dailyUsed: ent.trades_used,
+      isPro: ent?.is_pro ?? false,
+      dailyUsed: quotaKnownUsed(),
       sessionOpened: quotaOpenedRef.current,
-      dailyLimit: ent.trades_limit,
+      dailyLimit: ent?.trades_limit ?? FREE_TRADES_PER_DAY,
     });
   };
 
@@ -819,17 +907,7 @@ function ReplayPageInner() {
   const quotaBlockMessage = (): string => {
     const ent = entitlementRef.current;
     const limit = ent?.trades_limit ?? FREE_TRADES_PER_DAY;
-    const used = ent
-      ? Math.min(
-          quotaCombinedUsed({
-            signedIn: true, isPro: ent.is_pro,
-            dailyUsed: ent.trades_used,
-            sessionOpened: quotaOpenedRef.current,
-            dailyLimit: ent.trades_limit,
-          }),
-          limit
-        )
-      : limit;
+    const used = Math.min(quotaCombinedNow(), limit);
     return `Daily trade limit reached — ${used} of ${limit} free trades used today. Upgrade to Pro for unlimited trades.`;
   };
   const [drReviewDraftKey, setDrReviewDraftKey] = useState<string | null>(null);
@@ -1000,7 +1078,11 @@ function ReplayPageInner() {
     setSaveMsg(null);
     setDataOpen(false);
     bump();
-    // Quota gate sync point: fresh session, fresh server count.
+    // Quota gate: a fresh engine abandons the old session's unsaved
+    // opens (they will never be recorded) and restarts the save-fold
+    // baseline; then the sync point re-reads the server count.
+    quotaOpenedRef.current = 0;
+    quotaSavedCyclesRef.current = 0;
     void syncQuotaFromServer();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bump, stopTimer]);
@@ -1214,6 +1296,9 @@ function ReplayPageInner() {
       engineRef.current = eng;
       savedSessionIdRef.current = null;
       lastSavedPnlRef.current = 0;
+      // Quota gate: fresh attempt — no pending opens (any prior
+      // attempt's unsaved opens were abandoned with it).
+      quotaOpenedRef.current = 0;
       setCandles(feed.candles);
       setMeta({
         ticker: info.ticker,
@@ -1525,6 +1610,11 @@ function ReplayPageInner() {
       );
       setDrResume(null);
       setDrPhase("active");
+      // Quota gate: the resumed attempt starts from a clean pending
+      // count — the render-phase tracker re-adds a restored OPEN
+      // position on the next render, and earlier closed trades are
+      // already recorded (their drafts exist server-side).
+      quotaOpenedRef.current = 0;
       // Quota gate sync point: attempt resumed — fresh server count
       // (a restored open position folds in as the one pending open).
       void syncQuotaFromServer();
@@ -1593,9 +1683,14 @@ function ReplayPageInner() {
         setCandles(cs);
         setMeta({ ticker: s.ticker, tradeDate: s.trade_date, source: normalizeReloadedSource(s.source as string), startIndex: s.start_index ?? 0 });
         bump();
+        // Quota gate: the restored fills were already recorded when
+        // this session was saved — baseline the save-fold so a later
+        // save counts only NEW closed cycles; a still-open restored
+        // position is re-added by the render-phase tracker.
+        quotaOpenedRef.current = 0;
+        quotaSavedCyclesRef.current = countClosedCycles(fills);
         // Quota gate sync point: restored session — the server
-        // count already holds its saved trades; a still-open
-        // restored position folds in as the one pending open.
+        // count already holds its saved trades.
         void syncQuotaFromServer();
       } catch (e) {
         setSaveMsg(e instanceof Error ? e.message : "Failed to load session.");
@@ -1785,12 +1880,31 @@ function ReplayPageInner() {
   const guardUserIdRef = useRef<string | null>(null);
   useEffect(() => { guardUserIdRef.current = guardUserId; }, [guardUserId]);
   // Quota buy gate: identity mirror + the initial entitlement load
-  // (later refreshes ride the session/save sync points).
+  // (later refreshes ride the session/save sync points). An identity
+  // CHANGE resets every quota ref — counts never leak across
+  // accounts (or from a signed-in session into guest mode).
   useEffect(() => {
-    quotaUserIdRef.current = guardUserId;
+    if (quotaUserIdRef.current !== guardUserId) {
+      quotaUserIdRef.current = guardUserId;
+      entitlementRef.current = null;
+      quotaOpenedRef.current = 0;
+      quotaFloorUsedRef.current = 0;
+      quotaFloorKeyRef.current = null;
+      quotaCountedDraftsRef.current = new Set();
+      quotaSavedCyclesRef.current = 0;
+    }
     if (guardUserId) void syncQuotaFromServer();
+    else bumpQuotaUi();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [guardUserId]);
+
+  // The visible counter follows the engine snapshot version (the
+  // render-phase tracker folds new opens into quotaOpenedRef as
+  // fills land; this effect mirrors the result into state).
+  useEffect(() => {
+    bumpQuotaUi();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [version]);
   // Guest trade limit (5/day, guests only).
   const [guestRemaining, setGuestRemaining] = useState<number>(GUEST_DAILY_LIMIT);
   const [showGuestModal, setShowGuestModal] = useState(false);
@@ -2199,7 +2313,19 @@ function ReplayPageInner() {
           savedSessionIdRef.current = sessionId;
         } else if (rpcErr) {
           const q = parseQuotaError(rpcErr);
-          if (q) throw new Error(quotaMessage(q));
+          if (q) {
+            // Quota witness (see quotaFloorUsedRef): the server's
+            // rejection states its count — fold it into the floor
+            // before surfacing the refusal.
+            if (q.kind === "daily_trade") {
+              quotaFloorTouch();
+              if (q.used > quotaFloorUsedRef.current) {
+                quotaFloorUsedRef.current = q.used;
+              }
+              bumpQuotaUi();
+            }
+            throw new Error(quotaMessage(q));
+          }
           const missing = rpcErr.code === "PGRST202" || rpcErr.code === "42883"
             || /save_replay_session/.test(rpcErr.message ?? "");
           if (!missing) throw new Error(rpcErr.message);
@@ -2257,9 +2383,23 @@ function ReplayPageInner() {
         await persistBalance(balanceRef.current + delta);
         lastSavedPnlRef.current = pnl;
       }
-      // Quota gate sync point: the save just recorded this
-      // session's new trades server-side — refresh the daily count
-      // so the gate tracks the server, not stale local opens.
+      // Quota witness: the save just recorded this session's newly
+      // closed cycles server-side (save_replay_session consumes one
+      // daily_trade per new cycle) — fold exactly those into the
+      // floor and retire their pending opens, so the count stays
+      // truthful even if the sync below cannot load usage_status().
+      {
+        const closedNow = countClosedCycles(eng.fills);
+        const newClosed = closedNow - quotaSavedCyclesRef.current;
+        if (newClosed > 0) {
+          quotaFloorTouch();
+          quotaFloorUsedRef.current += newClosed;
+          quotaOpenedRef.current = Math.max(0, quotaOpenedRef.current - newClosed);
+          quotaSavedCyclesRef.current = closedNow;
+        }
+      }
+      // Quota gate sync point: refresh the daily count so the gate
+      // tracks the server's true count.
       await syncQuotaFromServer();
       if (!isAutoSave) {
         setSaveMsg("Session saved — find it under My Sessions.");
@@ -2812,6 +2952,16 @@ function ReplayPageInner() {
         // message (the draft stays recoverable from the timeline;
         // upgrading lifts the cap — the trade itself already closed).
         const quota = parseQuotaError(res.error);
+        // Quota witness: the server's rejection states its own
+        // count — fold it into the floor so the buy gate blocks
+        // from here on even if usage_status() never loads.
+        if (quota?.kind === "daily_trade") {
+          quotaFloorTouch();
+          if (quota.used > quotaFloorUsedRef.current) {
+            quotaFloorUsedRef.current = quota.used;
+          }
+          bumpQuotaUi();
+        }
         showDrDraftNotice({
           tone: "warn",
           text: quota
@@ -2836,9 +2986,20 @@ function ReplayPageInner() {
       drFailedPayloadsRef.current.delete(draftKey);
       setDrDraftSaveStates((s) => ({ ...s, [draftKey]: "saved" }));
       showDrDraftNotice({ tone: "ok", text: "Trade closed — draft saved." }, 4000);
-      // Quota gate sync point: the draft insert just consumed a
-      // daily slot server-side — refresh so the next buy gates on
-      // the true count.
+      // Quota witness: this draft's insert just consumed exactly
+      // one daily_trade server-side (trg_sub_quota_draft_insert) —
+      // fold it into the floor exactly once per draft key, and
+      // retire the pending open it records. The gate therefore
+      // tracks the true count even when the sync below cannot
+      // load usage_status().
+      quotaFloorTouch();
+      if (!quotaCountedDraftsRef.current.has(draftKey)) {
+        quotaCountedDraftsRef.current.add(draftKey);
+        quotaFloorUsedRef.current += 1;
+        if (quotaOpenedRef.current > 0) quotaOpenedRef.current -= 1;
+      }
+      // Quota gate sync point: refresh so the next buy gates on
+      // the server's true count.
       void syncQuotaFromServer();
       if (!row) return;
       /* Auto-captures: strictly after the saved state above. */
@@ -3859,6 +4020,38 @@ function ReplayPageInner() {
                 ))}
               </div>
               <div style={{ display: rightTab === "order" ? "block" : "none" }}>
+              {/* Free-plan daily counter (signed-in only): the user
+                  SEES the limit coming instead of meeting it as a
+                  surprise at the 4th buy. Hidden for guests (their
+                  strip is below), for Pro, and while billing state
+                  is unknown. */}
+              {guardUserId && quotaUi && (
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    padding: "7px 12px",
+                    marginBottom: 8,
+                    fontSize: 12.5,
+                    fontWeight: 600,
+                    color: quotaUi.used < quotaUi.limit ? "#94a3b8" : "#fb7185",
+                    background: "rgba(255,255,255,0.04)",
+                    border: "1px solid rgba(255,255,255,0.08)",
+                    borderRadius: 8,
+                  }}
+                  title="Free trades reset at 12:00 AM ET"
+                >
+                  <span style={{ fontVariantNumeric: "tabular-nums" }}>
+                    {`Free trades today: ${quotaUi.used} of ${quotaUi.limit}`}
+                  </span>
+                  {quotaUi.used >= quotaUi.limit && (
+                    <a href="/pricing" style={{ color: "#4ade80", fontWeight: 700 }}>
+                      Upgrade to Pro
+                    </a>
+                  )}
+                </div>
+              )}
               {/* Guest trade counter (guests only) */}
               {!guardUserId && (
                 <div
@@ -4306,17 +4499,7 @@ function ReplayPageInner() {
           {showUpgradeModal && (() => {
             const ent = entitlementRef.current;
             const limit = ent?.trades_limit ?? FREE_TRADES_PER_DAY;
-            const used = ent
-              ? Math.min(
-                  quotaCombinedUsed({
-                    signedIn: true, isPro: ent.is_pro,
-                    dailyUsed: ent.trades_used,
-                    sessionOpened: quotaOpenedRef.current,
-                    dailyLimit: ent.trades_limit,
-                  }),
-                  limit
-                )
-              : limit;
+            const used = Math.min(quotaCombinedNow(), limit);
             return (
               <UpgradeModal
                 used={used}

@@ -67,3 +67,31 @@ export function canOpenPosition(input: QuotaGateInput): boolean {
   if (input.isPro) return true;
   return quotaCombinedUsed(input) < saneLimit(input.dailyLimit);
 }
+
+/**
+ * Count CLOSED trade cycles in a fills array — the exact regroup
+ * the server runs inside save_replay_session (subscriptions-v1.sql):
+ * the position is the signed sum of qty (buy +, sell −); a cycle
+ * closes when the position returns to flat; a cycle still open at
+ * the end never counts. The replay page folds this into its local
+ * quota floor after each successful save, so the buy gate keeps a
+ * truthful count of what the save just recorded even when the
+ * follow-up usage_status() read is unavailable.
+ */
+export function countClosedCycles(
+  fills: readonly { side: string; qty: number }[]
+): number {
+  let pos = 0;
+  let inCycle = false;
+  let closed = 0;
+  for (const f of fills) {
+    const q = Number(f.qty) || 0;
+    pos += f.side === "buy" ? q : -q;
+    if (pos !== 0) inCycle = true;
+    if (inCycle && Math.abs(pos) < 1e-9) {
+      closed++;
+      inCycle = false;
+    }
+  }
+  return closed;
+}

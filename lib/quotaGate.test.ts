@@ -7,7 +7,7 @@
  * reaches 3; Pro is never gated; guests are never gated by this
  * predicate (their own limit lives in lib/guestTrades).
  */
-import { canOpenPosition, quotaCombinedUsed } from "./quotaGate";
+import { canOpenPosition, countClosedCycles, quotaCombinedUsed } from "./quotaGate";
 
 let passed = 0, failed = 0;
 function check(name: string, cond: boolean) {
@@ -52,6 +52,18 @@ eq("combined 0+0 = 0", quotaCombinedUsed({ ...free, dailyUsed: 0, sessionOpened:
 eq("NaN dailyUsed treated as 0 -> open", canOpenPosition({ ...free, dailyUsed: Number.NaN, sessionOpened: 0 }), true);
 eq("negative counts treated as 0 -> open", canOpenPosition({ ...free, dailyUsed: -2, sessionOpened: -1 }), true);
 eq("fractional counts floor (2.9 used counts as 2) -> open", canOpenPosition({ ...free, dailyUsed: 2.9, sessionOpened: 0 }), true);
+
+/* ---------- countClosedCycles (mirrors the server regroup) ---------- */
+const B = (qty: number) => ({ side: "buy", qty });
+const S = (qty: number) => ({ side: "sell", qty });
+eq("cycles: no fills -> 0", countClosedCycles([]), 0);
+eq("cycles: one buy+sell -> 1", countClosedCycles([B(100), S(100)]), 1);
+eq("cycles: adds then full exit -> 1", countClosedCycles([B(100), B(50), S(150)]), 1);
+eq("cycles: partial exit stays open -> 0", countClosedCycles([B(100), S(40)]), 0);
+eq("cycles: partial then final exit -> 1", countClosedCycles([B(100), S(40), S(60)]), 1);
+eq("cycles: two full cycles -> 2", countClosedCycles([B(100), S(100), B(25), S(25)]), 2);
+eq("cycles: open at end never counts", countClosedCycles([B(100), S(100), B(10)]), 1);
+eq("cycles: three cycles (the daily cap) -> 3", countClosedCycles([B(1), S(1), B(1), S(1), B(1), S(1)]), 3);
 
 console.log(`=== QUOTA GATE RESULT: ${passed} passed, ${failed} failed ===`);
 if (failed > 0) process.exit(1);
