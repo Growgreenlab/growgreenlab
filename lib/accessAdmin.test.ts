@@ -10,8 +10,11 @@
  * preserving the server's failure indistinguishability end to end.
  */
 import {
+  adminCreatePromo,
+  adminDeactivatePromo,
   adminGrantAccess,
   adminListGrants,
+  adminListPromos,
   adminRevokeGrant,
   checkIsAppAdmin,
   redeemPromoCode,
@@ -142,6 +145,83 @@ async function main() {
   const denied = fakeClient(errData("forbidden: admin access required"));
   const r3 = await adminListGrants(denied);
   eq("list: refusal not ok, empty", `${r3.ok}:${r3.grants.length}`, "false:0");
+}
+
+/* ---------- admin create promo ---------- */
+{
+  const c = fakeClient(okData("promo-uuid-1"));
+  const r = await adminCreatePromo(c, {
+    code: "INSTA-PROMO-2026", label: "Instagram promo", durationDays: 30,
+    maxRedemptions: 50, perUserLimit: 1, expiresAt: "2026-12-31T23:59:59Z",
+  });
+  eq("promo create: ok", r.ok, true);
+  eq("promo create: id returned", r.promoId, "promo-uuid-1");
+  eq("promo create: rpc name", c.calls[0].fn, "admin_create_promo");
+  eq("promo create: code arg", c.calls[0].args?.p_code, "INSTA-PROMO-2026");
+  eq("promo create: label arg", c.calls[0].args?.p_label, "Instagram promo");
+  eq("promo create: duration arg", c.calls[0].args?.p_duration_days, 30);
+  eq("promo create: cap arg", c.calls[0].args?.p_max_redemptions, 50);
+  eq("promo create: per-user arg", c.calls[0].args?.p_per_user_limit, 1);
+  eq("promo create: expiry arg", c.calls[0].args?.p_expires_at, "2026-12-31T23:59:59Z");
+}
+{
+  const c = fakeClient(okData("promo-uuid-2"));
+  await adminCreatePromo(c, {
+    code: "LAUNCH-KEY-0001", label: null, durationDays: 7,
+    maxRedemptions: null, perUserLimit: 1, expiresAt: null,
+  });
+  eq("promo create: unlimited cap passes null", c.calls[0].args?.p_max_redemptions, null);
+  eq("promo create: no key expiry passes null", c.calls[0].args?.p_expires_at, null);
+}
+{
+  const c = fakeClient(errData("admin_create_promo: code must be 10-64 chars of A-Z, 0-9, dash, underscore"));
+  const r = await adminCreatePromo(c, {
+    code: "bad code!", label: null, durationDays: 30,
+    maxRedemptions: null, perUserLimit: 1, expiresAt: null,
+  });
+  eq("promo create: refusal not ok", r.ok, false);
+  check("promo create: refusal carries server message", (r.error ?? "").includes("code must be 10-64 chars"));
+  const boom = { async rpc() { throw new Error("boom"); } };
+  const r2 = await adminCreatePromo(boom, {
+    code: "LAUNCH-KEY-0001", label: null, durationDays: 30,
+    maxRedemptions: null, perUserLimit: 1, expiresAt: null,
+  });
+  eq("promo create: transport throw collapses to not-ok", r2.ok, false);
+}
+
+/* ---------- admin list promos ---------- */
+{
+  const rows = [{
+    id: "pc1", code_hash: "ab12cd34", label: "Instagram promo", duration_days: 30,
+    expires_at: null, max_redemptions: 50, redeemed_count: 3, per_user_limit: 1,
+    active: true, created_by: "admin-1", created_at: "2026-10-19T00:00:00Z",
+  }];
+  const c = fakeClient(okData(rows));
+  const r = await adminListPromos(c);
+  eq("promo list: ok", r.ok, true);
+  eq("promo list: rpc name", c.calls[0].fn, "admin_list_promos");
+  eq("promo list: rows passed through", r.promos.length, 1);
+  eq("promo list: count surfaced", r.promos[0].redeemed_count, 3);
+  const denied = fakeClient(errData("forbidden: admin access required"));
+  const r2 = await adminListPromos(denied);
+  eq("promo list: refusal not ok, empty", `${r2.ok}:${r2.promos.length}`, "false:0");
+}
+
+/* ---------- admin deactivate promo ---------- */
+{
+  const c = fakeClient(okData(true));
+  const r = await adminDeactivatePromo(c, "pc1");
+  eq("promo deactivate: ok", r.ok, true);
+  eq("promo deactivate: rpc name + arg", `${c.calls[0].fn}:${c.calls[0].args?.p_code_id}`, "admin_deactivate_promo:pc1");
+}
+{
+  const c = fakeClient(okData(false));
+  const r = await adminDeactivatePromo(c, "pc-missing");
+  eq("promo deactivate: no live key -> not ok", r.ok, false);
+  const denied = fakeClient(errData("forbidden: admin access required"));
+  const r2 = await adminDeactivatePromo(denied, "pc1");
+  eq("promo deactivate: rpc error not ok", r2.ok, false);
+  check("promo deactivate: rpc error message surfaced", (r2.error ?? "").includes("forbidden"));
 }
 
 console.log(`=== ACCESS ADMIN RESULT: ${passed} passed, ${failed} failed ===`);

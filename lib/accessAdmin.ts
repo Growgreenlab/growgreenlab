@@ -167,6 +167,107 @@ export async function adminListGrants(
   }
 }
 
+export interface PromoCodeRow {
+  id: string;
+  /** sha-256 of the normalized code — the plaintext is NEVER stored
+   *  and can never be displayed again after creation. */
+  code_hash: string;
+  label: string | null;
+  duration_days: number;
+  /** When the KEY stops being redeemable (null = no key expiry). */
+  expires_at: string | null;
+  /** Redemption cap (null = unlimited). */
+  max_redemptions: number | null;
+  redeemed_count: number;
+  per_user_limit: number;
+  active: boolean;
+  created_by: string | null;
+  created_at: string;
+}
+
+export interface CreatePromoResult {
+  ok: boolean;
+  promoId: string | null;
+  /** Server error message on refusal (admins are trusted callers,
+   *  so unlike redeem these may be specific). */
+  error: string | null;
+}
+
+/** Admin-only: create a promo key. Only the sha-256 of the
+ *  normalized code is stored server-side — the plaintext exists
+ *  solely in this call, so the caller must capture it NOW.
+ *  maxRedemptions null = unlimited; expiresAt null = the key never
+ *  expires (already-redeemed grants still run their own duration). */
+export async function adminCreatePromo(
+  client: RpcClient,
+  args: {
+    code: string;
+    label: string | null;
+    durationDays: number;
+    maxRedemptions: number | null;
+    perUserLimit: number;
+    expiresAt: string | null;
+  },
+): Promise<CreatePromoResult> {
+  try {
+    const { data, error } = await client.rpc("admin_create_promo", {
+      p_code: args.code,
+      p_label: args.label,
+      p_duration_days: args.durationDays,
+      p_max_redemptions: args.maxRedemptions,
+      p_per_user_limit: args.perUserLimit,
+      p_expires_at: args.expiresAt,
+    });
+    if (error) {
+      return { ok: false, promoId: null, error: errorMessage(error) };
+    }
+    return {
+      ok: typeof data === "string" && data.length > 0,
+      promoId: typeof data === "string" ? data : null,
+      error: null,
+    };
+  } catch (e) {
+    return { ok: false, promoId: null, error: errorMessage(e) };
+  }
+}
+
+/** Admin-only: list promo keys, newest first. Non-admins get
+ *  { ok: false } — the RPC refuses. Rows carry only code hashes. */
+export async function adminListPromos(
+  client: RpcClient,
+): Promise<{ ok: boolean; promos: PromoCodeRow[] }> {
+  try {
+    const { data, error } = await client.rpc("admin_list_promos");
+    if (error || !Array.isArray(data)) return { ok: false, promos: [] };
+    return { ok: true, promos: data as PromoCodeRow[] };
+  } catch {
+    return { ok: false, promos: [] };
+  }
+}
+
+export interface DeactivatePromoResult {
+  ok: boolean;
+  error: string | null;
+}
+
+/** Admin-only: deactivate a promo key. Stops NEW redemptions only;
+ *  grants already redeemed keep running to their own expiry. The
+ *  RPC returns true when a live key was deactivated. */
+export async function adminDeactivatePromo(
+  client: RpcClient,
+  codeId: string,
+): Promise<DeactivatePromoResult> {
+  try {
+    const { data, error } = await client.rpc("admin_deactivate_promo", {
+      p_code_id: codeId,
+    });
+    if (error) return { ok: false, error: errorMessage(error) };
+    return { ok: data === true, error: data === true ? null : "not_deactivated" };
+  } catch (e) {
+    return { ok: false, error: errorMessage(e) };
+  }
+}
+
 function errorMessage(e: unknown): string {
   if (e && typeof e === "object" && "message" in e) {
     const m = (e as { message?: unknown }).message;
