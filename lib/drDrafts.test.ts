@@ -251,8 +251,20 @@ seq = 0;
     !computeDrExclusions({ trades: [trade], drafts: [draftRow({ status: "finalized" })], resetCounts: noResets }).has(trade.tradeKey));
   check("11 draft → trade excluded",
     computeDrExclusions({ trades: [trade], drafts: [draftRow({ status: "draft" })], resetCounts: noResets }).has(trade.tradeKey));
-  check("11 no draft → trade included",
+  check("11 attempt with no drafts at all → trade included (pre-drafts-era legacy)",
     !computeDrExclusions({ trades: [trade], drafts: [], resetCounts: noResets }).has(trade.tradeKey));
+  // Missing-draft rule (quota gap fix 2026-10-19): the attempt HAS
+  // drafts, but this cycle matches none — its draft insert was
+  // refused (daily cap) or lost, so the cycle is unfinalized and
+  // must not surface as an uncounted journal entry.
+  const trade2 = { tradeKey: `${SID}:2`, attemptId: ATT };
+  check("11 missing draft for cycle 2 (cycle 1 finalized) → cycle 2 excluded, cycle 1 included",
+    computeDrExclusions({ trades: [trade, trade2], drafts: [draftRow({ status: "finalized" })], resetCounts: noResets }).has(trade2.tradeKey)
+    && !computeDrExclusions({ trades: [trade, trade2], drafts: [draftRow({ status: "finalized" })], resetCounts: noResets }).has(trade.tradeKey));
+  check("11 missing draft for cycle 2 (cycle 1 still draft) → cycle 2 excluded too",
+    computeDrExclusions({ trades: [trade2], drafts: [draftRow({ status: "draft" })], resetCounts: noResets }).has(trade2.tradeKey));
+  check("11 drafts belonging to a DIFFERENT attempt do not trigger the missing-draft rule",
+    !computeDrExclusions({ trades: [trade], drafts: [draftRow({ attemptId: "att-other", draftKey: "dr:att-other:g0:c1" })], resetCounts: noResets }).has(trade.tradeKey));
   check("11 draft matched via finalizedTradeKey (draft) → excluded",
     computeDrExclusions({
       trades: [trade],
@@ -265,10 +277,26 @@ seq = 0;
       drafts: [draftRow({ status: "finalized", finalizedTradeKey: trade.tradeKey })],
       resetCounts: noResets,
     }).has(trade.tradeKey));
-  check("11 superseded earlier-gen draft does NOT exclude final-gen trade with same cycleIndex",
-    !computeDrExclusions({
+  // The superseded earlier-gen draft still does not MATCH the
+  // final-gen trade (different generation) — but under the
+  // missing-draft rule the final-gen cycle has no draft of its own
+  // in a drafts-era attempt, so it is excluded until its own draft
+  // is created (reconcile) and finalized. (Expectation flipped by
+  // the 2026-10-19 quota gap fix: previously the trade leaked into
+  // the journal uncounted.)
+  check("11 superseded earlier-gen draft does not match; final-gen trade with no own draft → excluded (missing-draft rule)",
+    computeDrExclusions({
       trades: [trade],
       drafts: [draftRow({ status: "superseded", resetGeneration: 0, cycleIndex: 1 })],
+      resetCounts: new Map([[ATT, 1]]),
+    }).has(trade.tradeKey));
+  check("11 final-gen trade WITH its own finalized draft (post-reset) → included",
+    !computeDrExclusions({
+      trades: [trade],
+      drafts: [
+        draftRow({ status: "superseded", resetGeneration: 0, cycleIndex: 1 }),
+        draftRow({ id: "d-2", status: "finalized", resetGeneration: 1, cycleIndex: 1, draftKey: draftKeyFor(ATT, 1, 1) }),
+      ],
       resetCounts: new Map([[ATT, 1]]),
     }).has(trade.tradeKey));
   check("11 trade without attemptId is never excluded",

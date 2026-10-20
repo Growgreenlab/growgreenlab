@@ -294,8 +294,24 @@ export function reconcileDrafts(input: {
  * (attempt, final generation, cycle sequence) — the same coordinates
  * the draft was born with. Finalized drafts, superseded drafts (they
  * belong to earlier generations and never match a final-generation
- * trade by coordinates), trades with no draft, and trades with no
- * attempt are all included.
+ * trade by coordinates), trades with no attempt, and trades of an
+ * attempt with NO drafts at all (pre-drafts-era legacy) are included.
+ *
+ * MISSING-DRAFT RULE (quota gap fix, 2026-10-19): when the attempt
+ * HAS drafts but this cycle matches none of them, the cycle's draft
+ * row was never created — its insert was refused (the daily-quota
+ * trigger raises on cycles past the free daily cap, so every cycle
+ * after the cap on a busy day is born draft-less) or the best-effort
+ * writer failed silently. Completion (dr_complete_attempt) consumes
+ * no quota by design, so such a trade used to become a journal entry
+ * at completion with NO monthly_entry ever consumed and no draft to
+ * finalize — the free monthly wall could never fire for it. Under
+ * the finalization-gates-visibility rule it is therefore excluded
+ * like any unfinalized cycle until a draft exists and is finalized;
+ * the completion/journal reconcile passes create the missing draft
+ * (allowCreate for attempts that have drafts), so the trade reaches
+ * Needs Review, finalizes through the quota trigger, and only then
+ * appears — counted exactly once, at finalize.
  */
 export function computeDrExclusions(input: {
   trades: { tradeKey: string; attemptId: string | null }[];
@@ -321,6 +337,13 @@ export function computeDrExclusions(input: {
         rows.find((d) => d.resetGeneration === finalGen && d.cycleIndex === seq) ?? null;
     }
     if (matched && matched.status === "draft") excluded.add(t.tradeKey);
+    // Missing-draft rule (see header): the attempt lives in the
+    // drafts era (it has draft rows) but this cycle has none — its
+    // draft insert was refused or lost, so it is NOT finalized and
+    // must not surface as an (uncounted) journal entry. Excluded
+    // until the reconcile passes create its draft and the user
+    // finalizes it through the quota trigger.
+    if (!matched) excluded.add(t.tradeKey);
   }
   return excluded;
 }

@@ -107,7 +107,12 @@ export default function DrFinalizeConfirm({ summary, onConfirm, onClose, onViewI
               The draft&apos;s review notes, screenshots, fills and plan evidence are preserved exactly. This cannot be undone.
             </p>
             {phase === "error" && err && (
-              <p style={{ fontSize: 13, color: "#f6465d", margin: "0 0 10px" }}>{err}</p>
+              <p style={{ fontSize: 13, color: "#f6465d", margin: "0 0 10px" }}>
+                {err}
+                {err.includes("limit reached") && (
+                  <> <a href="/pricing" className="btn primary" style={{ display: "inline-block", padding: "2px 10px", fontSize: 12.5, textDecoration: "none" }}>Upgrade to Pro</a></>
+                )}
+              </p>
             )}
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <button className="btn primary" onClick={confirm} disabled={phase === "working"}>
