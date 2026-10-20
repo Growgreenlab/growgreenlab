@@ -41,7 +41,11 @@ import {
   newDrFlushState,
   type DrFlushState,
 } from "../../lib/drEventFlush";
-import { parseQuotaError, quotaMessage } from "../../lib/entitlements";
+import {
+  FREE_TRADES_PER_DAY, loadEntitlement, parseQuotaError, quotaMessage,
+  type UsageStatus,
+} from "../../lib/entitlements";
+import { canOpenPosition, quotaCombinedUsed } from "../../lib/quotaGate";
 import {
   reconstructDrAttempt,
   shouldOfferDrResume,
@@ -93,6 +97,7 @@ import {
 import type { GuardThreshold, PositionBaseline, LockoutState } from "../../lib/psychGuard";
 import PsychologyGuardPanel from "../../components/PsychologyGuardPanel";
 import GuestLimitModal from "../../components/GuestLimitModal";
+import UpgradeModal from "../../components/UpgradeModal";
 import {
   GUEST_DAILY_LIMIT,
   getGuestFingerprint,
@@ -749,6 +754,67 @@ function ReplayPageInner() {
     { text: string; tone: "ok" | "warn" } | null
   >(null);
   const drNoticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /* Subscription daily-quota buy gate (2026-10-19): the database
+   * enforces the Free plan's 3-trades/day cap when a trade is
+   * RECORDED (Daily Replay draft insert, simulator session save,
+   * real-trade insert) — too late for the trader mid-session, who
+   * kept executing buys and only lost the SAVE. This gate mirrors
+   * the cap at the moment a NEW position opens (lib/quotaGate), so
+   * the 4th buy never executes and the upgrade modal shows instead.
+   * Signed-in users only; guests keep their separate guest limit,
+   * and the DB triggers remain the authoritative backstop. */
+  const entitlementRef = useRef<UsageStatus | null>(null);
+  /** New positions opened since the last usage_status() refresh. */
+  const quotaOpenedRef = useRef(0);
+  const quotaUserIdRef = useRef<string | null>(null);
+  const [showUpgradeModal, setShowUpgradeModal] = useState(false);
+
+  /** Re-sync the server's daily count (usage_status RPC). Opens not
+   * yet recorded fold back to just the still-open position (0 or 1):
+   * every other trade opened since the last sync is inside
+   * trades_used by now, or was never going to be recorded. Call
+   * ONLY at sync points — session/attempt start (incl. restore and
+   * resume) and after each successful save / draft save. A null
+   * entitlement (billing not live on this database) disables the
+   * gate entirely, matching the dark-by-default read model. */
+  const syncQuotaFromServer = async (): Promise<void> => {
+    if (!isSupabaseConfigured() || !quotaUserIdRef.current) return;
+    const ent = await loadEntitlement(createClient());
+    entitlementRef.current = ent;
+    quotaOpenedRef.current =
+      engineRef.current && engineRef.current.positionQty > 0 ? 1 : 0;
+  };
+
+  /** True when a signed-in Free user has no daily slot for a new open. */
+  const quotaBuyBlocked = (): boolean => {
+    const ent = entitlementRef.current;
+    if (!quotaUserIdRef.current || !ent) return false;
+    return !canOpenPosition({
+      signedIn: true,
+      isPro: ent.is_pro,
+      dailyUsed: ent.trades_used,
+      sessionOpened: quotaOpenedRef.current,
+      dailyLimit: ent.trades_limit,
+    });
+  };
+
+  /** The error line shown (with the modal) when the gate blocks a buy. */
+  const quotaBlockMessage = (): string => {
+    const ent = entitlementRef.current;
+    const limit = ent?.trades_limit ?? FREE_TRADES_PER_DAY;
+    const used = ent
+      ? Math.min(
+          quotaCombinedUsed({
+            signedIn: true, isPro: ent.is_pro,
+            dailyUsed: ent.trades_used,
+            sessionOpened: quotaOpenedRef.current,
+            dailyLimit: ent.trades_limit,
+          }),
+          limit
+        )
+      : limit;
+    return `Daily trade limit reached — ${used} of ${limit} free trades used today. Upgrade to Pro for unlimited trades.`;
+  };
   const [drReviewDraftKey, setDrReviewDraftKey] = useState<string | null>(null);
   /** Draft awaiting finalize confirmation (the shared dialog). */
   const [drFinalizeTarget, setDrFinalizeTarget] = useState<DrDraftRow | null>(null);
@@ -917,6 +983,9 @@ function ReplayPageInner() {
     setSaveMsg(null);
     setDataOpen(false);
     bump();
+    // Quota gate sync point: fresh session, fresh server count.
+    void syncQuotaFromServer();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bump, stopTimer]);
 
   /* ---------------- Daily Replay handlers ---------------- */
@@ -1138,6 +1207,8 @@ function ReplayPageInner() {
       });
       setDrHistoryNote(null);
       setDrPhase("active");
+      // Quota gate sync point: attempt start — fresh server count.
+      void syncQuotaFromServer();
       try {
         localStorage.setItem(
           DAILY_REPLAY_STATE_KEY,
@@ -1437,6 +1508,9 @@ function ReplayPageInner() {
       );
       setDrResume(null);
       setDrPhase("active");
+      // Quota gate sync point: attempt resumed — fresh server count
+      // (a restored open position folds in as the one pending open).
+      void syncQuotaFromServer();
       // The reload gap is part of the history: mark it in the
       // timeline (seq continues from the restored maximum).
       recorder.record(
@@ -1502,6 +1576,10 @@ function ReplayPageInner() {
         setCandles(cs);
         setMeta({ ticker: s.ticker, tradeDate: s.trade_date, source: normalizeReloadedSource(s.source as string), startIndex: s.start_index ?? 0 });
         bump();
+        // Quota gate sync point: restored session — the server
+        // count already holds its saved trades; a still-open
+        // restored position folds in as the one pending open.
+        void syncQuotaFromServer();
       } catch (e) {
         setSaveMsg(e instanceof Error ? e.message : "Failed to load session.");
       } finally {
@@ -1673,6 +1751,11 @@ function ReplayPageInner() {
   const curQty = engForPnl?.positionQty ?? 0;
   if (prevPosQty.current === 0 && curQty > 0) {
     posRealizedBaseline.current = engForPnl?.realizedPnl ?? 0;
+    // Subscription quota: a NEW position just opened — on ANY path
+    // (market buy, limit fill, step/play tick) — and will consume
+    // one daily slot when it is recorded. Adds never reach here
+    // (qty already positive), closes never reach here.
+    if (quotaUserIdRef.current) quotaOpenedRef.current += 1;
   }
   prevPosQty.current = curQty;
   const positionRealized = (engForPnl?.realizedPnl ?? 0) - posRealizedBaseline.current;
@@ -1684,6 +1767,13 @@ function ReplayPageInner() {
   // Ref mirror for use inside the tick-loop closure (which captures initial values).
   const guardUserIdRef = useRef<string | null>(null);
   useEffect(() => { guardUserIdRef.current = guardUserId; }, [guardUserId]);
+  // Quota buy gate: identity mirror + the initial entitlement load
+  // (later refreshes ride the session/save sync points).
+  useEffect(() => {
+    quotaUserIdRef.current = guardUserId;
+    if (guardUserId) void syncQuotaFromServer();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [guardUserId]);
   // Guest trade limit (5/day, guests only).
   const [guestRemaining, setGuestRemaining] = useState<number>(GUEST_DAILY_LIMIT);
   const [showGuestModal, setShowGuestModal] = useState(false);
@@ -1881,6 +1971,14 @@ function ReplayPageInner() {
     if (!eng) return "Load a session first.";
     const isNewPosition = eng.positionQty === 0;
     const isGuest = !guardUserId; // works with or without Supabase (localStorage fallback)
+    // Subscription daily-quota gate (signed-in only): the 4th
+    // new-position buy must not execute — show the upgrade modal
+    // instead. The DB cap at save/draft time remains the backstop;
+    // guests skip this entirely (their gate is below).
+    if (isNewPosition && !isGuest && quotaBuyBlocked()) {
+      setShowUpgradeModal(true);
+      return quotaBlockMessage();
+    }
     // Pre-check: block before consuming if already at limit.
     if (isNewPosition && isGuest) {
       const remaining = await getGuestTradesRemaining(
@@ -1954,6 +2052,13 @@ function ReplayPageInner() {
   const placeLimitErr = (side: "buy" | "sell", qty: number, price: number): string | null => {
     const eng = engineRef.current;
     if (!eng) return "Load a session first.";
+    // Subscription daily-quota gate (signed-in only), mirroring the
+    // guest pre-check below: never even place a new-position limit
+    // buy when no daily slot is left.
+    if (side === "buy" && eng.positionQty === 0 && guardUserIdRef.current && quotaBuyBlocked()) {
+      setShowUpgradeModal(true);
+      return quotaBlockMessage();
+    }
     // Guest limit applies to limit buys too (not just market buys).
     // Note: consumption happens when the limit order FILLS (see fill handling),
     // so we only pre-check here to block placement at the limit.
@@ -2129,6 +2234,10 @@ function ReplayPageInner() {
         await persistBalance(balanceRef.current + delta);
         lastSavedPnlRef.current = pnl;
       }
+      // Quota gate sync point: the save just recorded this
+      // session's new trades server-side — refresh the daily count
+      // so the gate tracks the server, not stale local opens.
+      await syncQuotaFromServer();
       if (!isAutoSave) {
         setSaveMsg("Session saved — find it under My Sessions.");
       } else {
@@ -2704,6 +2813,10 @@ function ReplayPageInner() {
       drFailedPayloadsRef.current.delete(draftKey);
       setDrDraftSaveStates((s) => ({ ...s, [draftKey]: "saved" }));
       showDrDraftNotice({ tone: "ok", text: "Trade closed — draft saved." }, 4000);
+      // Quota gate sync point: the draft insert just consumed a
+      // daily slot server-side — refresh so the next buy gates on
+      // the true count.
+      void syncQuotaFromServer();
       if (!row) return;
       /* Auto-captures: strictly after the saved state above. */
       try {
@@ -3970,6 +4083,15 @@ function ReplayPageInner() {
                   }}
                 >
                   <span>{drDraftNotice.text}</span>
+                  {drDraftNotice.tone === "warn" && drDraftNotice.text.includes("limit reached") && (
+                    <a
+                      href="/pricing"
+                      className="btn primary"
+                      style={{ padding: "1px 8px", fontSize: 11.5, textDecoration: "none" }}
+                    >
+                      Upgrade to Pro
+                    </a>
+                  )}
                   {drDraftNotice.tone === "warn" && (
                     <button
                       className="btn"
@@ -4156,6 +4278,30 @@ function ReplayPageInner() {
               onDismiss={() => setShowGuestModal(false)}
             />
           )}
+
+          {/* Subscription daily-limit modal (buy-time quota gate) */}
+          {showUpgradeModal && (() => {
+            const ent = entitlementRef.current;
+            const limit = ent?.trades_limit ?? FREE_TRADES_PER_DAY;
+            const used = ent
+              ? Math.min(
+                  quotaCombinedUsed({
+                    signedIn: true, isPro: ent.is_pro,
+                    dailyUsed: ent.trades_used,
+                    sessionOpened: quotaOpenedRef.current,
+                    dailyLimit: ent.trades_limit,
+                  }),
+                  limit
+                )
+              : limit;
+            return (
+              <UpgradeModal
+                used={used}
+                limit={limit}
+                onDismiss={() => setShowUpgradeModal(false)}
+              />
+            );
+          })()}
 
           {/* data source popover */}
           {dataOpen && (

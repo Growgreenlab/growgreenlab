@@ -2738,7 +2738,14 @@ function BrokerImportForm({ onSaved }: { onSaved: () => void }) {
           </button>
         </div>
       )}
-      {msg && <p style={{ marginTop: 12, fontSize: 13 }}>{msg}</p>}
+      {msg && (
+        <p style={{ marginTop: 12, fontSize: 13 }}>
+          {msg}
+          {msg.includes("limit reached") && (
+            <> <Link href="/pricing" className="btn primary" style={{ display: "inline-block", padding: "2px 10px", fontSize: 12.5 }}>Upgrade to Pro</Link></>
+          )}
+        </p>
+      )}
     </div>
   );
 }
@@ -3282,7 +3289,14 @@ function RealTradeForm({ onSaved, editing, onCancel, strategies, strategyVersion
         {onCancel && (
           <button className="btn big" onClick={onCancel} disabled={saving} style={{ marginLeft: 8 }}>Cancel</button>
         )}
-        {msg && <span style={{ marginLeft: 12, fontSize: 13 }}>{msg}</span>}
+        {msg && (
+          <span style={{ marginLeft: 12, fontSize: 13 }}>
+            {msg}
+            {msg.includes("limit reached") && (
+              <> <Link href="/pricing" className="btn primary" style={{ display: "inline-block", padding: "2px 10px", fontSize: 12.5 }}>Upgrade to Pro</Link></>
+            )}
+          </span>
+        )}
       </div>
     </div>
   );
