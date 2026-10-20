@@ -785,6 +785,23 @@ function ReplayPageInner() {
       engineRef.current && engineRef.current.positionQty > 0 ? 1 : 0;
   };
 
+  /** Just-in-time entitlement refresh for the buy gate, bounded so
+   *  a slow network can never wedge trading: if the sync points
+   *  (session start / after saves) left the ref empty — first buy
+   *  raced the load, the RPC hiccuped — re-read usage_status()
+   *  right here, at the decision point, and evaluate on the fresh
+   *  value. A timeout or a still-null result falls through to the
+   *  cached evaluation (dark-by-default; the DB cap at save/draft
+   *  time remains the backstop either way). */
+  const refreshQuotaJit = async (ms = 1500): Promise<void> => {
+    try {
+      await Promise.race([
+        syncQuotaFromServer(),
+        new Promise((res) => setTimeout(res, ms)),
+      ]);
+    } catch { /* cached state stands */ }
+  };
+
   /** True when a signed-in Free user has no daily slot for a new open. */
   const quotaBuyBlocked = (): boolean => {
     const ent = entitlementRef.current;
@@ -1975,9 +1992,15 @@ function ReplayPageInner() {
     // new-position buy must not execute — show the upgrade modal
     // instead. The DB cap at save/draft time remains the backstop;
     // guests skip this entirely (their gate is below).
-    if (isNewPosition && !isGuest && quotaBuyBlocked()) {
-      setShowUpgradeModal(true);
-      return quotaBlockMessage();
+    if (isNewPosition && !isGuest) {
+      // Entitlement ref empty (sync raced or RPC failed earlier):
+      // refresh just-in-time so the gate never silently evaluates
+      // on "unknown" when one bounded re-read can settle it.
+      if (!entitlementRef.current) await refreshQuotaJit();
+      if (quotaBuyBlocked()) {
+        setShowUpgradeModal(true);
+        return quotaBlockMessage();
+      }
     }
     // Pre-check: block before consuming if already at limit.
     if (isNewPosition && isGuest) {

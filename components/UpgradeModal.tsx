@@ -7,7 +7,14 @@
  * is the upgrade path: plan summary + a primary action to the
  * pricing page, where the existing checkout flow takes over.
  * Styling mirrors GuestLimitModal (the guest-limit sibling).
+ *
+ * Rendered through a portal to document.body with the highest
+ * z-index in the app: Karandeep's requirement (2026-10-19) is
+ * that this wall appear IN FRONT OF THE CHART, impossible to
+ * miss — no workspace stacking context (chart overlays, sticky
+ * panels, mobile tab layers) may ever trap or cover it.
  */
+import { createPortal } from "react-dom";
 import { FREE_TRADES_PER_DAY } from "../lib/entitlements";
 
 interface Props {
@@ -21,7 +28,7 @@ interface Props {
 export default function UpgradeModal({ used, limit, onDismiss }: Props) {
   const lim = limit ?? FREE_TRADES_PER_DAY;
   const usd = used ?? lim;
-  return (
+  return createPortal(
     <div
       style={{
         position: "fixed",
@@ -31,7 +38,7 @@ export default function UpgradeModal({ used, limit, onDismiss }: Props) {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        zIndex: 1000,
+        zIndex: 2000,
         padding: 16,
       }}
       onClick={onDismiss}
@@ -119,6 +126,7 @@ export default function UpgradeModal({ used, limit, onDismiss }: Props) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
