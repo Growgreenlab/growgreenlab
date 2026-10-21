@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import Header from "./Header";
+import BrandLogo from "./BrandLogo";
 
 const PRODUCT_LINKS: { label: string; href: string; external?: boolean }[] = [
   { label: "Simulator", href: "/replay" },
@@ -36,10 +37,10 @@ export default function SiteChrome({ children }: { children: React.ReactNode }) 
     <>
       <Header />
       <main className="wrap">{children}</main>
-      <footer className="wrap footer ggl-footer">
+      <footer className="wrap footer ggl-footer" data-theme="light">
         <div className="ggl-footer-grid">
           <div className="ggl-footer-brand">
-            <strong>Grow Green Lab</strong>
+            <BrandLogo />
             <p>
               Trade Replay Lab — a trading practice platform. Replay real market
               sessions, journal every trade, and build consistency before real

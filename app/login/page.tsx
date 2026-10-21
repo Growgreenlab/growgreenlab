@@ -112,7 +112,7 @@ function LoginInner() {
   };
 
   return (
-    <div style={{ maxWidth: 440, margin: "40px auto", padding: "0 20px" }}>
+    <div className="p1-auth" data-theme="light" style={{ maxWidth: 440, margin: "40px auto", padding: "0 20px" }}>
       <div className="card">
         {!configured ? (
           <div className="err">
@@ -135,18 +135,8 @@ function LoginInner() {
                 <button
                   key={m}
                   onClick={() => { setMode(m); setError(null); }}
-                  style={{
-                    flex: 1,
-                    padding: "10px",
-                    borderRadius: 8,
-                    border: "1px solid",
-                    borderColor: mode === m ? "#42D879" : "#252D35",
-                    background: mode === m ? "rgba(66,216,121,0.08)" : "transparent",
-                    color: mode === m ? "#F5F6F7" : "#7F8993",
-                    fontWeight: 600,
-                    fontSize: 14,
-                    cursor: "pointer",
-                  }}
+                  className={"auth-tab" + (mode === m ? " is-active" : "")}
+                  aria-pressed={mode === m}
                 >
                   {m === "signin" ? "Sign In" : "Create Account"}
                 </button>
@@ -209,14 +199,14 @@ function LoginInner() {
 
             <p className="hint" style={{ marginTop: 16, textAlign: "center" }}>
               {mode === "magic" ? (
-                <>Prefer a password? <button onClick={() => setMode("signin")} style={{ background: "none", border: "none", color: "#42D879", cursor: "pointer", fontSize: "inherit", padding: 0 }}>Sign in with password</button></>
+                <>Prefer a password? <button onClick={() => setMode("signin")} className="auth-textbtn">Sign in with password</button></>
               ) : (
-                <>No password? <button onClick={() => setMode("magic")} style={{ background: "none", border: "none", color: "#42D879", cursor: "pointer", fontSize: "inherit", padding: 0 }}>Email me a sign-in link</button></>
+                <>No password? <button onClick={() => setMode("magic")} className="auth-textbtn">Email me a sign-in link</button></>
               )}
             </p>
 
             <p className="hint" style={{ marginTop: 8, textAlign: "center" }}>
-              <Link href="/replay" style={{ color: "#7F8993" }}>Continue as guest →</Link>
+              <Link href="/replay" className="auth-guest-link">Continue as guest →</Link>
             </p>
           </>
         )}

@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
 import Script from "next/script";
 import "./globals.css";
+import "./tokens.css";
 import SiteChrome from "../components/SiteChrome";
 
 const inter = Inter({ subsets: ["latin"], display: "swap" });

@@ -1729,3 +1729,487 @@ body.ws-active .footer { display: none; }
 @media (max-width: 760px) {
   .jr-drawer { max-width: 100%; border-left: none; }
 }
+
+/* === UIKIT:BEGIN (redesign Phase 0 — components/ui primitives) ===
+   Additive only: every selector is namespaced .ui-* and inert until
+   a component renders it. All values come from the v2 tokens in
+   app/tokens.css (scoped to [data-theme="light"] / [data-stage]).
+   No hardcoded colors in this section — pinned by
+   lib/designTokens.test.ts. */
+.ui-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--sp-2);
+  min-height: 40px; padding: 0 var(--sp-4);
+  font: inherit; font-size: var(--fs-small); font-weight: 600;
+  border-radius: var(--r-md); border: 1px solid transparent;
+  cursor: pointer; text-decoration: none; white-space: nowrap;
+  background: transparent; color: var(--ink-900);
+}
+.ui-btn:focus-visible { outline: 2px solid var(--accent-500); outline-offset: 2px; }
+.ui-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.ui-btn-primary { background: var(--ink-900); color: var(--surface); }
+.ui-btn-accent { background: var(--accent-600); color: var(--surface); }
+.ui-btn-secondary { background: var(--surface); border-color: var(--border); color: var(--ink-900); }
+.ui-btn-ghost { color: var(--accent-ink); }
+.ui-btn-danger { background: var(--danger); color: var(--surface); }
+.ui-btn-buy { background: var(--up-ink); color: var(--surface); text-transform: uppercase; }
+.ui-btn-sell { background: var(--danger); color: var(--surface); text-transform: uppercase; }
+
+.ui-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-lg); box-shadow: var(--shadow-card);
+  padding: var(--sp-5);
+}
+.ui-card-h { margin-bottom: var(--sp-4); }
+.ui-eyebrow {
+  font-size: var(--fs-micro); font-weight: 700; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--accent-ink); margin: 0 0 var(--sp-1);
+}
+.ui-card-title { font-size: var(--fs-h3); font-weight: 700; color: var(--ink-900); margin: 0; letter-spacing: -0.01em; }
+
+.ui-label {
+  display: block; font-size: var(--fs-small); font-weight: 600;
+  color: var(--ink-700); margin-bottom: var(--sp-1);
+}
+.ui-input, .ui-select {
+  display: block; width: 100%; min-height: 44px;
+  padding: 0 var(--sp-3);
+  font: inherit; font-size: var(--fs-body); color: var(--ink-900);
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.ui-input::placeholder { color: var(--ink-300); }
+.ui-input:focus, .ui-select:focus {
+  outline: 2px solid var(--accent-500); outline-offset: 1px; border-color: var(--accent-500);
+}
+.ui-field-error { font-size: var(--fs-small); color: var(--down-ink); margin-top: var(--sp-1); }
+.ui-input[aria-invalid="true"], .ui-select[aria-invalid="true"] { border-color: var(--down-ink); }
+
+.ui-badge {
+  display: inline-flex; align-items: center; gap: var(--sp-1);
+  padding: 2px var(--sp-2); border-radius: var(--r-pill);
+  font-size: var(--fs-micro); font-weight: 700; letter-spacing: 0.04em;
+  background: var(--surface-2); color: var(--ink-700);
+}
+.ui-badge-pro { background: var(--accent-soft); color: var(--accent-ink); }
+.ui-badge-live { background: var(--banner-success-bg); color: var(--up-ink); }
+
+.ui-banner {
+  border-radius: var(--r-md); padding: var(--sp-3) var(--sp-4);
+  font-size: var(--fs-small); line-height: 1.5;
+  background: var(--surface-2); color: var(--ink-700);
+}
+.ui-banner-info { background: var(--accent-soft); color: var(--accent-ink); }
+.ui-banner-success { background: var(--banner-success-bg); color: var(--up-ink); }
+.ui-banner-danger { background: var(--banner-danger-bg); color: var(--down-ink); }
+.ui-banner-warning { background: var(--banner-warn-bg); color: var(--warn-ink-strong); }
+
+.ui-table { width: 100%; border-collapse: collapse; font-size: var(--fs-small); }
+.ui-table th {
+  text-align: left; font-weight: 600; color: var(--ink-500);
+  padding: var(--sp-2) var(--sp-3); border-bottom: 1px solid var(--border);
+}
+.ui-table td {
+  padding: var(--sp-2) var(--sp-3); color: var(--ink-700);
+  border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums;
+}
+.ui-table tbody tr:hover { background: var(--surface-2); }
+.ui-num-pos { color: var(--up-ink); font-variant-numeric: tabular-nums; }
+.ui-num-neg { color: var(--down-ink); font-variant-numeric: tabular-nums; }
+
+.ui-modal-backdrop {
+  position: fixed; inset: 0; z-index: 2000;
+  background: var(--scrim);
+  display: flex; align-items: center; justify-content: center;
+  padding: var(--sp-4);
+}
+.ui-modal {
+  background: var(--surface); color: var(--ink-700);
+  border: 1px solid var(--border); border-radius: var(--r-lg);
+  box-shadow: var(--shadow-pop);
+  width: 100%; max-width: 480px; max-height: calc(100vh - var(--sp-6));
+  overflow-y: auto; padding: var(--sp-5);
+}
+.ui-modal:focus-visible { outline: 2px solid var(--accent-500); outline-offset: 2px; }
+.ui-modal-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: var(--sp-3); margin-bottom: var(--sp-3);
+}
+.ui-modal-title { font-size: var(--fs-h3); font-weight: 700; color: var(--ink-900); margin: 0; }
+.ui-modal-close {
+  font: inherit; background: transparent; border: none; cursor: pointer;
+  color: var(--ink-500); font-size: var(--fs-h3); line-height: 1; padding: var(--sp-1);
+}
+.ui-modal-close:focus-visible { outline: 2px solid var(--accent-500); outline-offset: 2px; }
+
+/* Specimen swatch labels (design-system page) — light by default,
+   stage ink when rendered inside a .ui-stage region. */
+.ui-spec-name { font-size: var(--fs-micro); font-weight: 700; color: var(--ink-900); margin-top: 6px; }
+.ui-spec-sub { font-size: var(--fs-micro); color: var(--ink-500); }
+.ui-stage .ui-spec-name { color: var(--stage-ink); }
+.ui-stage .ui-spec-sub { color: var(--stage-muted); }
+
+/* The single sanctioned surface for stage tokens in the kit:
+   apply alongside data-stage on the SAME element. */
+.ui-stage {
+  background: var(--stage-bg); color: var(--stage-ink);
+  border: 1px solid var(--stage-border); border-radius: var(--r-lg);
+}
+/* === UIKIT:END === */
+
+/* === PHASE1:BEGIN (redesign Phase 1 — light public surfaces) ===
+   Scoped overrides for the Phase-1 migrated surfaces: shared
+   chrome (header/footer), homepage, /pricing, /login.
+   Every rule hangs off [data-theme="light"], an attribute stamped
+   ONLY on those fully migrated roots (Header, SiteChrome footer,
+   .ggl-home, .p1-pricing, .p1-auth), so un-migrated pages keep
+   their legacy rendering — except header/footer, which are
+   stamped and therefore light on every route BY DESIGN (they are
+   the shared chrome; Phase 1 scope item 1).
+   All colors come from the v2 tokens in app/tokens.css. Layout
+   (padding, grids, widths) is inherited from the legacy rules —
+   this section repaints; it does not re-lay-out. Responsive color
+   exceptions are called out where the legacy media queries also
+   set paint (stagebar). */
+
+/* ---------- full-bleed light page wash ----------
+   The stamped page roots live inside main.wrap (1320px), so a
+   ::before paints the v2 page background across the full viewport
+   width behind them; without it the dark body would frame every
+   light page. Paint-only: no layout boxes change. */
+[data-theme="light"].ggl-home,
+[data-theme="light"].p1-pricing,
+[data-theme="light"].p1-auth,
+[data-theme="light"].ggl-footer {
+  position: relative;
+  z-index: 0;
+}
+/* Page roots: fixed viewport wash (the root's own box may end
+   above the footer on short pages; the fixed wash keeps the
+   whole viewport on the light page background). */
+[data-theme="light"].ggl-home::before,
+[data-theme="light"].p1-pricing::before,
+[data-theme="light"].p1-auth::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+  z-index: -1;
+}
+/* Footer: absolute wash over its own box only — the footer also
+   renders on un-migrated (dark) pages, where a fixed wash would
+   wrongly lighten the whole viewport behind the dark body. */
+[data-theme="light"].ggl-footer::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 100vw;
+  transform: translateX(-50%);
+  background: var(--bg);
+  z-index: -1;
+}
+
+/* ---------- brand lockup (D4: navy wordmark, heritage-green glyph) ---------- */
+[data-theme="light"] .ggl-brand-lockup {
+  display: inline-flex; align-items: center; gap: 9px;
+}
+[data-theme="light"] .ggl-brand-glyph { height: 34px; width: 34px; flex: none; display: block; }
+[data-theme="light"] .ggl-brand-word {
+  font-size: 20px; font-weight: 800; letter-spacing: -0.5px;
+  color: var(--ink-900); white-space: nowrap;
+}
+@media (max-width: 480px) {
+  [data-theme="light"] .ggl-brand-lockup { gap: 7px; }
+  [data-theme="light"] .ggl-brand-glyph { height: 28px; width: 28px; }
+  [data-theme="light"] .ggl-brand-word { font-size: 17px; }
+}
+
+/* ---------- header / nav ---------- */
+[data-theme="light"].ggl-nav {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+[data-theme="light"] .ggl-nav-links a { color: var(--ink-700); }
+[data-theme="light"] .ggl-nav-links a:hover { color: var(--ink-900); }
+[data-theme="light"] .ggl-nav-links a.ggl-nav-active {
+  color: var(--accent-ink);
+  box-shadow: inset 0 -2px 0 0 var(--accent-500);
+}
+[data-theme="light"] .ggl-user-badge { color: var(--ink-500); }
+[data-theme="light"] .ggl-menu-btn {
+  border-color: var(--border); color: var(--ink-900);
+}
+[data-theme="light"] .ggl-mobile-menu { border-top-color: var(--border); }
+[data-theme="light"] .ggl-mobile-menu a:not(.ggl-btn) {
+  color: var(--ink-700); border-bottom-color: var(--border);
+}
+[data-theme="light"] .ggl-mobile-menu a.ggl-nav-active { color: var(--accent-ink); font-weight: 700; }
+
+/* ggl buttons on light (chrome + homepage) — D8: product actions
+   are navy; the lavender accent is reserved for commercial CTAs
+   (Upgrade/Subscribe), which are .ui-btn-accent, not .ggl-btn. */
+[data-theme="light"] .ggl-btn-primary { background: var(--ink-900); color: var(--surface); }
+[data-theme="light"] .ggl-btn-primary:hover { background: var(--ink-700); }
+[data-theme="light"] .ggl-btn-ghost {
+  color: var(--ink-700); border-color: var(--border);
+}
+[data-theme="light"] .ggl-btn-ghost:hover { color: var(--ink-900); border-color: var(--ink-300); }
+[data-theme="light"] .ggl-btn-outline {
+  color: var(--ink-900); border-color: var(--border);
+}
+[data-theme="light"] .ggl-btn-outline:hover {
+  border-color: var(--ink-300); background: var(--surface-2);
+}
+[data-theme="light"] .ggl-btn:focus-visible,
+[data-theme="light"] .ggl-nav-links a:focus-visible,
+[data-theme="light"] .ggl-card-link:focus-visible {
+  outline: 2px solid var(--accent-500); outline-offset: 2px;
+}
+
+/* ---------- footer ---------- */
+[data-theme="light"].ggl-footer {
+  color: var(--ink-500); border-top-color: var(--border);
+}
+[data-theme="light"] .ggl-footer .ggl-brand-glyph { height: 26px; width: 26px; }
+[data-theme="light"] .ggl-footer .ggl-brand-word { font-size: 16px; }
+[data-theme="light"] .ggl-footer-brand p { color: var(--ink-500); }
+[data-theme="light"] .ggl-footer-col h4 { color: var(--ink-500); }
+[data-theme="light"] .ggl-footer-col a { color: var(--ink-700); }
+[data-theme="light"] .ggl-footer-col a:hover { color: var(--accent-ink); }
+[data-theme="light"] .ggl-footer-base {
+  border-top-color: var(--border); color: var(--ink-500);
+}
+
+/* ---------- homepage ---------- */
+[data-theme="light"].ggl-home { background: var(--bg); color: var(--ink-700); }
+[data-theme="light"] .ggl-eyebrow { color: var(--accent-ink); }
+[data-theme="light"] .ggl-rheadline { color: var(--ink-900); }
+[data-theme="light"] .ggl-rsub { color: var(--ink-700); }
+[data-theme="light"] .ggl-rtrust { color: var(--ink-500); }
+[data-theme="light"] .ggl-rhero-chart {
+  border-color: var(--border);
+  box-shadow: 0 24px 60px rgba(18, 40, 75, 0.14);
+}
+[data-theme="light"] .ggl-rhero-order {
+  border-color: var(--border);
+  box-shadow: 0 20px 48px rgba(18, 40, 75, 0.18);
+}
+[data-theme="light"] .ggl-rprocess { border-top-color: var(--border); }
+[data-theme="light"] .ggl-rail-inner { border-left-color: var(--border); }
+[data-theme="light"] .ggl-rail-item { color: var(--ink-500); }
+[data-theme="light"] .ggl-rail-item:hover { color: var(--ink-700); }
+[data-theme="light"] .ggl-rail-item.is-active { color: var(--ink-900); }
+[data-theme="light"] .ggl-rail-dot { background: var(--ink-300); }
+[data-theme="light"] .ggl-rail-item.is-active .ggl-rail-dot { background: var(--accent-500); }
+[data-theme="light"] .ggl-rail-num { color: var(--ink-500); }
+[data-theme="light"] .ggl-rail-item.is-active .ggl-rail-num { color: var(--ink-700); }
+[data-theme="light"] .ggl-rpanel-title { color: var(--ink-900); }
+[data-theme="light"] .ggl-rpanel-lede { color: var(--ink-700); }
+[data-theme="light"] .ggl-rpanel-cols h3,
+[data-theme="light"] .ggl-rpanel-split h3 { color: var(--ink-900); }
+[data-theme="light"] .ggl-rpanel-cols p,
+[data-theme="light"] .ggl-rpanel-split p { color: var(--ink-500); }
+[data-theme="light"] .ggl-rpanel-analyze {
+  background: var(--surface); border-color: var(--border);
+}
+[data-theme="light"] .ggl-rpanel-improve,
+[data-theme="light"] .ggl-rpanel-connect { border-top-color: var(--border); }
+[data-theme="light"] .ggl-benefit h3 { color: var(--ink-900); }
+[data-theme="light"] .ggl-benefit p { color: var(--ink-500); }
+[data-theme="light"] .ggl-benefit-icon { color: var(--accent-500); }
+[data-theme="light"] .ggl-textlink {
+  color: var(--ink-900); border-bottom-color: var(--accent-500);
+}
+[data-theme="light"] .ggl-textlink:hover {
+  color: var(--accent-ink); border-bottom-color: var(--accent-ink);
+}
+[data-theme="light"] .ggl-rpanel-chart,
+[data-theme="light"] .ggl-rpanel-order { border-color: var(--border); }
+[data-theme="light"] .ggl-rpanel-order { box-shadow: 0 20px 48px rgba(18, 40, 75, 0.18); }
+[data-theme="light"] .ggl-analyze-shot {
+  border-color: var(--border);
+  box-shadow: 0 24px 60px rgba(18, 40, 75, 0.14);
+}
+[data-theme="light"] .ggl-manifest-title,
+[data-theme="light"] .ggl-ledger-title { color: var(--ink-700); }
+[data-theme="light"] .ggl-manifest,
+[data-theme="light"] .ggl-defs,
+[data-theme="light"] .ggl-ledger,
+[data-theme="light"] .ggl-directory { border-top-color: var(--border); }
+[data-theme="light"] .ggl-manifest-row,
+[data-theme="light"] .ggl-def-row,
+[data-theme="light"] .ggl-ledger-row,
+[data-theme="light"] .ggl-directory-row { border-bottom-color: var(--border); }
+[data-theme="light"] .ggl-manifest-file { color: var(--ink-900); }
+[data-theme="light"] .ggl-manifest-desc { color: var(--ink-500); }
+[data-theme="light"] .ggl-def-row dt { color: var(--ink-900); }
+[data-theme="light"] .ggl-def-row dd { color: var(--ink-500); }
+[data-theme="light"] .ggl-included { border-top-color: var(--border); }
+[data-theme="light"] .ggl-included summary { color: var(--ink-900); }
+[data-theme="light"] .ggl-included summary::after {
+  border-right-color: var(--ink-500); border-bottom-color: var(--ink-500);
+}
+[data-theme="light"] .ggl-included summary:hover { color: var(--accent-ink); }
+[data-theme="light"] .ggl-included summary:focus-visible {
+  outline: 2px solid var(--accent-500); outline-offset: 3px;
+}
+[data-theme="light"] .ggl-ledger-rule { color: var(--ink-900); }
+[data-theme="light"] .ggl-ledger-detail,
+[data-theme="light"] .ggl-ledger-note { color: var(--ink-500); }
+[data-theme="light"] .ggl-directory-name { color: var(--ink-900); }
+[data-theme="light"] .ggl-directory-note {
+  color: var(--ink-500); border-color: var(--border);
+}
+[data-theme="light"] .ggl-directory-desc { color: var(--ink-500); }
+[data-theme="light"] .ggl-rband { border-top-color: var(--border); }
+[data-theme="light"] .ggl-rband-title { color: var(--ink-900); }
+[data-theme="light"] .ggl-raccess-copy { color: var(--ink-700); }
+[data-theme="light"] .ggl-rfounder { border-top-color: var(--border); }
+[data-theme="light"] .ggl-rfounder-title { color: var(--ink-900); }
+[data-theme="light"] .ggl-rfounder-accent { color: var(--accent-ink); }
+[data-theme="light"] .ggl-rfounder-rule { background: var(--accent-500); }
+[data-theme="light"] .ggl-rfounder-story p { color: var(--ink-700); }
+[data-theme="light"] .ggl-rfounder-story strong { color: var(--ink-900); }
+[data-theme="light"] .ggl-rfounder-closing { color: var(--ink-900); }
+[data-theme="light"] .ggl-rfounder-name { color: var(--ink-900); }
+[data-theme="light"] .ggl-rfounder-role { color: var(--ink-500); }
+[data-theme="light"] .ggl-rail-item:focus-visible,
+[data-theme="light"] .ggl-stagebar-item:focus-visible,
+[data-theme="light"] .ggl-textlink:focus-visible,
+[data-theme="light"] .ggl-footer-col a:focus-visible {
+  outline: 2px solid var(--accent-500); outline-offset: 3px;
+}
+/* Responsive paint exception: the legacy <=900px block gives the
+   mobile stagebar a dark translucent background — repaint it too. */
+@media (max-width: 900px) {
+  [data-theme="light"] .ggl-stagebar {
+    background: var(--surface); border-color: var(--border);
+  }
+  [data-theme="light"] .ggl-stagebar-item { color: var(--ink-500); }
+  [data-theme="light"] .ggl-stagebar-item.is-active {
+    color: var(--accent-ink); background: var(--accent-soft);
+  }
+}
+
+/* ---------- kit-button anchor hover guards ----------
+   The legacy global a:hover paints link text pale emerald and
+   outranks the single-class .ui-btn-* color rules; re-assert the
+   variant text colors for anchors rendered as kit buttons inside
+   migrated subtrees. */
+[data-theme="light"] a.ui-btn-primary:hover,
+[data-theme="light"] a.ui-btn-accent:hover,
+[data-theme="light"] a.ui-btn-danger:hover,
+[data-theme="light"] a.ui-btn-buy:hover,
+[data-theme="light"] a.ui-btn-sell:hover { color: var(--surface); }
+[data-theme="light"] a.ui-btn-secondary:hover { color: var(--ink-900); }
+[data-theme="light"] a.ui-btn-ghost:hover { color: var(--accent-ink); }
+
+/* ---------- /pricing ---------- */
+[data-theme="light"].p1-pricing { color: var(--ink-700); }
+[data-theme="light"].p1-pricing h2 { color: var(--ink-900); letter-spacing: -0.02em; }
+[data-theme="light"] .p1-plan h3 {
+  font-size: var(--fs-h3); font-weight: 700;
+  color: var(--ink-900); letter-spacing: -0.01em;
+}
+[data-theme="light"] .p1-plan .num { color: var(--ink-900); }
+/* Pro Yearly (accent plan): accent-600 border + accent-soft
+   header band (title + price block), per Direction v2 §2.6. */
+[data-theme="light"] .p1-plan-accent { border-color: var(--accent-600); }
+[data-theme="light"] .p1-plan-accent > div:first-child {
+  background: var(--accent-soft);
+  margin: -22px -22px 0;
+  padding: 16px 22px;
+  border-radius: var(--r-lg) var(--r-lg) 0 0;
+}
+
+/* ---------- /login (auth) ----------
+   Legacy form classes (.card/.btn/.input/.field/.err/.ok/.hint)
+   repainted ONLY inside the stamped auth root. */
+[data-theme="light"].p1-auth {
+  color: var(--ink-700);
+  min-height: calc(100vh - 250px);
+}
+[data-theme="light"].p1-auth .card {
+  background: var(--surface);
+  border-color: var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-card);
+}
+[data-theme="light"].p1-auth .card:hover { border-color: var(--border); }
+[data-theme="light"].p1-auth .card h3 { color: var(--ink-900); }
+[data-theme="light"].p1-auth .card h3::after {
+  background: linear-gradient(90deg, var(--border), transparent);
+}
+[data-theme="light"].p1-auth .field label { color: var(--ink-500); }
+[data-theme="light"].p1-auth .input {
+  background: var(--surface);
+  border-color: var(--border);
+  color: var(--ink-900);
+  border-radius: var(--r-md);
+  min-height: 44px;
+}
+[data-theme="light"].p1-auth .input::placeholder { color: var(--ink-300); }
+[data-theme="light"].p1-auth .input:focus {
+  border-color: var(--accent-500);
+  box-shadow: 0 0 0 3px rgba(124, 107, 217, 0.18);
+}
+[data-theme="light"].p1-auth .btn {
+  background: var(--surface);
+  border-color: var(--border);
+  color: var(--ink-900);
+}
+[data-theme="light"].p1-auth .btn:hover:not(:disabled) {
+  border-color: var(--ink-300);
+  box-shadow: var(--shadow-card);
+}
+[data-theme="light"].p1-auth .btn.primary {
+  background: var(--ink-900);
+  border-color: var(--ink-900);
+  color: var(--surface);
+}
+[data-theme="light"].p1-auth .btn.primary:hover:not(:disabled) {
+  background: var(--ink-700);
+  border-color: var(--ink-700);
+  box-shadow: none;
+  transform: none;
+}
+[data-theme="light"].p1-auth .err {
+  background: var(--banner-danger-bg);
+  border-color: rgba(198, 42, 58, 0.35);
+  color: var(--down-ink);
+}
+[data-theme="light"].p1-auth .ok {
+  background: var(--banner-success-bg);
+  border-color: rgba(11, 122, 85, 0.35);
+  color: var(--up-ink);
+}
+[data-theme="light"].p1-auth .hint { color: var(--ink-500); }
+/* Mode tabs (converted from dark-era inline styles in login page) */
+.auth-tab {
+  flex: 1;
+  padding: 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--ink-500);
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+}
+.auth-tab.is-active {
+  border-color: var(--accent-500);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+.auth-tab:focus-visible { outline: 2px solid var(--accent-500); outline-offset: 2px; }
+.auth-textbtn {
+  background: none; border: none; padding: 0;
+  color: var(--accent-ink); cursor: pointer; font-size: inherit;
+}
+.auth-textbtn:hover { text-decoration: underline; }
+.auth-guest-link { color: var(--ink-500); }
+.auth-guest-link:hover { color: var(--accent-ink); }
+/* Pricing reuses the legacy .hint under its stamped root too */
+[data-theme="light"].p1-pricing .hint { color: var(--ink-500); }
+/* === PHASE1:END === */

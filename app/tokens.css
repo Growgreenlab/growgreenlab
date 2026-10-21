@@ -1,0 +1,99 @@
+/* ============================================================
+   Grow Green Lab — Redesign v2 token system (Phase 0)
+   ------------------------------------------------------------
+   ADDITIVE. Nothing in this file affects any existing page:
+   every token below is defined ONLY inside an opt-in scope —
+     [data-theme="light"]  the v2 light platform theme
+     [data-stage]          the bounded dark "chart stage" scope
+                           (Direction v2 §3 / decision D2)
+   Existing pages keep rendering on the legacy tokens in
+   globals.css until later phases migrate them route by route.
+
+   Values: growgreenlab-redesign-direction-v2-2026-10-20.md §2–§3
+   (Palette A — Lavender, per decision D3; spine shared).
+   Import order: layout.tsx imports this AFTER globals.css.
+   ============================================================ */
+
+/* ---------- Light platform theme (Direction v2 §2) ---------- */
+[data-theme="light"] {
+  /* Surfaces & ink — §2.1 */
+  --bg: #FAFAF8;
+  --surface: #FFFFFF;
+  --surface-2: #F4F4F2;
+  --border: #E4E1EA;
+  --ink-900: #12284B;
+  --ink-700: #33415C;
+  --ink-500: #5F6E8A;
+  --ink-300: #9AA5B8;
+
+  /* Accent — Palette A, Lavender (§2.2, D3) */
+  --accent-600: #6558C9;
+  --accent-500: #7C6BD9;
+  --accent-ink: #5749B8;
+  --accent-soft: #EFEDFB;
+
+  /* Trading semantics — the only place green/red live (§2.3) */
+  --chart-up: #089981;
+  --chart-down: #F23645;
+  --up-ink: #0B7A55;
+  --down-ink: #C62A3A;
+  --danger: #C23333;
+  --warn-ink: #96690A;
+  --warn-ink-strong: #8A5E06;
+  --chart-grid: rgba(18, 40, 75, 0.08);
+
+  /* Banner tints (§2.4) */
+  --banner-success-bg: #E7F4EE;
+  --banner-danger-bg: #FBEAEA;
+  --banner-warn-bg: #F7EFDD;
+
+  /* Radii (§2.5 — audit §5.4 scale) */
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-pill: 999px;
+
+  /* Modal/menu scrim (navy ink at 45% — deepens the §2.5 pop shadow step) */
+  --scrim: rgba(18, 40, 75, 0.45);
+
+  /* Elevation (§2.5) — soft and low; borders do most of the work */
+  --shadow-card: 0 1px 2px rgba(18, 40, 75, 0.05), 0 8px 24px rgba(18, 40, 75, 0.06);
+  --shadow-pop: 0 2px 4px rgba(18, 40, 75, 0.07), 0 16px 40px rgba(18, 40, 75, 0.12);
+
+  /* Type & spacing scales (§2.5) */
+  --fs-display: 2.5rem;
+  --fs-h1: 2rem;
+  --fs-h2: 1.5rem;
+  --fs-h3: 1.125rem;
+  --fs-body: 1rem;
+  --fs-small: 0.875rem;
+  --fs-micro: 0.75rem;
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --sp-7: 48px;
+  --sp-8: 64px;
+}
+
+/* ---------- Dark chart stage (Direction v2 §3, D2) ----------
+   Bounded scope: applied to a framed region INSIDE a light page
+   (chart canvas + panes that render on the chart scene). Never a
+   page or route. Stage tokens may only be referenced from inside
+   this scope — pinned by lib/designTokens.test.ts. */
+[data-stage] {
+  --stage-bg: #0F141A;
+  --stage-surface: #161D26;
+  --stage-border: #26303A;
+  --stage-ink: #E6EDF3;
+  --stage-muted: #8B98A5;
+  --stage-grid: rgba(139, 152, 165, 0.14);
+
+  /* On the stage, the platform's existing candle pair is
+     preserved unchanged (§3 stage table / D5 split pair). */
+  --chart-up: #2EBD85;
+  --chart-down: #F6465D;
+  --chart-grid: rgba(139, 152, 165, 0.14);
+}
