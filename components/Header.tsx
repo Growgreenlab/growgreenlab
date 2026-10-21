@@ -1,8 +1,10 @@
 "use client";
 
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { createClient, isSupabaseConfigured } from "../lib/supabaseClient";
+import BrandLogo from "./BrandLogo";
 
 const NAV_LINKS: { label: string; href: string; external?: boolean }[] = [
   { label: "Simulator", href: "/replay" },
@@ -16,19 +18,23 @@ const NAV_LINKS: { label: string; href: string; external?: boolean }[] = [
 function NavLink({
   link,
   onClick,
+  active = false,
 }: {
   link: (typeof NAV_LINKS)[number];
   onClick?: () => void;
+  active?: boolean;
 }) {
+  const cls = active ? "ggl-nav-active" : undefined;
+  const current = active ? ("page" as const) : undefined;
   if (link.external) {
     return (
-      <a href={link.href} onClick={onClick}>
+      <a href={link.href} onClick={onClick} className={cls} aria-current={current}>
         {link.label}
       </a>
     );
   }
   return (
-    <Link href={link.href} onClick={onClick}>
+    <Link href={link.href} onClick={onClick} className={cls} aria-current={current}>
       {link.label}
     </Link>
   );
@@ -39,6 +45,22 @@ export default function Header() {
   const [displayName, setDisplayName] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const configured = isSupabaseConfigured();
+  const pathname = usePathname();
+  const [search, setSearch] = useState("");
+
+  // Active nav state (redesign v2 §2.6). The tab distinction for
+  // /journal vs /journal?tab=analytics is read from the live URL on
+  // the client only — no useSearchParams, so no Suspense bailout
+  // for a component that lives in the root layout.
+  useEffect(() => {
+    setSearch(window.location.search);
+  }, [pathname]);
+  const tab = new URLSearchParams(search).get("tab");
+  const isActive = (href: string) => {
+    if (href === "/journal?tab=analytics") return pathname === "/journal" && tab === "analytics";
+    if (href === "/journal") return pathname === "/journal" && tab !== "analytics";
+    return pathname === href;
+  };
 
   useEffect(() => {
     if (!configured) return;
@@ -61,18 +83,22 @@ export default function Header() {
   };
 
   return (
-    <header className="ggl-nav">
+    <header className="ggl-nav" data-theme="light">
       <div className="ggl-nav-inner">
         <Link href="/" className="ggl-brand" aria-label="Grow Green Lab home">
-          <img src="/growgreenlab-logo.png" alt="Grow Green Lab" className="ggl-brand-logo" />
+          <BrandLogo />
         </Link>
 
         <nav className="ggl-nav-links" aria-label="Primary">
           {NAV_LINKS.map((l) => (
-            <NavLink key={l.href} link={l} />
+            <NavLink key={l.href} link={l} active={isActive(l.href)} />
           ))}
           {email && (
-            <Link href="/sessions">
+            <Link
+              href="/sessions"
+              className={isActive("/sessions") ? "ggl-nav-active" : undefined}
+              aria-current={isActive("/sessions") ? "page" : undefined}
+            >
               My Sessions
             </Link>
           )}
@@ -110,10 +136,15 @@ export default function Header() {
       {menuOpen && (
         <nav className="ggl-mobile-menu" aria-label="Mobile">
           {NAV_LINKS.map((l) => (
-            <NavLink key={l.href} link={l} onClick={() => setMenuOpen(false)} />
+            <NavLink key={l.href} link={l} onClick={() => setMenuOpen(false)} active={isActive(l.href)} />
           ))}
           {email && (
-            <Link href="/sessions" onClick={() => setMenuOpen(false)}>
+            <Link
+              href="/sessions"
+              onClick={() => setMenuOpen(false)}
+              className={isActive("/sessions") ? "ggl-nav-active" : undefined}
+              aria-current={isActive("/sessions") ? "page" : undefined}
+            >
               My Sessions
             </Link>
           )}

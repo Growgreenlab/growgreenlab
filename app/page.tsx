@@ -41,7 +41,7 @@ const ROOMS: { name: string; desc: string; note?: string }[] = [
 
 export default function Home() {
   return (
-    <div className="ggl-home">
+    <div className="ggl-home" data-theme="light">
       {/* ============ HERO ============ */}
       <section className="ggl-rhero">
         <div className="ggl-rhero-inner">
@@ -71,13 +71,13 @@ export default function Home() {
           </div>
           <div className="ggl-rhero-visual" aria-hidden="false">
             <img
-              src="/sim-chart.png"
+              src="/shot-replay.png"
               alt={CHART_ALT}
               className="ggl-rhero-chart"
               loading="eager"
             />
             <img
-              src="/sim-order-panel.png"
+              src="/shot-order.png"
               alt={ORDER_ALT}
               className="ggl-rhero-order"
               loading="eager"
@@ -97,8 +97,8 @@ export default function Home() {
                 Replay the market, candle by candle.
               </h2>
               <div className="ggl-rpanel-visual">
-                <img src="/sim-chart.png" alt={CHART_ALT} className="ggl-rpanel-chart" loading="lazy" />
-                <img src="/sim-order-panel.png" alt={ORDER_ALT} className="ggl-rpanel-order" loading="lazy" />
+                <img src="/shot-replay.png" alt={CHART_ALT} className="ggl-rpanel-chart" loading="lazy" />
+                <img src="/shot-order.png" alt={ORDER_ALT} className="ggl-rpanel-order" loading="lazy" />
               </div>
               <div className="ggl-rpanel-cols ggl-rpanel-cols-1">
                 <div>
@@ -186,7 +186,7 @@ export default function Home() {
                 </div>
                 <figure className="ggl-analyze-figure">
                   <img
-                    src="/journal-analytics.png"
+                    src="/shot-journal.png"
                     alt={JOURNAL_ALT}
                     className="ggl-analyze-shot"
                     loading="lazy"

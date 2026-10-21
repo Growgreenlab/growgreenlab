@@ -17,6 +17,7 @@ import { Suspense, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createClient, isSupabaseConfigured } from "../../lib/supabaseClient";
+import { Banner } from "../../components/ui";
 import { loadEntitlement, type UsageStatus } from "../../lib/entitlements";
 import { startCheckout } from "../../lib/billing";
 import { buildSubscribeNext, createSubscribeIntent, type SubscribeIntent } from "../../lib/subscribeResume";
@@ -103,17 +104,16 @@ function PricingInner() {
     badge?: string,
   ) => (
     <div
-      className="card"
+      className={"ui-card p1-plan" + (accent ? " p1-plan-accent" : "")}
       style={{
         padding: 22, display: "flex", flexDirection: "column", gap: 14, minWidth: 0,
-        border: accent ? "1px solid var(--emerald-bright)" : undefined,
       }}
     >
       <div>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <h3 style={{ margin: 0 }}>{title}</h3>
           {badge && (
-            <span style={{ fontSize: 11.5, fontWeight: 700, color: "#06281c", background: "var(--emerald-bright)", borderRadius: 999, padding: "3px 9px" }}>
+            <span className="ui-badge ui-badge-pro">
               {badge}
             </span>
           )}
@@ -132,31 +132,31 @@ function PricingInner() {
 
   const proCta = (plan: "monthly" | "yearly", label: string) => {
     if (entitlement?.is_pro) {
-      return <Link href="/billing" className="btn" style={{ display: "inline-block" }}>You&rsquo;re on Pro — manage billing</Link>;
+      return <Link href="/billing" className="ui-btn ui-btn-primary">You&rsquo;re on Pro — manage billing</Link>;
     }
     if (!signedIn) {
-      return <Link href={buildSubscribeNext(plan)} className="btn primary" style={{ display: "inline-block" }}>Sign in to subscribe</Link>;
+      return <Link href={buildSubscribeNext(plan)} className="ui-btn ui-btn-accent">Sign in to subscribe</Link>;
     }
     return (
-      <button className="btn primary" disabled={busy !== null} onClick={() => subscribe(plan)}>
+      <button className="ui-btn ui-btn-accent" disabled={busy !== null} onClick={() => subscribe(plan)}>
         {busy === plan ? "Opening checkout…" : label}
       </button>
     );
   };
 
   return (
-    <div className="wrap" style={{ paddingTop: 28, paddingBottom: 48, maxWidth: 1060 }}>
+    <div className="wrap p1-pricing" data-theme="light" style={{ paddingTop: 28, paddingBottom: 48, maxWidth: 1060 }}>
       <h2 style={{ margin: "0 0 6px" }}>Pricing</h2>
       <p className="hint" style={{ margin: "0 0 22px", maxWidth: 640 }}>
         Start free. Upgrade when the caps start costing you trades. Your trade history stays
         fully available on every plan — canceling never locks your journal.
       </p>
-      {notice && <div className="card" style={{ padding: "12px 16px", marginBottom: 16 }}>{notice}</div>}
+      {notice && <Banner tone="info" style={{ marginBottom: 16 }}>{notice}</Banner>}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16 }}>
         {planCard("Free", "$0", "forever", FREE_FEATURES,
           signedIn
             ? <span className="hint">{entitlement?.is_pro ? "Your previous plan" : "Your current plan"}</span>
-            : <Link href="/login" className="btn" style={{ display: "inline-block" }}>Create a free account</Link>)}
+            : <Link href="/login" className="ui-btn ui-btn-secondary">Create a free account</Link>)}
         {planCard("Grow Green Lab Pro — Monthly", "$9.99", "CAD / month", PRO_FEATURES,
           proCta("monthly", "Subscribe — $9.99/mo"), false)}
         {planCard("Grow Green Lab Pro — Yearly", "$99.99", "CAD / year", PRO_FEATURES,
