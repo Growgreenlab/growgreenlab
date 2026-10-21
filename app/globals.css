@@ -1729,3 +1729,129 @@ body.ws-active .footer { display: none; }
 @media (max-width: 760px) {
   .jr-drawer { max-width: 100%; border-left: none; }
 }
+
+/* === UIKIT:BEGIN (redesign Phase 0 — components/ui primitives) ===
+   Additive only: every selector is namespaced .ui-* and inert until
+   a component renders it. All values come from the v2 tokens in
+   app/tokens.css (scoped to [data-theme="light"] / [data-stage]).
+   No hardcoded colors in this section — pinned by
+   lib/designTokens.test.ts. */
+.ui-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--sp-2);
+  min-height: 40px; padding: 0 var(--sp-4);
+  font: inherit; font-size: var(--fs-small); font-weight: 600;
+  border-radius: var(--r-md); border: 1px solid transparent;
+  cursor: pointer; text-decoration: none; white-space: nowrap;
+  background: transparent; color: var(--ink-900);
+}
+.ui-btn:focus-visible { outline: 2px solid var(--accent-500); outline-offset: 2px; }
+.ui-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.ui-btn-primary { background: var(--ink-900); color: var(--surface); }
+.ui-btn-accent { background: var(--accent-600); color: var(--surface); }
+.ui-btn-secondary { background: var(--surface); border-color: var(--border); color: var(--ink-900); }
+.ui-btn-ghost { color: var(--accent-ink); }
+.ui-btn-danger { background: var(--danger); color: var(--surface); }
+.ui-btn-buy { background: var(--up-ink); color: var(--surface); text-transform: uppercase; }
+.ui-btn-sell { background: var(--danger); color: var(--surface); text-transform: uppercase; }
+
+.ui-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-lg); box-shadow: var(--shadow-card);
+  padding: var(--sp-5);
+}
+.ui-card-h { margin-bottom: var(--sp-4); }
+.ui-eyebrow {
+  font-size: var(--fs-micro); font-weight: 700; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--accent-ink); margin: 0 0 var(--sp-1);
+}
+.ui-card-title { font-size: var(--fs-h3); font-weight: 700; color: var(--ink-900); margin: 0; letter-spacing: -0.01em; }
+
+.ui-label {
+  display: block; font-size: var(--fs-small); font-weight: 600;
+  color: var(--ink-700); margin-bottom: var(--sp-1);
+}
+.ui-input, .ui-select {
+  display: block; width: 100%; min-height: 44px;
+  padding: 0 var(--sp-3);
+  font: inherit; font-size: var(--fs-body); color: var(--ink-900);
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.ui-input::placeholder { color: var(--ink-300); }
+.ui-input:focus, .ui-select:focus {
+  outline: 2px solid var(--accent-500); outline-offset: 1px; border-color: var(--accent-500);
+}
+.ui-field-error { font-size: var(--fs-small); color: var(--down-ink); margin-top: var(--sp-1); }
+.ui-input[aria-invalid="true"], .ui-select[aria-invalid="true"] { border-color: var(--down-ink); }
+
+.ui-badge {
+  display: inline-flex; align-items: center; gap: var(--sp-1);
+  padding: 2px var(--sp-2); border-radius: var(--r-pill);
+  font-size: var(--fs-micro); font-weight: 700; letter-spacing: 0.04em;
+  background: var(--surface-2); color: var(--ink-700);
+}
+.ui-badge-pro { background: var(--accent-soft); color: var(--accent-ink); }
+.ui-badge-live { background: var(--banner-success-bg); color: var(--up-ink); }
+
+.ui-banner {
+  border-radius: var(--r-md); padding: var(--sp-3) var(--sp-4);
+  font-size: var(--fs-small); line-height: 1.5;
+  background: var(--surface-2); color: var(--ink-700);
+}
+.ui-banner-info { background: var(--accent-soft); color: var(--accent-ink); }
+.ui-banner-success { background: var(--banner-success-bg); color: var(--up-ink); }
+.ui-banner-danger { background: var(--banner-danger-bg); color: var(--down-ink); }
+.ui-banner-warning { background: var(--banner-warn-bg); color: var(--warn-ink-strong); }
+
+.ui-table { width: 100%; border-collapse: collapse; font-size: var(--fs-small); }
+.ui-table th {
+  text-align: left; font-weight: 600; color: var(--ink-500);
+  padding: var(--sp-2) var(--sp-3); border-bottom: 1px solid var(--border);
+}
+.ui-table td {
+  padding: var(--sp-2) var(--sp-3); color: var(--ink-700);
+  border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums;
+}
+.ui-table tbody tr:hover { background: var(--surface-2); }
+.ui-num-pos { color: var(--up-ink); font-variant-numeric: tabular-nums; }
+.ui-num-neg { color: var(--down-ink); font-variant-numeric: tabular-nums; }
+
+.ui-modal-backdrop {
+  position: fixed; inset: 0; z-index: 2000;
+  background: var(--scrim);
+  display: flex; align-items: center; justify-content: center;
+  padding: var(--sp-4);
+}
+.ui-modal {
+  background: var(--surface); color: var(--ink-700);
+  border: 1px solid var(--border); border-radius: var(--r-lg);
+  box-shadow: var(--shadow-pop);
+  width: 100%; max-width: 480px; max-height: calc(100vh - var(--sp-6));
+  overflow-y: auto; padding: var(--sp-5);
+}
+.ui-modal:focus-visible { outline: 2px solid var(--accent-500); outline-offset: 2px; }
+.ui-modal-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: var(--sp-3); margin-bottom: var(--sp-3);
+}
+.ui-modal-title { font-size: var(--fs-h3); font-weight: 700; color: var(--ink-900); margin: 0; }
+.ui-modal-close {
+  font: inherit; background: transparent; border: none; cursor: pointer;
+  color: var(--ink-500); font-size: var(--fs-h3); line-height: 1; padding: var(--sp-1);
+}
+.ui-modal-close:focus-visible { outline: 2px solid var(--accent-500); outline-offset: 2px; }
+
+/* Specimen swatch labels (design-system page) — light by default,
+   stage ink when rendered inside a .ui-stage region. */
+.ui-spec-name { font-size: var(--fs-micro); font-weight: 700; color: var(--ink-900); margin-top: 6px; }
+.ui-spec-sub { font-size: var(--fs-micro); color: var(--ink-500); }
+.ui-stage .ui-spec-name { color: var(--stage-ink); }
+.ui-stage .ui-spec-sub { color: var(--stage-muted); }
+
+/* The single sanctioned surface for stage tokens in the kit:
+   apply alongside data-stage on the SAME element. */
+.ui-stage {
+  background: var(--stage-bg); color: var(--stage-ink);
+  border: 1px solid var(--stage-border); border-radius: var(--r-lg);
+}
+/* === UIKIT:END === */
