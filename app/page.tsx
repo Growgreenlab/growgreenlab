@@ -1,17 +1,23 @@
 import Link from "next/link";
 
 /**
- * Grow Green Lab homepage — 2.0 conversion redesign (redesign-preview).
+ * Grow Green Lab homepage — 2.0 conversion redesign (redesign-preview),
+ * iteration 2: product-first, built for active stock traders.
  *
- * Structure follows the approved 8-section conversion layout.
+ * The simulator leads: a tightened hero puts the real product visual
+ * immediately under the headline and CTAs. Messaging speaks to US
+ * penny stock traders and the HOD breakout workflow the platform was
+ * built around. Sections: Hero → Problem → Differentiators → three
+ * screenshot feature sections (Replay / Execution / Journal) →
+ * How It Works (5 steps) → Why + Psychology Guard → Founder
+ * (preserved verbatim) → Member Stories → Pricing → Final CTA.
+ *
  * Design identity: Redesign Direction v2 — light platform theme,
  * navy ink, Lavender accent, real product screenshots only.
- * The Founder section below is preserved verbatim from the previous
- * homepage (markup and copy unchanged). Pricing facts are copied
- * from app/pricing/page.tsx — the entitlement source of truth.
- * No testimonials are published yet: TESTIMONIALS is intentionally
- * empty and the section renders an honest placeholder until real
- * member feedback exists. Nothing here invents results or counts.
+ * Pricing facts are copied from app/pricing/page.tsx — the
+ * entitlement source of truth. No testimonials or statistics are
+ * published: TESTIMONIALS is intentionally empty and the section
+ * renders an honest placeholder until real member feedback exists.
  */
 
 const SIM_ALT =
@@ -25,38 +31,33 @@ const JOURNAL_ALT =
 
 const HERO_BENEFITS = [
   "Historical Market Replay",
-  "Realistic Trading Simulation",
+  "HOD Breakout Practice",
+  "Realistic Paper Trading",
+];
+
+const DIFFERENTIATORS = [
+  "Historical Market Replay",
+  "HOD Breakout Practice",
+  "Realistic Paper Trading",
+  "Market Order and Limit Order Execution",
+  "Stop Loss and Take Profit",
+  "Level 2 and Time & Sales",
   "Trading Performance Analytics",
+  "Trading Journal",
 ];
 
-const SHOWCASE_FEATURES: { title: string; detail: string }[] = [
-  { title: "Historical stock replay", detail: "Load a real past session and trade it as if it were live." },
-  { title: "Candle-by-candle playback", detail: "Pause, step and change speed — the session reveals one candle at a time." },
-  { title: "Buy and sell execution", detail: "Simulated market and limit orders that fill at the live tick price." },
-  { title: "Stop-loss and take-profit orders", detail: "Brackets placed with the order, draggable on the chart, triggered tick by tick." },
-  { title: "Chart and indicators", detail: "Candlestick chart with your levels drawn directly on it." },
-  { title: "Level 2 and Time & Sales", detail: "Depth and tape panels where supported, so you can practise reading the book." },
+const REPLAY_FEATURES: { title: string; detail: string }[] = [
+  { title: "Historical Market Replay", detail: "Load a real past session — any ticker, any trading day — and trade it as if it were live." },
+  { title: "HOD Breakout Practice", detail: "Replay high-of-day breakout setups candle by candle, including premarket momentum names, and grade the setup — Clean, Weak, Failed or Anticipation." },
+  { title: "Candle-by-candle playback", detail: "The session reveals one candle at a time. Pause, step, change speed — no peeking at the finished chart." },
+  { title: "Daily Replay", detail: "Lock a starting candle and replay a full day, sealed — future candles are never in your browser before they form." },
 ];
 
-const STEPS: { n: string; title: string; detail: string }[] = [
-  {
-    n: "1",
-    title: "Choose a historical trading session",
-    detail:
-      "Pick a ticker and a past trading day — from the built-in library, Daily Replay, or your own market data.",
-  },
-  {
-    n: "2",
-    title: "Practice your entries, exits and risk management",
-    detail:
-      "Trade the session candle by candle with simulated orders, position sizing and stop-loss / take-profit brackets.",
-  },
-  {
-    n: "3",
-    title: "Review your trades and identify mistakes",
-    detail:
-      "Every trade lands in your journal with its decision timeline, ready for honest review.",
-  },
+const EXECUTION_FEATURES: { title: string; detail: string }[] = [
+  { title: "Market and limit order execution", detail: "Simulated orders fill at the live tick price as each candle builds — limit orders included, with price improvement." },
+  { title: "Stop loss and take profit", detail: "Brackets go on with the order and can be dragged directly on the chart. They trigger tick by tick, exactly as placed." },
+  { title: "Level 2 and Time & Sales", detail: "Depth and tape panels where supported, so you can practise reading the book and the prints — not just the chart." },
+  { title: "Risk decided before the trade", detail: "The risk calculator sizes your position from your stop before you enter — not during the move." },
 ];
 
 const JOURNAL_FEATURES: { title: string; detail: string; pro?: boolean }[] = [
@@ -66,6 +67,14 @@ const JOURNAL_FEATURES: { title: string; detail: string; pro?: boolean }[] = [
   { title: "Mistakes and patterns", detail: "Breakdowns by setup, mistake, emotion and plan adherence surface what repeats." },
   { title: "Strategy performance", detail: "Results grouped by the strategy you actually traded, not just the ticker.", pro: true },
   { title: "AI Edge Analysis Export", detail: "One organised package of trades, analytics and screenshots for deeper AI-assisted review.", pro: true },
+];
+
+const STEPS: { n: string; title: string; detail: string }[] = [
+  { n: "1", title: "Choose a historical session", detail: "Pick a ticker and a past trading day — from the built-in library, Daily Replay, or your own market data." },
+  { n: "2", title: "Replay the market", detail: "Play the session back candle by candle, at your speed, with the tape and Level 2 where supported." },
+  { n: "3", title: "Execute trades", detail: "Enter with market or limit orders, brackets on, sized from your stop." },
+  { n: "4", title: "Analyze performance", detail: "Every trade lands in your journal with its decision timeline, metrics and screenshots." },
+  { n: "5", title: "Improve execution", detail: "Review what actually happened, fix the recurring mistake, and replay it again." },
 ];
 
 const WHY_POINTS: { title: string; detail: string }[] = [
@@ -123,33 +132,25 @@ function CheckIcon() {
 export default function Home() {
   return (
     <div className="ggl-home ggl2" data-theme="light">
-      {/* ============ SECTION 1 — HERO ============ */}
+      {/* ============ HERO — product first ============ */}
       <section className="ggl2-hero">
         <div className="ggl2-hero-inner">
-          <p className="ggl2-eyebrow">TRADING PRACTICE PLATFORM</p>
+          <p className="ggl2-eyebrow">TRADING SIMULATOR FOR ACTIVE STOCK TRADERS</p>
           <h1 className="ggl2-headline">
             Master Your Trading.
             <br />
             Before You Risk Real Money.
           </h1>
           <p className="ggl2-sub">
-            Replay historical market sessions, practice your strategies and analyze
-            your execution. Build consistency through deliberate practice with
-            Grow Green Lab.
+            Replay real historical sessions — including US penny stock momentum
+            and HOD breakouts — execute with simulated orders, brackets and the
+            tape, then analyze every trade in your journal.
           </p>
-          <ul className="ggl2-benefits">
-            {HERO_BENEFITS.map((b) => (
-              <li key={b}>
-                <CheckIcon />
-                <span>{b}</span>
-              </li>
-            ))}
-          </ul>
           <div className="ggl2-cta-row">
             <Link href="/replay" className="ggl2-btn ggl2-btn-primary ggl2-btn-lg">
-              Start Trading Smarter
+              Start a Free Practice Session
             </Link>
-            <a href="#showcase" className="ggl2-btn ggl2-btn-outline ggl2-btn-lg">
+            <a href="#replay" className="ggl2-btn ggl2-btn-outline ggl2-btn-lg">
               Explore the Simulator
             </a>
           </div>
@@ -160,27 +161,75 @@ export default function Home() {
           <figure className="ggl2-hero-visual">
             <img src="/sim-preview.png" alt={SIM_ALT} loading="eager" />
           </figure>
+          <ul className="ggl2-benefits ggl2-benefits-below">
+            {HERO_BENEFITS.map((b) => (
+              <li key={b}>
+                <CheckIcon />
+                <span>{b}</span>
+              </li>
+            ))}
+          </ul>
         </div>
       </section>
 
-      {/* ============ SECTION 2 — PRODUCT SHOWCASE ============ */}
-      <section className="ggl2-section" id="showcase" aria-labelledby="showcase-heading">
+      {/* ============ THE PROBLEM ============ */}
+      <section className="ggl2-section ggl2-problem" aria-labelledby="problem-heading">
+        <div className="ggl2-inner ggl2-problem-inner">
+          <p className="ggl2-eyebrow">THE PROBLEM</p>
+          <h2 id="problem-heading" className="ggl2-h2">
+            Most Traders Pay the Live Market to Teach Them.
+          </h2>
+          <p className="ggl2-problem-copy">
+            Entries, exits, position sizing, discipline under pressure — these are
+            learned through repetition. Learned live, every repetition costs real
+            money, and the fastest, most volatile sessions are the most expensive
+            teachers of all.
+          </p>
+          <p className="ggl2-problem-copy">
+            Grow Green Lab moves that tuition to historical sessions. Replay the
+            exact kind of day you trade — premarket momentum, HOD breakouts,
+            failed follow-through — practise your execution as many times as you
+            need, and review the evidence before real capital is ever on the line.
+          </p>
+          <div className="ggl2-cta-row">
+            <Link href="/replay" className="ggl2-btn ggl2-btn-primary">
+              Practice Before You Pay For It
+            </Link>
+          </div>
+        </div>
+      </section>
+
+      {/* ============ DIFFERENTIATORS ============ */}
+      <section className="ggl2-diffband" aria-label="What Grow Green Lab includes">
         <div className="ggl2-inner">
-          <p className="ggl2-eyebrow">THE SIMULATOR</p>
-          <h2 id="showcase-heading" className="ggl2-h2">
-            Your Trading Practice Environment.
+          <ul className="ggl2-diff-grid">
+            {DIFFERENTIATORS.map((d) => (
+              <li key={d}>
+                <CheckIcon />
+                <span>{d}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </section>
+
+      {/* ============ FEATURE 1 — REPLAY ============ */}
+      <section className="ggl2-section" id="replay" aria-labelledby="replay-heading">
+        <div className="ggl2-inner">
+          <p className="ggl2-eyebrow">HISTORICAL MARKET REPLAY</p>
+          <h2 id="replay-heading" className="ggl2-h2">
+            Replay the Market. Candle by Candle.
           </h2>
           <p className="ggl2-lede">
-            A real historical session, replayed tick by tick — you trade it the way
-            it actually unfolded, not the way the finished chart makes it look.
+            A real historical session, revealed the way it actually unfolded —
+            not the way the finished chart makes it look in hindsight.
           </p>
           <div className="ggl2-showcase">
-            <figure className="ggl2-showcase-visual">
+            <figure className="ggl2-showcase-visual ggl2-showcase-visual-flat">
               <img src="/sim-chart.png" alt={CHART_ALT} className="ggl2-showcase-chart" loading="lazy" />
-              <img src="/shot-order.png" alt={ORDER_ALT} className="ggl2-showcase-order" loading="lazy" />
             </figure>
             <ul className="ggl2-feature-list">
-              {SHOWCASE_FEATURES.map((f) => (
+              {REPLAY_FEATURES.map((f) => (
                 <li key={f.title}>
                   <CheckIcon />
                   <div>
@@ -193,37 +242,49 @@ export default function Home() {
           </div>
           <p className="ggl2-links">
             <Link href="/replay" className="ggl2-textlink">
-              Open the Replay Lab <span aria-hidden="true">→</span>
+              Start a replay session <span aria-hidden="true">→</span>
             </Link>
           </p>
         </div>
       </section>
 
-      {/* ============ SECTION 3 — HOW IT WORKS ============ */}
-      <section className="ggl2-section ggl2-section-alt" aria-labelledby="steps-heading">
+      {/* ============ FEATURE 2 — EXECUTION ============ */}
+      <section className="ggl2-section ggl2-section-alt" aria-labelledby="execution-heading">
         <div className="ggl2-inner">
-          <p className="ggl2-eyebrow">HOW IT WORKS</p>
-          <h2 id="steps-heading" className="ggl2-h2">
-            Three Steps to Better Trading.
+          <p className="ggl2-eyebrow">REALISTIC PAPER TRADING</p>
+          <h2 id="execution-heading" className="ggl2-h2">
+            Execute Like It&rsquo;s Live. Because It Trains Like It Is.
           </h2>
-          <div className="ggl2-steps">
-            {STEPS.map((s) => (
-              <article className="ggl2-step" key={s.n}>
-                <span className="ggl2-step-n" aria-hidden="true">{s.n}</span>
-                <h3>{s.title}</h3>
-                <p>{s.detail}</p>
-              </article>
-            ))}
+          <p className="ggl2-lede">
+            Entries, exits and risk management are skills — and they are practised
+            here with the same order mechanics you use with real money.
+          </p>
+          <div className="ggl2-split">
+            <ul className="ggl2-feature-list">
+              {EXECUTION_FEATURES.map((f) => (
+                <li key={f.title}>
+                  <CheckIcon />
+                  <div>
+                    <h3>{f.title}</h3>
+                    <p>{f.detail}</p>
+                  </div>
+                </li>
+              ))}
+            </ul>
+            <figure className="ggl2-exec-visual">
+              <img src="/shot-replay.png" alt={CHART_ALT} className="ggl2-exec-chart" loading="lazy" />
+              <img src="/shot-order.png" alt={ORDER_ALT} className="ggl2-exec-order" loading="lazy" />
+            </figure>
           </div>
-          <div className="ggl2-cta-row ggl2-cta-center">
-            <Link href="/replay" className="ggl2-btn ggl2-btn-primary ggl2-btn-lg">
-              Start Trading Smarter
+          <div className="ggl2-cta-row">
+            <Link href="/replay" className="ggl2-btn ggl2-btn-primary">
+              Try the Order Panel Free
             </Link>
           </div>
         </div>
       </section>
 
-      {/* ============ SECTION 4 — JOURNAL & ANALYTICS ============ */}
+      {/* ============ FEATURE 3 — JOURNAL & ANALYTICS ============ */}
       <section className="ggl2-section" aria-labelledby="journal-heading">
         <div className="ggl2-inner">
           <p className="ggl2-eyebrow">TRADE JOURNAL &amp; ANALYTICS</p>
@@ -261,8 +322,32 @@ export default function Home() {
         </div>
       </section>
 
-      {/* ============ SECTION 5 — WHY GROW GREEN LAB ============ */}
-      <section className="ggl2-section ggl2-section-alt" aria-labelledby="why-heading">
+      {/* ============ HOW IT WORKS — 5 STEPS ============ */}
+      <section className="ggl2-section ggl2-section-alt" aria-labelledby="steps-heading">
+        <div className="ggl2-inner">
+          <p className="ggl2-eyebrow">HOW IT WORKS</p>
+          <h2 id="steps-heading" className="ggl2-h2">
+            From Historical Session to Better Execution.
+          </h2>
+          <div className="ggl2-steps ggl2-steps-5">
+            {STEPS.map((s) => (
+              <article className="ggl2-step" key={s.n}>
+                <span className="ggl2-step-n" aria-hidden="true">{s.n}</span>
+                <h3>{s.title}</h3>
+                <p>{s.detail}</p>
+              </article>
+            ))}
+          </div>
+          <div className="ggl2-cta-row ggl2-cta-center">
+            <Link href="/replay" className="ggl2-btn ggl2-btn-primary ggl2-btn-lg">
+              Start a Free Practice Session
+            </Link>
+          </div>
+        </div>
+      </section>
+
+      {/* ============ WHY GROW GREEN LAB ============ */}
+      <section className="ggl2-section" aria-labelledby="why-heading">
         <div className="ggl2-inner">
           <p className="ggl2-eyebrow">WHY GROW GREEN LAB</p>
           <h2 id="why-heading" className="ggl2-h2">
@@ -338,7 +423,8 @@ export default function Home() {
         </div>
       </section>
 
-      {/* ============ SECTION 6 — TESTIMONIALS ============ */}
+
+      {/* ============ MEMBER STORIES ============ */}
       <section className="ggl2-section" aria-labelledby="stories-heading">
         <div className="ggl2-inner">
           <p className="ggl2-eyebrow">MEMBER STORIES</p>
@@ -372,7 +458,7 @@ export default function Home() {
         </div>
       </section>
 
-      {/* ============ SECTION 7 — PRICING ============ */}
+      {/* ============ PRICING ============ */}
       <section className="ggl2-section ggl2-section-alt" id="pricing" aria-labelledby="pricing-heading">
         <div className="ggl2-inner">
           <p className="ggl2-eyebrow">PRICING</p>
@@ -431,7 +517,7 @@ export default function Home() {
         </div>
       </section>
 
-      {/* ============ SECTION 8 — FINAL CTA ============ */}
+      {/* ============ FINAL CTA ============ */}
       <section className="ggl2-final" aria-labelledby="final-heading">
         <div className="ggl2-final-inner">
           <h2 id="final-heading" className="ggl2-final-title">
@@ -442,7 +528,7 @@ export default function Home() {
             data-driven feedback.
           </p>
           <Link href="/replay" className="ggl2-btn ggl2-btn-light ggl2-btn-lg">
-            Start Practicing Today
+            Start a Free Practice Session
           </Link>
           <p className="ggl2-final-note">
             Free as a guest — no account, no card, no install.
